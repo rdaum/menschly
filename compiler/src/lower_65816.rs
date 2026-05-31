@@ -2,10 +2,15 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{Abi, Address, Const, IrInst, Module, Routine, RoutineKind, Value, Width};
+use crate::optimize_65816::optimize_module;
 use crate::storage::{apply_storage, assign_storage, StorageAssignment};
 use crate::target_65816::{AsmInst, AsmModule, AsmRoutine, Immediate, Mode, Operand, Symbol};
 
 pub fn lower_module(module: &Module) -> Result<AsmModule, LowerError> {
+    Ok(optimize_module(&lower_module_unoptimized(module)?))
+}
+
+fn lower_module_unoptimized(module: &Module) -> Result<AsmModule, LowerError> {
     let mut out = AsmModule::new(module.name.clone());
     for routine in &module.routines {
         out.routines.push(lower_routine(routine)?);
@@ -18,7 +23,7 @@ pub fn lower_module_with_storage(
 ) -> Result<(AsmModule, StorageAssignment), LowerError> {
     let assignment = assign_storage(module);
     let assigned = apply_storage(module, &assignment);
-    let mut lowered = lower_module(&assigned)?;
+    let mut lowered = lower_module_unoptimized(&assigned)?;
     let direct_symbols = assignment
         .routines
         .iter()
@@ -34,7 +39,7 @@ pub fn lower_module_with_storage(
         .into_iter()
         .map(|(name, size)| crate::target_65816::DirectSymbol { name, size })
         .collect();
-    Ok((lowered, assignment))
+    Ok((optimize_module(&lowered), assignment))
 }
 
 fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
@@ -256,3 +261,67 @@ impl fmt::Display for LowerError {
 }
 
 impl std::error::Error for LowerError {}
+
+#[cfg(test)]
+mod tests {
+    use crate::ir::{Address, IrInst, Module, Routine, Storage, Type, Value, Width};
+    use crate::target_65816::{AsmInst, Operand, Symbol};
+
+    use super::lower_module;
+
+    #[test]
+    fn lowers_near_pointer_load_through_direct_slot() {
+        let module = Module::new("near_ptr").with_routine(
+            Routine::procedure("near_ptr")
+                .with_local(crate::ir::Local::new(
+                    "ptr",
+                    Type::near_ptr(Type::U8),
+                    Storage::Direct,
+                ))
+                .with_body(vec![
+                    IrInst::Load {
+                        width: Width::Byte,
+                        dst: Value::Accumulator,
+                        addr: Address::NearPtr(Value::Direct("ptr".to_owned())),
+                    },
+                    IrInst::Return,
+                ]),
+        );
+
+        let lowered = lower_module(&module).unwrap();
+
+        assert!(lowered.routines[0]
+            .insts
+            .contains(&AsmInst::Lda(Operand::IndirectDirect(Symbol::Named(
+                "ptr".to_owned()
+            )))));
+    }
+
+    #[test]
+    fn lowers_far_pointer_load_through_direct_slot() {
+        let module = Module::new("far_ptr").with_routine(
+            Routine::procedure("far_ptr")
+                .with_local(crate::ir::Local::new(
+                    "ptr",
+                    Type::far_ptr(Type::U8),
+                    Storage::Direct,
+                ))
+                .with_body(vec![
+                    IrInst::Load {
+                        width: Width::Byte,
+                        dst: Value::Accumulator,
+                        addr: Address::FarPtr(Value::Direct("ptr".to_owned())),
+                    },
+                    IrInst::Return,
+                ]),
+        );
+
+        let lowered = lower_module(&module).unwrap();
+
+        assert!(lowered.routines[0]
+            .insts
+            .contains(&AsmInst::Lda(Operand::IndirectLongDirect(Symbol::Named(
+                "ptr".to_owned()
+            )))));
+    }
+}

@@ -72,6 +72,10 @@ fn emit_inst(inst: &AsmInst) -> String {
         AsmInst::Sec => "sec".to_owned(),
         AsmInst::Adc(operand) => one_operand("adc", operand),
         AsmInst::Sbc(operand) => one_operand("sbc", operand),
+        AsmInst::Xba => "xba".to_owned(),
+        AsmInst::Pha => "pha".to_owned(),
+        AsmInst::Pea(symbol) => format!("pea {}", emit_symbol(symbol)),
+        AsmInst::Per(label) => branch("per", label),
         AsmInst::Inc(operand) => one_operand("inc", operand),
         AsmInst::Dec(operand) => one_operand("dec", operand),
         AsmInst::Cmp(operand) => one_operand("cmp", operand),
@@ -79,6 +83,7 @@ fn emit_inst(inst: &AsmInst) -> String {
         AsmInst::Beq(label) => branch("beq", label),
         AsmInst::Bne(label) => branch("bne", label),
         AsmInst::Bra(label) => branch("bra", label),
+        AsmInst::Brl(label) => branch("brl", label),
         AsmInst::Jsr(label) => branch("jsr", label),
         AsmInst::Jsl(label) => branch("jsl", label),
         AsmInst::Rts => "rts".to_owned(),
@@ -134,6 +139,7 @@ fn emit_symbol(symbol: &Symbol) -> String {
 mod tests {
     use crate::fixtures;
     use crate::lower_65816::lower_module;
+    use crate::target_65816::{AsmInst, AsmModule, AsmRoutine, Symbol};
 
     use super::emit_module;
 
@@ -183,5 +189,25 @@ mod tests {
         assert!(asm.contains(".segment \"ZEROPAGE\"\n"));
         assert!(asm.contains("__dp_direct_local_store_local_tmp: .res 1\n"));
         assert!(asm.contains("\tsta __dp_direct_local_store_local_tmp\n"));
+    }
+
+    #[test]
+    fn emits_native_65816_stack_and_branch_forms() {
+        let module = AsmModule::new("native_forms").with_routine(
+            AsmRoutine::new("native_forms").with_insts(vec![
+                AsmInst::Xba,
+                AsmInst::Pha,
+                AsmInst::Pea(Symbol::Address(0x1234)),
+                AsmInst::Per("nearby".to_owned()),
+                AsmInst::Brl("farther".to_owned()),
+            ]),
+        );
+        let asm = emit_module(&module);
+
+        assert!(asm.contains("\txba\n"));
+        assert!(asm.contains("\tpha\n"));
+        assert!(asm.contains("\tpea $1234\n"));
+        assert!(asm.contains("\tper nearby\n"));
+        assert!(asm.contains("\tbrl farther\n"));
     }
 }
