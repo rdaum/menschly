@@ -431,6 +431,34 @@ fn generated_frontend_reentrant_stack_word_parameter_call_runs() {
 }
 
 #[test]
+fn generated_frontend_reentrant_stack_local_call_runs() {
+    let binary = assemble_source_fixture(
+        "frontend-reentrant-stack-local-call",
+        "
+        module ReentrantLocalCallDemo
+        fixed($04000e) volatile var byte_out: u8
+
+        export far procedure main()
+            work('A')
+            byte_out = byte_out + 1
+            return
+        end
+
+        reentrant procedure work(a: u8)
+            var tmp: u8
+            tmp = a + 1
+            byte_out = tmp
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x04000e), b'C');
+}
+
+#[test]
 fn generated_frontend_application_result_program_runs() {
     let binary = assemble_source_fixture(
         "frontend-application-result",

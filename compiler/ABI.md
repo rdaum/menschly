@@ -41,6 +41,22 @@ order before `jsr`, the callee reads them with stack-relative addressing, and
 the caller removes the argument bytes after the routine returns. This currently
 supports `u8`, `i8`, `u16`, and `i16` procedure parameters.
 
+Reentrant routines also allocate stack storage for default/`stack` locals. On
+entry, the callee subtracts the local frame size from `S`; before every return,
+it adds the same byte count back. Locals are addressed from the adjusted stack
+pointer starting at `$01,s`. Parameters remain above the return address and are
+shifted upward by the local frame size: the first parameter is at
+`frame_size + 3,s`.
+
+The stack frame shape during the routine body is:
+
+```text
+$01,s .. $frame_size,s       local frame bytes
+$(frame_size + 1),s          return address low byte
+$(frame_size + 2),s          return address high byte
+$(frame_size + 3),s ...      parameters in declaration order
+```
+
 ## Interrupts
 
 Interrupt handlers must preserve every register state they clobber unless the

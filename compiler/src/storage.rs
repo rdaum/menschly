@@ -61,6 +61,7 @@ pub struct RoutineStorage {
     pub direct_slots: Vec<DirectSlot>,
     pub static_locals: Vec<StaticLocal>,
     pub stack_slots: Vec<StackSlot>,
+    pub stack_frame_bytes: u16,
     bindings: BTreeMap<BindingKey, Location>,
 }
 
@@ -146,6 +147,7 @@ pub fn apply_storage(module: &Module, assignment: &StorageAssignment) -> Module 
                 .iter()
                 .map(|inst| rewrite_inst(inst, layout))
                 .collect();
+            routine.stack_frame_bytes = layout.stack_frame_bytes;
             routine
         })
         .collect();
@@ -170,29 +172,30 @@ fn assign_routine(routine: &Routine, allocator: &mut DirectAllocator) -> Routine
         direct_slots: Vec::new(),
         static_locals: Vec::new(),
         stack_slots: Vec::new(),
+        stack_frame_bytes: 0,
         bindings: BTreeMap::new(),
     };
 
-    assign_params(routine, allocator, &mut out);
-    assign_locals(routine, allocator, &mut out);
+    if matches!(routine.abi, Abi::Reentrant) {
+        assign_locals(routine, allocator, &mut out);
+        assign_stack_params(routine, &mut out);
+    } else {
+        assign_params(routine, allocator, &mut out);
+        assign_locals(routine, allocator, &mut out);
+    }
     assign_scratch_temps(routine, allocator, &mut out);
 
     out
 }
 
 fn assign_params(routine: &Routine, allocator: &mut DirectAllocator, out: &mut RoutineStorage) {
-    if matches!(routine.abi, Abi::Reentrant) {
-        assign_stack_params(routine, out);
-        return;
-    }
-
     for param in &routine.params {
         allocate_direct_param(routine, param, allocator, out);
     }
 }
 
 fn assign_stack_params(routine: &Routine, out: &mut RoutineStorage) {
-    let mut stack_offset = 3;
+    let mut stack_offset = out.stack_frame_bytes + 3;
     for param in &routine.params {
         let size = param.ty.size_bytes();
         out.bindings.insert(
@@ -212,7 +215,7 @@ fn assign_stack_params(routine: &Routine, out: &mut RoutineStorage) {
 }
 
 fn assign_locals(routine: &Routine, allocator: &mut DirectAllocator, out: &mut RoutineStorage) {
-    let mut stack_offset = 0;
+    let mut stack_offset = 1;
 
     for local in &routine.locals {
         match local.storage {
@@ -264,6 +267,7 @@ fn assign_locals(routine: &Routine, allocator: &mut DirectAllocator, out: &mut R
                     size,
                 });
                 stack_offset += size;
+                out.stack_frame_bytes += size;
             }
             Storage::Scratch | Storage::Far | Storage::Bank(_) => {}
         }
@@ -719,8 +723,9 @@ mod tests {
 
         assert!(matches!(
             routine.location(BindingKey::Local("pos".to_owned())),
-            Some(Location::Stack { offset: 0, size: 2 })
+            Some(Location::Stack { offset: 1, size: 2 })
         ));
+        assert_eq!(routine.stack_frame_bytes, 2);
     }
 
     #[test]

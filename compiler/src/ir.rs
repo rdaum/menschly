@@ -125,6 +125,7 @@ pub struct Routine {
     pub abi: Abi,
     pub params: Vec<Param>,
     pub locals: Vec<Local>,
+    pub stack_frame_bytes: u16,
     pub body: Vec<IrInst>,
 }
 
@@ -137,6 +138,7 @@ impl Routine {
             abi: Abi::Internal,
             params: Vec::new(),
             locals: Vec::new(),
+            stack_frame_bytes: 0,
             body: Vec::new(),
         }
     }
@@ -149,6 +151,7 @@ impl Routine {
             abi: Abi::Internal,
             params: Vec::new(),
             locals: Vec::new(),
+            stack_frame_bytes: 0,
             body: Vec::new(),
         }
     }

@@ -162,6 +162,12 @@ fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
     let mut out = AsmRoutine::new(routine.name.clone());
     out.export = routine.export;
 
+    emit_stack_frame_adjust(
+        &mut out.insts,
+        routine.stack_frame_bytes,
+        StackFrameOp::Allocate,
+    );
+
     for inst in &routine.body {
         lower_inst(routine, inst, &mut out.insts)?;
     }
@@ -299,7 +305,10 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                 out.push(AsmInst::Tcs);
             }
         }
-        IrInst::Return => out.push(return_inst(routine)),
+        IrInst::Return => {
+            emit_stack_frame_adjust(out, routine.stack_frame_bytes, StackFrameOp::Release);
+            out.push(return_inst(routine));
+        }
         IrInst::ReturnValue(value) => {
             if let RoutineKind::Function { result } = &routine.kind {
                 set_mode_for_width(out, width_for_type(result)?);
@@ -307,11 +316,38 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             if !matches!(value, Value::Accumulator) {
                 load_value_to_a(out, value)?;
             }
+            emit_stack_frame_adjust(out, routine.stack_frame_bytes, StackFrameOp::Release);
             out.push(return_inst(routine));
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StackFrameOp {
+    Allocate,
+    Release,
+}
+
+fn emit_stack_frame_adjust(out: &mut Vec<AsmInst>, bytes: u16, op: StackFrameOp) {
+    if bytes == 0 {
+        return;
+    }
+
+    out.push(AsmInst::Mode(Mode::Acc16Index16));
+    out.push(AsmInst::Tsc);
+    match op {
+        StackFrameOp::Allocate => {
+            out.push(AsmInst::Sec);
+            out.push(AsmInst::Sbc(Operand::Immediate(Immediate::Word(bytes))));
+        }
+        StackFrameOp::Release => {
+            out.push(AsmInst::Clc);
+            out.push(AsmInst::Adc(Operand::Immediate(Immediate::Word(bytes))));
+        }
+    }
+    out.push(AsmInst::Tcs);
 }
 
 fn return_inst(routine: &Routine) -> AsmInst {

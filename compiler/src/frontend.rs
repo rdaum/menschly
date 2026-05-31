@@ -1284,6 +1284,7 @@ impl Lowerer {
                     storage: local.storage,
                 })
                 .collect(),
+            stack_frame_bytes: 0,
             body: Vec::new(),
         };
 
