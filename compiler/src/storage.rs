@@ -585,6 +585,8 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
         | IrInst::Branch { .. }
         | IrInst::BranchIfEqual { .. }
         | IrInst::BranchIfNotEqual { .. }
+        | IrInst::BranchIfCarrySet { .. }
+        | IrInst::BranchIfCarryClear { .. }
         | IrInst::CallProcedure { .. }
         | IrInst::CleanupStack { .. }
         | IrInst::Return => {}

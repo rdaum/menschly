@@ -438,6 +438,12 @@ pub enum IrInst {
     BranchIfNotEqual {
         target: Label,
     },
+    BranchIfCarrySet {
+        target: Label,
+    },
+    BranchIfCarryClear {
+        target: Label,
+    },
     Push {
         width: Width,
         value: Value,

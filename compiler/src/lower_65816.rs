@@ -341,6 +341,8 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
         }
         IrInst::BranchIfEqual { target } => out.push(long_branch_if_equal(target)),
         IrInst::BranchIfNotEqual { target } => out.push(long_branch_if_not_equal(target)),
+        IrInst::BranchIfCarrySet { target } => out.push(long_branch_if_carry_set(target)),
+        IrInst::BranchIfCarryClear { target } => out.push(long_branch_if_carry_clear(target)),
         IrInst::Push { width, value } => {
             set_mode_for_width(out, *width);
             load_value_to_a(out, value)?;
@@ -419,6 +421,14 @@ fn long_branch_if_equal(target: &Label) -> AsmInst {
 
 fn long_branch_if_not_equal(target: &Label) -> AsmInst {
     AsmInst::Raw(format!("beq :+\n\tbrl {}\n:", target))
+}
+
+fn long_branch_if_carry_set(target: &Label) -> AsmInst {
+    AsmInst::Raw(format!("bcc :+\n\tbrl {}\n:", target))
+}
+
+fn long_branch_if_carry_clear(target: &Label) -> AsmInst {
+    AsmInst::Raw(format!("bcs :+\n\tbrl {}\n:", target))
 }
 
 fn emit_return_sequence(routine: &Routine, out: &mut Vec<AsmInst>) {

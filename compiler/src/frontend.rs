@@ -152,6 +152,10 @@ pub struct CondCompare {
 pub enum CondOp {
     Eq,
     Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +213,10 @@ enum TokenKind {
     Plus,
     Minus,
     Amp,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
     Equal,
     EqualEqual,
     BangEqual,
@@ -248,6 +256,22 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             '+' => out.push(token(TokenKind::Plus, offset)),
             '-' => out.push(token(TokenKind::Minus, offset)),
             '&' => out.push(token(TokenKind::Amp, offset)),
+            '<' => {
+                if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    out.push(token(TokenKind::LessEqual, offset));
+                } else {
+                    out.push(token(TokenKind::Less, offset));
+                }
+            }
+            '>' => {
+                if matches!(chars.peek(), Some((_, '='))) {
+                    chars.next();
+                    out.push(token(TokenKind::GreaterEqual, offset));
+                } else {
+                    out.push(token(TokenKind::Greater, offset));
+                }
+            }
             '=' => {
                 if matches!(chars.peek(), Some((_, '='))) {
                     chars.next();
@@ -1008,8 +1032,16 @@ impl Parser {
             CondOp::Eq
         } else if self.take(TokenKind::BangEqual) {
             CondOp::Ne
+        } else if self.take(TokenKind::LessEqual) {
+            CondOp::Le
+        } else if self.take(TokenKind::Less) {
+            CondOp::Lt
+        } else if self.take(TokenKind::GreaterEqual) {
+            CondOp::Ge
+        } else if self.take(TokenKind::Greater) {
+            CondOp::Gt
         } else {
-            return Err(self.parse_error("expected == or !="));
+            return Err(self.parse_error("expected comparison operator"));
         };
         let rhs = self.parse_expr()?;
         Ok(Cond::Compare(CondCompare { lhs, op, rhs }))
@@ -1793,11 +1825,42 @@ impl<'a> RoutineLowerer<'a> {
         };
         let rhs = self.expr_value(&cond.rhs, &lhs_ty)?;
         self.body.push(IrInst::Compare { width, lhs, rhs });
-        self.body.push(match (cond.op, branch_when_true) {
-            (CondOp::Eq, true) | (CondOp::Ne, false) => IrInst::BranchIfEqual { target },
-            (CondOp::Ne, true) | (CondOp::Eq, false) => IrInst::BranchIfNotEqual { target },
-        });
+        self.lower_compare_result_branch(cond.op, target, branch_when_true);
         Ok(())
+    }
+
+    fn lower_compare_result_branch(&mut self, op: CondOp, target: Label, branch_when_true: bool) {
+        match (op, branch_when_true) {
+            (CondOp::Eq, true) | (CondOp::Ne, false) => {
+                self.body.push(IrInst::BranchIfEqual { target });
+            }
+            (CondOp::Ne, true) | (CondOp::Eq, false) => {
+                self.body.push(IrInst::BranchIfNotEqual { target });
+            }
+            (CondOp::Lt, true) | (CondOp::Ge, false) => {
+                self.body.push(IrInst::BranchIfCarryClear { target });
+            }
+            (CondOp::Ge, true) | (CondOp::Lt, false) => {
+                self.body.push(IrInst::BranchIfCarrySet { target });
+            }
+            (CondOp::Gt, true) | (CondOp::Le, false) => {
+                let skip = self.parent.label("compare_skip");
+                self.body.push(IrInst::BranchIfCarryClear {
+                    target: skip.clone(),
+                });
+                self.body.push(IrInst::BranchIfEqual {
+                    target: skip.clone(),
+                });
+                self.body.push(IrInst::Branch { target });
+                self.body.push(IrInst::Label(skip));
+            }
+            (CondOp::Le, true) | (CondOp::Gt, false) => {
+                self.body.push(IrInst::BranchIfCarryClear {
+                    target: target.clone(),
+                });
+                self.body.push(IrInst::BranchIfEqual { target });
+            }
+        }
     }
 
     fn lower_expr_to(
@@ -2481,7 +2544,7 @@ mod tests {
                 var a: u8
                 var b: u8
                 var out: u8
-                if a == 1 and b != 2 or out == 3
+                if a == 1 and b != 2 or out >= 3
                     out = 1
                 else
                     out = 0
@@ -2501,7 +2564,10 @@ mod tests {
             body.iter()
                 .filter(|inst| matches!(
                     inst,
-                    IrInst::BranchIfEqual { .. } | IrInst::BranchIfNotEqual { .. }
+                    IrInst::BranchIfEqual { .. }
+                        | IrInst::BranchIfNotEqual { .. }
+                        | IrInst::BranchIfCarrySet { .. }
+                        | IrInst::BranchIfCarryClear { .. }
                 ))
                 .count()
                 >= 3

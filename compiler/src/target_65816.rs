@@ -183,6 +183,8 @@ pub enum AsmInst {
     Cpx(Operand),
     Beq(String),
     Bne(String),
+    Bcc(String),
+    Bcs(String),
     Bra(String),
     Brl(String),
     Jsr(String),

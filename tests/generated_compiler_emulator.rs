@@ -323,6 +323,44 @@ fn generated_frontend_fixed_volatile_io_program_runs() {
 }
 
 #[test]
+fn generated_frontend_relational_conditions_run() {
+    let binary = assemble_source_fixture(
+        "frontend-relational-conditions",
+        "
+        module RelationalConditionsDemo
+        fixed($040006) volatile var byte_out: u8
+        fixed($040008) volatile var word_out: u16
+
+        export far procedure main()
+            var x: u8
+            var y: u16
+            x = 3
+            y = 1000
+            if x < 4
+                byte_out = byte_out + 1
+            end
+            if x <= 3
+                byte_out = byte_out + 2
+            end
+            if y > 999
+                word_out = word_out + 4
+            end
+            if y >= 1000
+                word_out = word_out + 8
+            end
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x040006), 3);
+    assert_eq!(memory.byte(0x040008), 12);
+    assert_eq!(memory.byte(0x040009), 0);
+}
+
+#[test]
 fn generated_frontend_parameter_call_runs() {
     let binary = assemble_source_fixture(
         "frontend-parameter-call",

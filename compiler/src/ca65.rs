@@ -243,6 +243,8 @@ fn emit_inst(inst: &AsmInst) -> String {
         AsmInst::Cpx(operand) => one_operand("cpx", operand),
         AsmInst::Beq(label) => branch("beq", label),
         AsmInst::Bne(label) => branch("bne", label),
+        AsmInst::Bcc(label) => branch("bcc", label),
+        AsmInst::Bcs(label) => branch("bcs", label),
         AsmInst::Bra(label) => branch("bra", label),
         AsmInst::Brl(label) => branch("brl", label),
         AsmInst::Jsr(label) => branch("jsr", label),
