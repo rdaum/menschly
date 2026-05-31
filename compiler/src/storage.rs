@@ -181,8 +181,33 @@ fn assign_routine(routine: &Routine, allocator: &mut DirectAllocator) -> Routine
 }
 
 fn assign_params(routine: &Routine, allocator: &mut DirectAllocator, out: &mut RoutineStorage) {
+    if matches!(routine.abi, Abi::Reentrant) {
+        assign_stack_params(routine, out);
+        return;
+    }
+
     for param in &routine.params {
         allocate_direct_param(routine, param, allocator, out);
+    }
+}
+
+fn assign_stack_params(routine: &Routine, out: &mut RoutineStorage) {
+    let mut stack_offset = 3;
+    for param in &routine.params {
+        let size = param.ty.size_bytes();
+        out.bindings.insert(
+            BindingKey::Param(param.name.clone()),
+            Location::Stack {
+                offset: stack_offset,
+                size,
+            },
+        );
+        out.stack_slots.push(StackSlot {
+            name: param.name.clone(),
+            offset: stack_offset,
+            size,
+        });
+        stack_offset += size;
     }
 }
 
@@ -408,6 +433,10 @@ fn rewrite_inst(inst: &IrInst, layout: &RoutineStorage) -> IrInst {
             value: rewrite_value(value, layout),
             target: target.clone(),
         },
+        IrInst::Push { width, value } => IrInst::Push {
+            width: *width,
+            value: rewrite_value(value, layout),
+        },
         IrInst::CallFunction { name, dst } => IrInst::CallFunction {
             name: name.clone(),
             dst: rewrite_value(dst, layout),
@@ -440,7 +469,11 @@ fn rewrite_value(value: &Value, layout: &RoutineStorage) -> Value {
     match layout.location(key) {
         Some(Location::Direct { symbol, .. }) => Value::Direct(symbol.clone()),
         Some(Location::Static { symbol, .. }) => Value::Local(symbol.clone()),
-        Some(Location::Stack { .. }) | None => value.clone(),
+        Some(Location::Stack { offset, size }) => Value::Stack {
+            offset: *offset,
+            size: *size,
+        },
+        None => value.clone(),
     }
 }
 
@@ -515,6 +548,7 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
         IrInst::BranchIfZero { value, .. } | IrInst::ReturnValue(value) => {
             collect_temp_value(value, 2, &mut out);
         }
+        IrInst::Push { width, value } => collect_temp_value(value, width.size_bytes(), &mut out),
         IrInst::CallFunction { dst, .. } => collect_temp_value(dst, 2, &mut out),
         IrInst::Label(_)
         | IrInst::InlineAsm(_)
@@ -522,6 +556,7 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
         | IrInst::BranchIfEqual { .. }
         | IrInst::BranchIfNotEqual { .. }
         | IrInst::CallProcedure { .. }
+        | IrInst::CleanupStack { .. }
         | IrInst::Return => {}
     }
 

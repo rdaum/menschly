@@ -377,6 +377,60 @@ fn generated_frontend_multi_parameter_call_runs() {
 }
 
 #[test]
+fn generated_frontend_reentrant_stack_parameter_call_runs() {
+    let binary = assemble_source_fixture(
+        "frontend-reentrant-stack-parameter-call",
+        "
+        module ReentrantParamCallDemo
+        fixed($04000a) volatile var byte_out: u8
+
+        export far procedure main()
+            add('A', 2)
+            return
+        end
+
+        reentrant procedure add(a: u8, b: u8)
+            byte_out = a + b
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x04000a), b'C');
+}
+
+#[test]
+fn generated_frontend_reentrant_stack_word_parameter_call_runs() {
+    let binary = assemble_source_fixture(
+        "frontend-reentrant-stack-word-parameter-call",
+        "
+        module ReentrantWordParamCallDemo
+        fixed($04000a) volatile var byte_out: u8
+        fixed($04000c) volatile var word_out: u16
+
+        export far procedure main()
+            store_pair('Z', $4567)
+            return
+        end
+
+        reentrant procedure store_pair(a: u8, b: u16)
+            byte_out = a
+            word_out = b
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x04000a), b'Z');
+    assert_eq!(memory.byte(0x04000c), 0x67);
+    assert_eq!(memory.byte(0x04000d), 0x45);
+}
+
+#[test]
 fn generated_frontend_application_result_program_runs() {
     let binary = assemble_source_fixture(
         "frontend-application-result",

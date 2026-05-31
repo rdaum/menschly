@@ -371,12 +371,19 @@ pub enum IrInst {
     BranchIfNotEqual {
         target: Label,
     },
+    Push {
+        width: Width,
+        value: Value,
+    },
     CallProcedure {
         name: String,
     },
     CallFunction {
         name: String,
         dst: Value,
+    },
+    CleanupStack {
+        bytes: u16,
     },
     Return,
     ReturnValue(Value),
@@ -410,6 +417,7 @@ pub enum Value {
     Local(String),
     Param(String),
     Direct(String),
+    Stack { offset: u16, size: u16 },
     Global(String),
 }
 

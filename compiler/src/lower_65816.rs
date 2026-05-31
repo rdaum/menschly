@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, EntryKind, GlobalPlacement, IrInst, Module, Routine, RoutineKind, Value,
-    Width,
+    Abi, Address, Const, EntryKind, GlobalPlacement, IrInst, Module, Routine, RoutineKind, Type,
+    Value, Width,
 };
 use crate::optimize_65816::optimize_module;
 use crate::storage::{apply_storage, assign_storage, StorageAssignment};
@@ -280,10 +280,24 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
         }
         IrInst::BranchIfEqual { target } => out.push(AsmInst::Beq(target.to_string())),
         IrInst::BranchIfNotEqual { target } => out.push(AsmInst::Bne(target.to_string())),
+        IrInst::Push { width, value } => {
+            set_mode_for_width(out, *width);
+            load_value_to_a(out, value)?;
+            out.push(AsmInst::Pha);
+        }
         IrInst::CallProcedure { name } => out.push(AsmInst::Jsr(name.clone())),
         IrInst::CallFunction { name, dst } => {
             out.push(AsmInst::Jsr(name.clone()));
             store_a_to_value(out, dst)?;
+        }
+        IrInst::CleanupStack { bytes } => {
+            if *bytes != 0 {
+                out.push(AsmInst::Mode(Mode::Acc16Index16));
+                out.push(AsmInst::Tsc);
+                out.push(AsmInst::Clc);
+                out.push(AsmInst::Adc(Operand::Immediate(Immediate::Word(*bytes))));
+                out.push(AsmInst::Tcs);
+            }
         }
         IrInst::Return => out.push(return_inst(routine)),
         IrInst::ReturnValue(value) => {
@@ -324,12 +338,16 @@ fn set_mode_for_width(out: &mut Vec<AsmInst>, width: Width) {
     }
 }
 
-fn width_for_type(ty: &crate::ir::Type) -> Result<Width, LowerError> {
-    match ty.size_bytes() {
+fn width_for_type(ty: &Type) -> Result<Width, LowerError> {
+    width_for_size(ty.size_bytes())
+}
+
+fn width_for_size(size: u16) -> Result<Width, LowerError> {
+    match size {
         1 => Ok(Width::Byte),
         2 => Ok(Width::Word),
         3 => Ok(Width::Long),
-        _ => Err(LowerError::UnsupportedWidth(ty.size_bytes())),
+        _ => Err(LowerError::UnsupportedWidth(size)),
     }
 }
 
@@ -363,6 +381,7 @@ fn operand_for_value(value: &Value) -> Result<Operand, LowerError> {
     match value {
         Value::Const(value) => Ok(Operand::Immediate(immediate(*value))),
         Value::Direct(name) => Ok(Operand::Direct(Symbol::Named(name.clone()))),
+        Value::Stack { offset, .. } => stack_operand(*offset),
         Value::Temp(name) | Value::Local(name) | Value::Param(name) => {
             Ok(Operand::Absolute(Symbol::Named(name.clone())))
         }
@@ -380,6 +399,11 @@ fn load_value_to_a(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerErr
         }
         Value::Direct(name) => {
             out.push(AsmInst::Lda(Operand::Direct(Symbol::Named(name.clone()))));
+            Ok(())
+        }
+        Value::Stack { offset, size } => {
+            set_mode_for_width(out, width_for_size(*size)?);
+            out.push(AsmInst::Lda(stack_operand(*offset)?));
             Ok(())
         }
         Value::Temp(name) | Value::Local(name) | Value::Param(name) => {
@@ -401,6 +425,11 @@ fn store_a_to_value(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerEr
             out.push(AsmInst::Sta(Operand::Direct(Symbol::Named(name.clone()))));
             Ok(())
         }
+        Value::Stack { offset, size } => {
+            set_mode_for_width(out, width_for_size(*size)?);
+            out.push(AsmInst::Sta(stack_operand(*offset)?));
+            Ok(())
+        }
         Value::Temp(name) | Value::Local(name) | Value::Param(name) => {
             out.push(AsmInst::Sta(Operand::Absolute(Symbol::Named(name.clone()))));
             Ok(())
@@ -413,10 +442,16 @@ fn store_a_to_value(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerEr
     }
 }
 
+fn stack_operand(offset: u16) -> Result<Operand, LowerError> {
+    let offset = u8::try_from(offset).map_err(|_| LowerError::UnsupportedStackOffset(offset))?;
+    Ok(Operand::StackRelative(offset))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LowerError {
     UnsupportedValue(Value),
     UnsupportedWidth(u16),
+    UnsupportedStackOffset(u16),
 }
 
 impl fmt::Display for LowerError {
@@ -427,6 +462,9 @@ impl fmt::Display for LowerError {
             }
             Self::UnsupportedWidth(width) => {
                 write!(f, "unsupported width in 65816 lowering: {width}")
+            }
+            Self::UnsupportedStackOffset(offset) => {
+                write!(f, "unsupported stack offset in 65816 lowering: {offset}")
             }
         }
     }

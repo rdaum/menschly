@@ -35,6 +35,12 @@ reentrant. A future stack-based convention is still needed for reentrant
 procedures and for code that can be interrupted by another caller of the same
 routine.
 
+`reentrant` routines pass parameters on the stack instead of through
+direct-page symbols. The caller pushes argument values in reverse parameter
+order before `jsr`, the callee reads them with stack-relative addressing, and
+the caller removes the argument bytes after the routine returns. This currently
+supports `u8`, `i8`, `u16`, and `i16` procedure parameters.
+
 ## Interrupts
 
 Interrupt handlers must preserve every register state they clobber unless the
@@ -42,8 +48,8 @@ whole program ABI has explicitly reserved that state for interrupt use. In
 particular, an interrupt may arrive while foreground code is carrying a function
 return value or a call argument in the accumulator.
 
-Interrupt handlers may only call parameterless routines. The frontend rejects
-calls from `interrupt procedure` bodies to routines or external declarations
-with parameters, because the current direct-page parameter slots can be
-clobbered if the interrupt fires while foreground code is preparing or using
-the same call.
+Interrupt handlers may call parameterless routines, or parameterized
+`reentrant` routines that use stack arguments. The frontend rejects calls from
+`interrupt procedure` bodies to non-reentrant routines or external declarations
+with parameters, because direct-page parameter slots can be clobbered if the
+interrupt fires while foreground code is preparing or using the same call.

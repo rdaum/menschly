@@ -1130,6 +1130,7 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
     module.external_direct_symbols = source
         .externals
         .iter()
+        .filter(|external| !matches!(external.abi, Abi::Reentrant))
         .flat_map(|external| {
             external
                 .params
@@ -1405,6 +1406,7 @@ impl<'a> RoutineLowerer<'a> {
                 let sig = self.check_call(name, args, true)?;
                 self.lower_call_args(name, args, &sig.params)?;
                 self.body.push(IrInst::CallProcedure { name: name.clone() });
+                self.cleanup_call_args(name, &sig.params)?;
                 Ok(())
             }
             Stmt::If {
@@ -1567,6 +1569,7 @@ impl<'a> RoutineLowerer<'a> {
                     name: name.clone(),
                     dst,
                 });
+                self.cleanup_call_args(name, &sig.params)?;
                 Ok(())
             }
             Expr::ResultOk(value) => {
@@ -1798,10 +1801,21 @@ impl<'a> RoutineLowerer<'a> {
                 args.len()
             )));
         }
-        if matches!(self.routine.abi, Abi::Interrupt) && !sig.params.is_empty() {
+        if matches!(self.routine.abi, Abi::Interrupt)
+            && !sig.params.is_empty()
+            && !matches!(sig.abi, Abi::Reentrant)
+        {
             return Err(FrontendError::Type(format!(
                 "interrupt routine {} cannot call parameterized routine {name}; direct-page parameters are not interrupt-safe",
                 self.routine.name
+            )));
+        }
+        if matches!(sig.abi, Abi::Reentrant)
+            && !sig.params.is_empty()
+            && matches!(sig.kind, RoutineDeclKind::Function { .. })
+        {
+            return Err(FrontendError::Type(format!(
+                "reentrant function {name} with parameters is not supported yet"
             )));
         }
         for (arg, param_ty) in args.iter().zip(&sig.params) {
@@ -1827,12 +1841,49 @@ impl<'a> RoutineLowerer<'a> {
         args: &[Expr],
         params: &[ParamSig],
     ) -> Result<(), FrontendError> {
+        let abi = self
+            .parent
+            .routines
+            .get(routine)
+            .map(|sig| sig.abi)
+            .ok_or_else(|| FrontendError::Type(format!("unknown routine {routine}")))?;
+
+        if matches!(abi, Abi::Reentrant) {
+            for (arg, param) in args.iter().zip(params).rev() {
+                let value = self.expr_value(arg, &param.ty)?;
+                self.body.push(IrInst::Push {
+                    width: width_for_type(&param.ty)?,
+                    value,
+                });
+            }
+            return Ok(());
+        }
+
         for (arg, param) in args.iter().zip(params) {
             self.lower_expr_to(
                 arg,
                 &param.ty,
                 Value::Direct(crate::ir::param_symbol(routine, &param.name)),
             )?;
+        }
+        Ok(())
+    }
+
+    fn cleanup_call_args(
+        &mut self,
+        routine: &str,
+        params: &[ParamSig],
+    ) -> Result<(), FrontendError> {
+        let abi = self
+            .parent
+            .routines
+            .get(routine)
+            .map(|sig| sig.abi)
+            .ok_or_else(|| FrontendError::Type(format!("unknown routine {routine}")))?;
+        if matches!(abi, Abi::Reentrant) {
+            self.body.push(IrInst::CleanupStack {
+                bytes: params.iter().map(|param| param.ty.size_bytes()).sum(),
+            });
         }
         Ok(())
     }
@@ -2403,6 +2454,49 @@ mod tests {
         ";
 
         compile_source(source).unwrap();
+    }
+
+    #[test]
+    fn allows_interrupt_calls_to_reentrant_parameterized_routines() {
+        let source = "
+            module ReentrantIrqCall
+            vector irq = irq
+
+            reentrant procedure serial_write(value: u8)
+                return
+            end
+
+            interrupt procedure irq()
+                serial_write('!')
+                return
+            end
+        ";
+
+        compile_source(source).unwrap();
+    }
+
+    #[test]
+    fn allows_interrupt_calls_to_external_reentrant_parameterized_routines() {
+        let source = "
+            module ExternalReentrantIrqCall
+            vector irq = irq
+            external reentrant procedure serial_write(value: u8)
+
+            interrupt procedure irq()
+                serial_write('!')
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        let (lowered, _assignment) =
+            crate::lower_65816::lower_module_with_storage(&module).unwrap();
+        let asm = crate::ca65::emit_module(&lowered);
+
+        assert!(asm.contains(".import serial_write\n"));
+        assert!(!asm.contains(".importzp __dp_serial_write_param_value\n"));
+        assert!(asm.contains("\tpha\n"));
+        assert!(asm.contains("\tjsr serial_write\n"));
     }
 
     #[test]
