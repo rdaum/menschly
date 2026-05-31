@@ -348,6 +348,35 @@ fn generated_frontend_parameter_call_runs() {
 }
 
 #[test]
+fn generated_frontend_multi_parameter_call_runs() {
+    let binary = assemble_source_fixture(
+        "frontend-multi-parameter-call",
+        "
+        module MultiParamCallDemo
+        fixed($040006) volatile var byte_out: u8
+        fixed($040008) volatile var word_out: u16
+
+        export far procedure main()
+            store_pair('Q', $1234)
+            return
+        end
+
+        procedure store_pair(first: u8, second: u16)
+            byte_out = first
+            word_out = second
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x040006), b'Q');
+    assert_eq!(memory.byte(0x040008), 0x34);
+    assert_eq!(memory.byte(0x040009), 0x12);
+}
+
+#[test]
 fn generated_frontend_application_result_program_runs() {
     let binary = assemble_source_fixture(
         "frontend-application-result",

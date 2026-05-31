@@ -386,8 +386,61 @@ fn non_exported_routine_is_not_callable_across_modules() {
     );
 }
 
+#[test]
+fn external_multi_argument_call_links_and_runs() {
+    let dir = temp_dir("external-multi-argument-link");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let callee_path = dir.join("callee.mensch");
+    let cfg_path = dir.join("image.cfg");
+
+    fs::write(
+        &caller_path,
+        "
+        module Caller
+        application main
+        external procedure store_pair(first: u8, second: u16)
+
+        procedure main()
+            store_pair('X', $3456)
+            return
+        end
+        ",
+    )
+    .expect("caller source should be written");
+    fs::write(
+        &callee_path,
+        "
+        module Callee
+        fixed($009f57) volatile var serial_data: u8
+        fixed($000284) var word_out: u16
+
+        export procedure store_pair(first: u8, second: u16)
+            word_out = second
+            serial_data = first
+            return
+        end
+        ",
+    )
+    .expect("callee source should be written");
+    fs::write(&cfg_path, xex_linker_config()).expect("linker config should be written");
+
+    let build = build_mensch_xex_sources(
+        "external-multi-argument-link",
+        &[caller_path, callee_path],
+        &cfg_path,
+    )
+    .expect("external multi-argument image should build");
+    let run = run_image_until_output(&build.image, b"", 1, 20_000)
+        .expect("external multi-argument image should output a byte");
+
+    assert_eq!(run.output, b"X");
+    assert_eq!(run.machine.byte(0x000284), 0x56);
+    assert_eq!(run.machine.byte(0x000285), 0x34);
+}
+
 fn xex_linker_config() -> &'static str {
-    "MEMORY {\n  CODE: start = $008000, size = $003000, file = %O;\n  ZEROPAGE: start = $000080, size = $000080, type = rw;\n  BSS: start = $000200, size = $001000, type = rw;\n  META: start = $00a000, size = $001000, file = %O;\n  VECTORS: start = $00ffee, size = $000002, file = %O;\n}\nSEGMENTS {\n  CODE: load = CODE, type = ro;\n  ZEROPAGE: load = ZEROPAGE, type = zp;\n  BSS: load = BSS, type = bss;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
+    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $008000, size = $001000, file = %O;\n  META: start = $008f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  VECTORS: start = $00ffee, size = $000002, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
 }
 
 #[test]
