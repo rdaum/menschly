@@ -17,6 +17,11 @@ export procedure serial_init()
     return
 end
 
+export procedure serial_write(value: u8)
+    serial_data = value
+    return
+end
+
 export function serial_has_data(): u8
     if rx_head == rx_tail
         return 0
@@ -33,6 +38,7 @@ export function serial_read(): u8
 end
 
 export interrupt procedure serial_irq()
+    asm "pha"
     rx_next = rx_head + 1 & 15
     if rx_next == rx_tail
         rx_drop = serial_data
@@ -41,5 +47,6 @@ export interrupt procedure serial_irq()
         rx_buffer[rx_head] = serial_data
         rx_head = rx_next
     end
+    asm "pla"
     return
 end

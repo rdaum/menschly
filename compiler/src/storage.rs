@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, IrInst, Local, Module, Param, Routine, Storage, Value, Width,
+    param_symbol, Abi, Address, Const, IrInst, Local, Module, Param, Routine, Storage, Value, Width,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +158,7 @@ pub fn apply_storage(module: &Module, assignment: &StorageAssignment) -> Module 
         imports: module.imports.clone(),
         libraries: module.libraries.clone(),
         external_routines: module.external_routines.clone(),
+        external_direct_symbols: module.external_direct_symbols.clone(),
         entry: module.entry.clone(),
         routines,
     }
@@ -181,9 +182,7 @@ fn assign_routine(routine: &Routine, allocator: &mut DirectAllocator) -> Routine
 
 fn assign_params(routine: &Routine, allocator: &mut DirectAllocator, out: &mut RoutineStorage) {
     for param in &routine.params {
-        if param.storage == Storage::Direct {
-            allocate_direct_param(routine, param, allocator, out);
-        }
+        allocate_direct_param(routine, param, allocator, out);
     }
 }
 
@@ -599,10 +598,6 @@ impl DirectAllocator {
         self.next_offset += size;
         slot
     }
-}
-
-fn param_symbol(routine: &str, name: &str) -> String {
-    format!("__dp_{routine}_param_{name}")
 }
 
 fn local_symbol(routine: &str, name: &str) -> String {

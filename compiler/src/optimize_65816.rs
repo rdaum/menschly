@@ -22,6 +22,7 @@ pub fn optimize_module(module: &AsmModule) -> AsmModule {
         imports: module.imports.clone(),
         libraries: module.libraries.clone(),
         external_routines: module.external_routines.clone(),
+        external_direct_symbols: module.external_direct_symbols.clone(),
         entry: module.entry.clone(),
         routines: module
             .routines
@@ -484,6 +485,7 @@ mod tests {
         module.direct_symbols = vec![DirectSymbol {
             name: "slot".to_owned(),
             size: 1,
+            export: false,
         }];
 
         assert_eq!(

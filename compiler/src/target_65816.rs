@@ -12,6 +12,7 @@ pub struct AsmModule {
     pub imports: Vec<ModuleImport>,
     pub libraries: Vec<ModuleLibrary>,
     pub external_routines: Vec<String>,
+    pub external_direct_symbols: Vec<String>,
     pub entry: Option<ModuleEntry>,
     pub routines: Vec<AsmRoutine>,
 }
@@ -29,6 +30,7 @@ impl AsmModule {
             imports: Vec::new(),
             libraries: Vec::new(),
             external_routines: Vec::new(),
+            external_direct_symbols: Vec::new(),
             entry: None,
             routines: Vec::new(),
         }
@@ -44,6 +46,7 @@ impl AsmModule {
 pub struct DirectSymbol {
     pub name: String,
     pub size: u16,
+    pub export: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1071,7 +1071,13 @@ impl Parser {
 struct RoutineSig {
     kind: RoutineDeclKind,
     abi: Abi,
-    params: Vec<Type>,
+    params: Vec<ParamSig>,
+}
+
+#[derive(Debug, Clone)]
+struct ParamSig {
+    name: String,
+    ty: Type,
 }
 
 #[derive(Debug, Clone)]
@@ -1120,6 +1126,16 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
         .externals
         .iter()
         .map(|external| external.name.clone())
+        .collect();
+    module.external_direct_symbols = source
+        .externals
+        .iter()
+        .flat_map(|external| {
+            external
+                .params
+                .iter()
+                .map(|param| crate::ir::param_symbol(&external.name, &param.name))
+        })
         .collect();
     module.entry = source.entry.as_ref().map(|entry| Entry {
         kind: entry.kind,
@@ -1184,7 +1200,10 @@ fn routine_sigs(source: &SourceModule) -> Result<BTreeMap<String, RoutineSig>, F
                 params: external
                     .params
                     .iter()
-                    .map(|param| param.ty.clone())
+                    .map(|param| ParamSig {
+                        name: param.name.clone(),
+                        ty: param.ty.clone(),
+                    })
                     .collect(),
             },
         )?;
@@ -1199,7 +1218,10 @@ fn routine_sigs(source: &SourceModule) -> Result<BTreeMap<String, RoutineSig>, F
                 params: routine
                     .params
                     .iter()
-                    .map(|param| param.ty.clone())
+                    .map(|param| ParamSig {
+                        name: param.name.clone(),
+                        ty: param.ty.clone(),
+                    })
                     .collect(),
             },
         )?;
@@ -1265,10 +1287,14 @@ impl Lowerer {
         };
 
         let mut lowerer = RoutineLowerer::new(self, source, globals)?;
-        if !source.params.is_empty() {
+        if let Some(param) = source
+            .params
+            .iter()
+            .find(|param| !matches!(param.ty, Type::U8 | Type::I8 | Type::U16 | Type::I16))
+        {
             return Err(FrontendError::Type(format!(
-                "routine {} declares parameters, but parameter passing is not implemented yet",
-                source.name
+                "routine {} parameter {} has unsupported type {:?}",
+                source.name, param.name, param.ty
             )));
         }
         for stmt in &source.body {
@@ -1376,7 +1402,8 @@ impl<'a> RoutineLowerer<'a> {
             }
             Stmt::Assign { target, value } => self.lower_assign(target, value),
             Stmt::Call { name, args } => {
-                self.check_call(name, args, true)?;
+                let sig = self.check_call(name, args, true)?;
+                self.lower_call_args(name, args, &sig.params)?;
                 self.body.push(IrInst::CallProcedure { name: name.clone() });
                 Ok(())
             }
@@ -1465,9 +1492,15 @@ impl<'a> RoutineLowerer<'a> {
             (RoutineDeclKind::Procedure, Some(_)) => Err(FrontendError::Type(
                 "procedure cannot return a value".to_owned(),
             )),
-            (RoutineDeclKind::Function { result }, Some(value)) => {
-                self.lower_expr_to(value, result, Value::Accumulator)?;
-                self.body.push(IrInst::ReturnValue(Value::Accumulator));
+            (RoutineDeclKind::Function { result }, Some(expr)) => {
+                let value = self.expr_value(expr, result).or_else(|error| {
+                    if !matches!(expr, Expr::ResultOk(_) | Expr::ResultErr(_)) {
+                        return Err(error);
+                    }
+                    self.lower_expr_to(expr, result, Value::Accumulator)?;
+                    Ok(Value::Accumulator)
+                })?;
+                self.body.push(IrInst::ReturnValue(value));
                 Ok(())
             }
             (RoutineDeclKind::Function { .. }, None) => Err(FrontendError::Type(
@@ -1526,8 +1559,10 @@ impl<'a> RoutineLowerer<'a> {
                 Ok(())
             }
             Expr::Call { name, args } => {
-                let result = self.check_call(name, args, false)?;
+                let sig = self.check_call(name, args, false)?;
+                let result = sig.result_type(name)?;
                 ensure_assignable(expected, &result)?;
+                self.lower_call_args(name, args, &sig.params)?;
                 self.body.push(IrInst::CallFunction {
                     name: name.clone(),
                     dst,
@@ -1696,7 +1731,7 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Number(value) if *value <= 0xffff => Ok(Type::U16),
             Expr::Number(_) => Ok(Type::U24),
             Expr::Name(name) => Ok(self.binding(name)?.ty.clone()),
-            Expr::Call { name, args } => self.check_call(name, args, false),
+            Expr::Call { name, args } => self.check_call(name, args, false)?.result_type(name),
             Expr::ResultOk(value) => Ok(Type::Result {
                 ok: Box::new(self.infer_expr(value)?),
                 err: Box::new(Type::U8),
@@ -1749,11 +1784,12 @@ impl<'a> RoutineLowerer<'a> {
         name: &str,
         args: &[Expr],
         statement: bool,
-    ) -> Result<Type, FrontendError> {
+    ) -> Result<RoutineSig, FrontendError> {
         let sig = self
             .parent
             .routines
             .get(name)
+            .cloned()
             .ok_or_else(|| FrontendError::Type(format!("unknown routine {name}")))?;
         if args.len() != sig.params.len() {
             return Err(FrontendError::Type(format!(
@@ -1762,26 +1798,37 @@ impl<'a> RoutineLowerer<'a> {
                 args.len()
             )));
         }
-        if !args.is_empty() {
-            return Err(FrontendError::Type(format!(
-                "routine {name} uses parameters, but parameter passing is not implemented yet"
-            )));
-        }
         for (arg, param_ty) in args.iter().zip(&sig.params) {
             let arg_ty = self.infer_expr(arg)?;
-            ensure_assignable(param_ty, &arg_ty)?;
+            ensure_assignable(&param_ty.ty, &arg_ty)?;
         }
 
         match (&sig.kind, statement) {
-            (RoutineDeclKind::Procedure, true) => Ok(Type::U8),
+            (RoutineDeclKind::Procedure, true) => Ok(sig),
             (RoutineDeclKind::Procedure, false) => Err(FrontendError::Type(format!(
                 "procedure {name} cannot be used as an expression"
             ))),
             (RoutineDeclKind::Function { .. }, true) => Err(FrontendError::Type(format!(
                 "function {name} result cannot be discarded"
             ))),
-            (RoutineDeclKind::Function { result }, false) => Ok(result.clone()),
+            (RoutineDeclKind::Function { .. }, false) => Ok(sig),
         }
+    }
+
+    fn lower_call_args(
+        &mut self,
+        routine: &str,
+        args: &[Expr],
+        params: &[ParamSig],
+    ) -> Result<(), FrontendError> {
+        for (arg, param) in args.iter().zip(params) {
+            self.lower_expr_to(
+                arg,
+                &param.ty,
+                Value::Direct(crate::ir::param_symbol(routine, &param.name)),
+            )?;
+        }
+        Ok(())
     }
 
     fn result_constructor_const(
@@ -1812,6 +1859,17 @@ impl<'a> RoutineLowerer<'a> {
         self.bindings
             .get(name)
             .ok_or_else(|| FrontendError::Type(format!("unknown variable {name}")))
+    }
+}
+
+impl RoutineSig {
+    fn result_type(&self, name: &str) -> Result<Type, FrontendError> {
+        match &self.kind {
+            RoutineDeclKind::Procedure => Err(FrontendError::Type(format!(
+                "procedure {name} cannot be used as an expression"
+            ))),
+            RoutineDeclKind::Function { result } => Ok(result.clone()),
+        }
     }
 }
 
@@ -2102,10 +2160,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_parameterized_routines_until_call_abi_exists() {
+    fn rejects_unsupported_parameter_types() {
         let source = "
             module Params
-            procedure store(value: u8)
+            procedure store(value: u24)
                 return
             end
         ";
@@ -2161,10 +2219,12 @@ mod tests {
 
             external interrupt procedure serial_irq()
             external procedure serial_init()
+            external procedure serial_write(value: u8)
             external function serial_has_data(): u8
 
             export procedure main()
                 serial_init()
+                serial_write('!')
                 if serial_has_data() != 0
                     serial_data = serial_has_data()
                 end
@@ -2183,12 +2243,17 @@ mod tests {
 
         assert!(asm.contains(".import serial_irq\n"));
         assert!(asm.contains(".import serial_init\n"));
+        assert!(asm.contains(".import serial_write\n"));
         assert!(asm.contains(".import serial_has_data\n"));
+        assert!(asm.contains(".importzp __dp_serial_write_param_value\n"));
         assert!(asm.contains("__vector_irq: .addr serial_irq\n"));
         assert!(asm.contains("\tjsr serial_init\n"));
+        assert!(asm.contains("\tsta __dp_serial_write_param_value\n"));
+        assert!(asm.contains("\tjsr serial_write\n"));
         assert!(asm.contains("\tjsr serial_has_data\n"));
         assert!(!asm.contains(".proc serial_irq\n"));
         assert!(!asm.contains(".proc serial_init\n"));
+        assert!(!asm.contains(".proc serial_write\n"));
         assert!(!asm.contains(".proc serial_has_data\n"));
     }
 
@@ -2221,6 +2286,53 @@ mod tests {
         assert!(!asm.contains(".export private_helper\n"));
         assert!(asm.contains("\trts\n"));
         assert!(asm.contains("\trti\n"));
+    }
+
+    #[test]
+    fn compiles_direct_page_parameter_passing() {
+        let source = "
+            module Params
+            fixed($001234) var out: u8
+
+            export far procedure main()
+                store('!')
+                return
+            end
+
+            procedure store(value: u8)
+                out = value
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        let (lowered, _assignment) =
+            crate::lower_65816::lower_module_with_storage(&module).unwrap();
+        let asm = crate::ca65::emit_module(&lowered);
+
+        assert!(asm.contains("__dp_store_param_value: .res 1\n"));
+        assert!(asm.contains("\tsta __dp_store_param_value\n"));
+        assert!(asm.contains("\tjsr store\n"));
+        assert!(asm.contains("\tlda __dp_store_param_value\n"));
+        assert!(!asm.contains(".exportzp __dp_store_param_value\n"));
+    }
+
+    #[test]
+    fn exports_public_direct_page_parameters() {
+        let source = "
+            module PublicParams
+            export procedure store(value: u8)
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        let (lowered, _assignment) =
+            crate::lower_65816::lower_module_with_storage(&module).unwrap();
+        let asm = crate::ca65::emit_module(&lowered);
+
+        assert!(asm.contains(".export store\n"));
+        assert!(asm.contains(".exportzp __dp_store_param_value\n"));
     }
 
     #[test]

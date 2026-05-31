@@ -82,6 +82,7 @@ fn lower_module_declarations(module: &Module, out: &mut AsmModule) {
         })
         .collect();
     out.external_routines = module.external_routines.clone();
+    out.external_direct_symbols = module.external_direct_symbols.clone();
     out.entry = module
         .entry
         .as_ref()
@@ -101,20 +102,42 @@ pub fn lower_module_with_storage(
     let assignment = assign_storage(module);
     let assigned = apply_storage(module, &assignment);
     let mut lowered = lower_module_unoptimized(&assigned)?;
+    let routine_exports = assigned
+        .routines
+        .iter()
+        .map(|routine| (routine.name.clone(), routine.export))
+        .collect::<BTreeMap<_, _>>();
     let direct_symbols = assignment
         .routines
         .iter()
-        .flat_map(|routine| routine.direct_slots.iter())
-        .fold(BTreeMap::<String, u16>::new(), |mut symbols, slot| {
-            symbols
-                .entry(slot.symbol.clone())
-                .and_modify(|size| *size = (*size).max(slot.size))
-                .or_insert(slot.size);
-            symbols
-        });
+        .flat_map(|routine| {
+            let routine_export = routine_exports
+                .get(&routine.name)
+                .copied()
+                .unwrap_or_default();
+            routine
+                .direct_slots
+                .iter()
+                .map(move |slot| (routine_export, slot))
+        })
+        .fold(
+            BTreeMap::<String, (u16, bool)>::new(),
+            |mut symbols, (routine_export, slot)| {
+                let export =
+                    routine_export && matches!(slot.source, crate::storage::BindingKey::Param(_));
+                symbols
+                    .entry(slot.symbol.clone())
+                    .and_modify(|(size, existing_export)| {
+                        *size = (*size).max(slot.size);
+                        *existing_export |= export;
+                    })
+                    .or_insert((slot.size, export));
+                symbols
+            },
+        );
     lowered.direct_symbols = direct_symbols
         .into_iter()
-        .map(|(name, size)| crate::target_65816::DirectSymbol { name, size })
+        .map(|(name, (size, export))| crate::target_65816::DirectSymbol { name, size, export })
         .collect();
     let static_symbols = assignment
         .routines
@@ -264,6 +287,9 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
         }
         IrInst::Return => out.push(return_inst(routine)),
         IrInst::ReturnValue(value) => {
+            if let RoutineKind::Function { result } = &routine.kind {
+                set_mode_for_width(out, width_for_type(result)?);
+            }
             if !matches!(value, Value::Accumulator) {
                 load_value_to_a(out, value)?;
             }
@@ -295,6 +321,15 @@ fn set_mode_for_width(out: &mut Vec<AsmInst>, width: Width) {
     match width {
         Width::Byte => out.push(AsmInst::Mode(Mode::Acc8Index16)),
         Width::Word | Width::Long => out.push(AsmInst::Mode(Mode::Acc16Index16)),
+    }
+}
+
+fn width_for_type(ty: &crate::ir::Type) -> Result<Width, LowerError> {
+    match ty.size_bytes() {
+        1 => Ok(Width::Byte),
+        2 => Ok(Width::Word),
+        3 => Ok(Width::Long),
+        _ => Err(LowerError::UnsupportedWidth(ty.size_bytes())),
     }
 }
 
@@ -381,6 +416,7 @@ fn store_a_to_value(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerEr
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LowerError {
     UnsupportedValue(Value),
+    UnsupportedWidth(u16),
 }
 
 impl fmt::Display for LowerError {
@@ -388,6 +424,9 @@ impl fmt::Display for LowerError {
         match self {
             Self::UnsupportedValue(value) => {
                 write!(f, "unsupported value in 65816 lowering: {value:?}")
+            }
+            Self::UnsupportedWidth(width) => {
+                write!(f, "unsupported width in 65816 lowering: {width}")
             }
         }
     }

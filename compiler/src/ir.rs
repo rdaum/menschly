@@ -9,6 +9,7 @@ pub struct Module {
     pub imports: Vec<Import>,
     pub libraries: Vec<Library>,
     pub external_routines: Vec<String>,
+    pub external_direct_symbols: Vec<String>,
     pub entry: Option<Entry>,
     pub routines: Vec<Routine>,
 }
@@ -23,6 +24,7 @@ impl Module {
             imports: Vec::new(),
             libraries: Vec::new(),
             external_routines: Vec::new(),
+            external_direct_symbols: Vec::new(),
             entry: None,
             routines: Vec::new(),
         }
@@ -198,6 +200,10 @@ pub struct Param {
     pub name: String,
     pub ty: Type,
     pub storage: Storage,
+}
+
+pub fn param_symbol(routine: &str, name: &str) -> String {
+    format!("__dp_{routine}_param_{name}")
 }
 
 impl Param {

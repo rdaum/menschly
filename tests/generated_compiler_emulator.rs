@@ -323,6 +323,31 @@ fn generated_frontend_fixed_volatile_io_program_runs() {
 }
 
 #[test]
+fn generated_frontend_parameter_call_runs() {
+    let binary = assemble_source_fixture(
+        "frontend-parameter-call",
+        "
+        module ParamCallDemo
+        fixed($040006) volatile var io: u8
+
+        export far procedure main()
+            store('P')
+            return
+        end
+
+        procedure store(value: u8)
+            io = value
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x040006), b'P');
+}
+
+#[test]
 fn generated_frontend_application_result_program_runs() {
     let binary = assemble_source_fixture(
         "frontend-application-result",

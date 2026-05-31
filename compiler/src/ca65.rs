@@ -9,7 +9,12 @@ pub fn emit_module(module: &AsmModule) -> String {
         out.push_str(routine);
         out.push('\n');
     }
-    if !module.external_routines.is_empty() {
+    for symbol in &module.external_direct_symbols {
+        out.push_str(".importzp ");
+        out.push_str(symbol);
+        out.push('\n');
+    }
+    if !module.external_routines.is_empty() || !module.external_direct_symbols.is_empty() {
         out.push('\n');
     }
 
@@ -31,6 +36,11 @@ pub fn emit_module(module: &AsmModule) -> String {
     if !module.direct_symbols.is_empty() {
         out.push_str(".segment \"ZEROPAGE\"\n");
         for symbol in &module.direct_symbols {
+            if symbol.export {
+                out.push_str(".exportzp ");
+                out.push_str(&symbol.name);
+                out.push('\n');
+            }
             out.push_str(&symbol.name);
             out.push_str(": .res ");
             out.push_str(&symbol.size.to_string());
