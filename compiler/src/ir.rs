@@ -475,6 +475,7 @@ pub enum Address {
     Symbol(String),
     Direct(String),
     SymbolIndexedX(String),
+    ValueOffset { base: Value, offset: u16 },
     NearPtr(Value),
     FarPtr(Value),
     Absolute(u32),

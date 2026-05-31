@@ -470,6 +470,10 @@ fn rewrite_inst(inst: &IrInst, layout: &RoutineStorage) -> IrInst {
 
 fn rewrite_address(addr: &Address, layout: &RoutineStorage) -> Address {
     match addr {
+        Address::ValueOffset { base, offset } => Address::ValueOffset {
+            base: rewrite_value(base, layout),
+            offset: *offset,
+        },
         Address::NearPtr(value) => Address::NearPtr(rewrite_value(value, layout)),
         Address::FarPtr(value) => Address::FarPtr(rewrite_value(value, layout)),
         other => other.clone(),
@@ -598,6 +602,7 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
 
 fn collect_temp_address(addr: &Address, out: &mut Vec<(String, u16)>) {
     match addr {
+        Address::ValueOffset { base, .. } => collect_temp_value(base, 2, out),
         Address::NearPtr(value) => collect_temp_value(value, 2, out),
         Address::FarPtr(value) => collect_temp_value(value, 3, out),
         _ => {}

@@ -361,6 +361,75 @@ fn generated_frontend_relational_conditions_run() {
 }
 
 #[test]
+fn generated_frontend_record_fields_run() {
+    let binary = assemble_source_fixture(
+        "frontend-record-fields",
+        "
+        module RecordFieldDemo
+        type Device = record
+            id: u16
+            flags: u8
+        end
+
+        fixed($04000a) volatile var byte_out: u8
+        fixed($04000c) volatile var word_out: u16
+        var device: Device
+
+        export far procedure main()
+            device.id = $4567
+            device.flags = $a5
+            word_out = device.id
+            byte_out = device.flags
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x04000a), 0xa5);
+    assert_eq!(memory.byte(0x04000c), 0x67);
+    assert_eq!(memory.byte(0x04000d), 0x45);
+}
+
+#[test]
+fn generated_frontend_stack_record_fields_run() {
+    let binary = assemble_source_fixture(
+        "frontend-stack-record-fields",
+        "
+        module StackRecordFieldDemo
+        type Device = record
+            id: u16
+            flags: u8
+        end
+
+        fixed($04000e) volatile var byte_out: u8
+        fixed($040010) volatile var word_out: u16
+
+        export far procedure main()
+            work()
+            return
+        end
+
+        reentrant procedure work()
+            var device: Device
+            device.id = $2345
+            device.flags = $5a
+            word_out = device.id
+            byte_out = device.flags
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x04000e), 0x5a);
+    assert_eq!(memory.byte(0x040010), 0x45);
+    assert_eq!(memory.byte(0x040011), 0x23);
+}
+
+#[test]
 fn generated_indexed_assignment_from_indexed_value_runs() {
     let binary = assemble_source_fixture(
         "frontend-indexed-assignment-from-indexed-value",

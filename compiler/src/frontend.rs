@@ -21,12 +21,19 @@ pub struct SourceModule {
     pub imports: Vec<ImportDecl>,
     pub libraries: Vec<LibraryDecl>,
     pub entry: Option<EntryDecl>,
+    pub types: Vec<TypeDecl>,
     pub consts: Vec<ConstDecl>,
     pub globals: Vec<GlobalDecl>,
     pub vectors: Vec<VectorDecl>,
     pub metadata: Vec<MetadataDecl>,
     pub externals: Vec<ExternalDecl>,
     pub routines: Vec<RoutineDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeDecl {
+    pub name: String,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +182,7 @@ pub enum Expr {
     BitAnd(Box<Expr>, Box<Expr>),
     Deref(Box<Expr>),
     Index(Box<Expr>, Box<Expr>),
+    Field(Box<Expr>, String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +221,7 @@ enum TokenKind {
     RBracket,
     Colon,
     Comma,
+    Dot,
     Caret,
     Plus,
     Minus,
@@ -256,6 +265,7 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             ']' => out.push(token(TokenKind::RBracket, offset)),
             ':' => out.push(token(TokenKind::Colon, offset)),
             ',' => out.push(token(TokenKind::Comma, offset)),
+            '.' => out.push(token(TokenKind::Dot, offset)),
             '^' => out.push(token(TokenKind::Caret, offset)),
             '+' => out.push(token(TokenKind::Plus, offset)),
             '-' => out.push(token(TokenKind::Minus, offset)),
@@ -531,11 +541,16 @@ fn read_number_or_empty(
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    types: BTreeMap<String, Type>,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Result<Self, FrontendError> {
-        Ok(Self { tokens, pos: 0 })
+        Ok(Self {
+            tokens,
+            pos: 0,
+            types: BTreeMap::new(),
+        })
     }
 
     fn parse_module(&mut self) -> Result<SourceModule, FrontendError> {
@@ -544,6 +559,7 @@ impl Parser {
         let mut imports = Vec::new();
         let mut libraries = Vec::new();
         let mut entry = None;
+        let mut types = Vec::new();
         let mut consts = Vec::new();
         let mut globals = Vec::new();
         let mut vectors = Vec::new();
@@ -570,6 +586,8 @@ impl Parser {
                 metadata.push(self.parse_metadata_decl()?);
             } else if self.take_keyword("vector") {
                 vectors.push(self.parse_vector_decl()?);
+            } else if self.take_keyword("type") {
+                types.push(self.parse_type_decl()?);
             } else if self.take_keyword("const") {
                 consts.push(self.parse_const_decl()?);
             } else if self.take_keyword("external") {
@@ -586,6 +604,7 @@ impl Parser {
             imports,
             libraries,
             entry,
+            types,
             consts,
             globals,
             vectors,
@@ -629,6 +648,16 @@ impl Parser {
         self.expect(TokenKind::Equal)?;
         let routine = self.expect_ident()?;
         Ok(VectorDecl { name, routine })
+    }
+
+    fn parse_type_decl(&mut self) -> Result<TypeDecl, FrontendError> {
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::Equal)?;
+        let ty = self.parse_type()?;
+        if self.types.insert(name.clone(), ty.clone()).is_some() {
+            return Err(FrontendError::Parse(format!("duplicate type {name}")));
+        }
+        Ok(TypeDecl { name, ty })
     }
 
     fn parse_const_decl(&mut self) -> Result<ConstDecl, FrontendError> {
@@ -907,30 +936,7 @@ impl Parser {
             });
         }
         if self.take_keyword("record") {
-            self.expect(TokenKind::LParen)?;
-            let mut fields = Vec::new();
-            let mut offset = 0u16;
-            if self.take(TokenKind::RParen) {
-                return Ok(Type::Record { fields });
-            }
-            loop {
-                let name = self.expect_ident()?;
-                self.expect(TokenKind::Colon)?;
-                let ty = self.parse_type()?;
-                fields.push(Field {
-                    name,
-                    offset,
-                    ty: ty.clone(),
-                });
-                offset = offset
-                    .checked_add(ty.size_bytes())
-                    .ok_or_else(|| FrontendError::Parse("record is too large".to_owned()))?;
-                if self.take(TokenKind::RParen) {
-                    break;
-                }
-                self.expect(TokenKind::Comma)?;
-            }
-            return Ok(Type::Record { fields });
+            return self.parse_record_type();
         }
         if self.take_keyword("result") {
             self.expect(TokenKind::LParen)?;
@@ -966,8 +972,53 @@ impl Parser {
             "u16" => Ok(Type::U16),
             "i16" => Ok(Type::I16),
             "u24" => Ok(Type::U24),
-            _ => Err(FrontendError::Parse(format!("unknown type {name}"))),
+            _ => self
+                .types
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| FrontendError::Parse(format!("unknown type {name}"))),
         }
+    }
+
+    fn parse_record_type(&mut self) -> Result<Type, FrontendError> {
+        let end = if self.take(TokenKind::LParen) {
+            TokenKind::RParen
+        } else {
+            TokenKind::Eof
+        };
+        let mut fields = Vec::new();
+        let mut offset = 0u16;
+        if matches!(end, TokenKind::RParen) && self.take(TokenKind::RParen) {
+            return Ok(Type::Record { fields });
+        }
+        loop {
+            if matches!(end, TokenKind::Eof) && self.take_keyword("end") {
+                break;
+            }
+            let name = self.expect_ident()?;
+            self.expect(TokenKind::Colon)?;
+            let ty = self.parse_type()?;
+            if fields.iter().any(|field: &Field| field.name == name) {
+                return Err(FrontendError::Parse(format!("duplicate record field {name}")));
+            }
+            fields.push(Field {
+                name,
+                offset,
+                ty: ty.clone(),
+            });
+            offset = offset
+                .checked_add(ty.size_bytes())
+                .ok_or_else(|| FrontendError::Parse("record is too large".to_owned()))?;
+            if matches!(end, TokenKind::RParen) {
+                if self.take(TokenKind::RParen) {
+                    break;
+                }
+                self.expect(TokenKind::Comma)?;
+            } else {
+                self.take(TokenKind::Comma);
+            }
+        }
+        Ok(Type::Record { fields })
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, FrontendError> {
@@ -1130,6 +1181,9 @@ impl Parser {
                 let index = self.parse_expr()?;
                 self.expect(TokenKind::RBracket)?;
                 expr = Expr::Index(Box::new(expr), Box::new(index));
+            } else if self.take(TokenKind::Dot) {
+                let field = self.expect_ident()?;
+                expr = Expr::Field(Box::new(expr), field);
             } else {
                 break;
             }
@@ -1796,6 +1850,16 @@ impl<'a> RoutineLowerer<'a> {
                 });
                 Ok(())
             }
+            Expr::Field(base, field) => {
+                let (addr, field_ty) = self.address_for_field(base, field)?;
+                let value = self.expr_value(value, &field_ty)?;
+                self.body.push(IrInst::Store {
+                    width: width_for_type(&field_ty)?,
+                    addr,
+                    src: value,
+                });
+                Ok(())
+            }
             _ => Err(FrontendError::Type(
                 "assignment target is not assignable".to_owned(),
             )),
@@ -2069,6 +2133,16 @@ impl<'a> RoutineLowerer<'a> {
                 });
                 Ok(())
             }
+            Expr::Field(base, field) => {
+                let (addr, field_ty) = self.address_for_field(base, field)?;
+                ensure_assignable(expected, &field_ty)?;
+                self.body.push(IrInst::Load {
+                    width: width_for_type(&field_ty)?,
+                    dst,
+                    addr,
+                });
+                Ok(())
+            }
         }
     }
 
@@ -2168,6 +2242,28 @@ impl<'a> RoutineLowerer<'a> {
         }
     }
 
+    fn address_for_field(
+        &mut self,
+        base: &Expr,
+        field_name: &str,
+    ) -> Result<(Address, Type), FrontendError> {
+        let base_ty = self.infer_expr(base)?;
+        let field = record_field(&base_ty, field_name)?.clone();
+        let Expr::Name(name) = base else {
+            return Err(FrontendError::Type(
+                "field access currently requires a named record value".to_owned(),
+            ));
+        };
+        let binding = self.binding(name)?.clone();
+        Ok((
+            Address::ValueOffset {
+                base: binding.value,
+                offset: field.offset,
+            },
+            field.ty,
+        ))
+    }
+
     fn infer_expr(&self, expr: &Expr) -> Result<Type, FrontendError> {
         match expr {
             Expr::Number(value) if *value <= 0xff => Ok(Type::U8),
@@ -2223,6 +2319,10 @@ impl<'a> RoutineLowerer<'a> {
                         "indexed access needs an array".to_owned(),
                     )),
                 }
+            }
+            Expr::Field(base, field) => {
+                let base_ty = self.infer_expr(base)?;
+                Ok(record_field(&base_ty, field)?.ty.clone())
             }
         }
     }
@@ -2452,6 +2552,18 @@ fn result_constructor_matches(expected: &Type, actual: &Type) -> bool {
     }
 }
 
+fn record_field<'a>(ty: &'a Type, name: &str) -> Result<&'a Field, FrontendError> {
+    let Type::Record { fields } = ty else {
+        return Err(FrontendError::Type(
+            "field access needs a record".to_owned(),
+        ));
+    };
+    fields
+        .iter()
+        .find(|field| field.name == name)
+        .ok_or_else(|| FrontendError::Type(format!("record has no field {name}")))
+}
+
 fn compatible_expr_width(
     lhs: &Type,
     rhs: &Type,
@@ -2654,6 +2766,49 @@ mod tests {
         assert!(body
             .iter()
             .any(|inst| matches!(inst, IrInst::BranchIfCarryClear { .. })));
+    }
+
+    #[test]
+    fn compiles_named_record_field_access() {
+        let source = "
+            module Records
+            type Device = record
+                id: u16
+                flags: u8
+            end
+            var device: Device
+
+            export procedure main()
+                device.id = $1234
+                device.flags = $80
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        assert_eq!(module.globals[0].ty.size_bytes(), 3);
+        let body = &module.routines[0].body;
+
+        assert!(body.iter().any(|inst| matches!(
+            inst,
+            IrInst::Store {
+                addr: Address::ValueOffset {
+                    base: Value::Global(name),
+                    offset: 0
+                },
+                ..
+            } if name == "device"
+        )));
+        assert!(body.iter().any(|inst| matches!(
+            inst,
+            IrInst::Store {
+                addr: Address::ValueOffset {
+                    base: Value::Global(name),
+                    offset: 2
+                },
+                ..
+            } if name == "device"
+        )));
     }
 
     #[test]

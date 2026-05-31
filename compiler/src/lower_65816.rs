@@ -528,6 +528,7 @@ fn operand_for_address(addr: &Address) -> Result<Operand, LowerError> {
         Address::Symbol(name) => Ok(Operand::Absolute(Symbol::Named(name.clone()))),
         Address::SymbolIndexedX(name) => Ok(Operand::AbsoluteIndexedX(Symbol::Named(name.clone()))),
         Address::Direct(name) => Ok(Operand::Direct(Symbol::Named(name.clone()))),
+        Address::ValueOffset { base, offset } => operand_for_value_offset(base, *offset),
         Address::Absolute(addr) => Ok(Operand::Absolute(Symbol::Address(*addr))),
         Address::AbsoluteIndexedX(addr) => Ok(Operand::AbsoluteIndexedX(Symbol::Address(*addr))),
         Address::NearPtr(value) => match value {
@@ -538,6 +539,32 @@ fn operand_for_address(addr: &Address) -> Result<Operand, LowerError> {
             Value::Direct(name) => Ok(Operand::IndirectLongDirect(Symbol::Named(name.clone()))),
             other => Err(LowerError::UnsupportedValue(other.clone())),
         },
+    }
+}
+
+fn operand_for_value_offset(value: &Value, offset: u16) -> Result<Operand, LowerError> {
+    match value {
+        Value::Direct(name) => Ok(Operand::Direct(symbol_with_offset(name, offset))),
+        Value::Stack {
+            offset: stack_offset,
+            ..
+        } => stack_operand(
+            stack_offset
+                .checked_add(offset)
+                .ok_or(LowerError::UnsupportedStackOffset(*stack_offset))?,
+        ),
+        Value::Temp(name) | Value::Local(name) | Value::Param(name) | Value::Global(name) => {
+            Ok(Operand::Absolute(symbol_with_offset(name, offset)))
+        }
+        other => Err(LowerError::UnsupportedValue(other.clone())),
+    }
+}
+
+fn symbol_with_offset(name: &str, offset: u16) -> Symbol {
+    if offset == 0 {
+        Symbol::Named(name.to_owned())
+    } else {
+        Symbol::Named(format!("{name}+{offset}"))
     }
 }
 
