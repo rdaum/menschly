@@ -138,7 +138,7 @@ fn run_command(command: &mut Command) {
 }
 
 fn linker_config() -> &'static str {
-    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $020000, size = $001000, file = %O;\n  BSS: start = $021000, size = $001000, type = rw;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  BSS: load = BSS, type = bss;\n}\n"
+    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $020000, size = $001000, file = %O;\n  META: start = $020f00, size = $000100, file = %O;\n  BSS: start = $021000, size = $001000, type = rw;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro;\n  BSS: load = BSS, type = bss;\n}\n"
 }
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -320,4 +320,33 @@ fn generated_frontend_fixed_volatile_io_program_runs() {
     let (_cpu, memory) = run_generated_routine(&binary);
 
     assert_eq!(memory.byte(0x040005), 0x5a);
+}
+
+#[test]
+fn generated_frontend_application_result_program_runs() {
+    let binary = assemble_source_fixture(
+        "frontend-application-result",
+        "
+        module AppDemo
+        import Bytes as B
+        library strings
+        application main
+        arena var heap: [16]u8
+        fixed($040006) volatile var status_word: result(u8, u8)
+
+        procedure main()
+            status_word = status()
+            return
+        end
+
+        function status(): result(u8, u8)
+            return ok($2a)
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x040006), 0x00);
+    assert_eq!(memory.byte(0x040007), 0x2a);
 }

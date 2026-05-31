@@ -155,6 +155,9 @@ pub fn apply_storage(module: &Module, assignment: &StorageAssignment) -> Module 
         globals: module.globals.clone(),
         vectors: module.vectors.clone(),
         metadata: module.metadata.clone(),
+        imports: module.imports.clone(),
+        libraries: module.libraries.clone(),
+        entry: module.entry.clone(),
         routines,
     }
 }

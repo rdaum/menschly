@@ -6,6 +6,9 @@ pub struct Module {
     pub globals: Vec<Global>,
     pub vectors: Vec<Vector>,
     pub metadata: Vec<Metadata>,
+    pub imports: Vec<Import>,
+    pub libraries: Vec<Library>,
+    pub entry: Option<Entry>,
     pub routines: Vec<Routine>,
 }
 
@@ -16,6 +19,9 @@ impl Module {
             globals: Vec::new(),
             vectors: Vec::new(),
             metadata: Vec::new(),
+            imports: Vec::new(),
+            libraries: Vec::new(),
+            entry: None,
             routines: Vec::new(),
         }
     }
@@ -32,6 +38,21 @@ impl Module {
 
     pub fn with_metadata(mut self, metadata: Metadata) -> Self {
         self.metadata.push(metadata);
+        self
+    }
+
+    pub fn with_import(mut self, import: Import) -> Self {
+        self.imports.push(import);
+        self
+    }
+
+    pub fn with_library(mut self, library: Library) -> Self {
+        self.libraries.push(library);
+        self
+    }
+
+    pub fn with_entry(mut self, entry: Entry) -> Self {
+        self.entry = Some(entry);
         self
     }
 
@@ -67,6 +88,29 @@ pub struct Vector {
 pub struct Metadata {
     pub key: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Import {
+    pub module: String,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Library {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub kind: EntryKind,
+    pub routine: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Application,
+    Command,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +229,10 @@ pub enum Type {
     I16,
     U24,
     Pointer { to: Box<Type>, kind: PointerKind },
+    Record { fields: Vec<Field> },
+    Array { len: u16, element: Box<Type> },
+    Slice { element: Box<Type> },
+    Result { ok: Box<Type>, err: Box<Type> },
 }
 
 impl Type {
@@ -198,6 +246,10 @@ impl Type {
                 ..
             } => 3,
             Self::Pointer { .. } => 2,
+            Self::Record { fields } => fields.iter().map(|field| field.ty.size_bytes()).sum(),
+            Self::Array { len, element } => len.saturating_mul(element.size_bytes()),
+            Self::Slice { .. } => 4,
+            Self::Result { ok, err } => ok.size_bytes().max(err.size_bytes()) + 1,
         }
     }
 
@@ -214,6 +266,13 @@ impl Type {
             kind: PointerKind::Far,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    pub name: String,
+    pub ty: Type,
+    pub offset: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

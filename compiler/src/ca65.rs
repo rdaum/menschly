@@ -69,13 +69,9 @@ pub fn emit_module(module: &AsmModule) -> String {
         out.push('\n');
     }
 
-    if !module.metadata.is_empty() {
+    if has_module_metadata(module) {
         out.push_str(".segment \"MENSCH_META\"\n");
-        for metadata in &module.metadata {
-            out.push_str("\t.asciiz ");
-            out.push_str(&quoted(&format!("{}={}", metadata.key, metadata.value)));
-            out.push('\n');
-        }
+        emit_module_metadata(&mut out, module);
         out.push('\n');
     }
 
@@ -87,6 +83,38 @@ pub fn emit_module(module: &AsmModule) -> String {
     }
 
     out
+}
+
+fn has_module_metadata(module: &AsmModule) -> bool {
+    module.entry.is_some()
+        || !module.imports.is_empty()
+        || !module.libraries.is_empty()
+        || !module.metadata.is_empty()
+}
+
+fn emit_module_metadata(out: &mut String, module: &AsmModule) {
+    if let Some(entry) = &module.entry {
+        emit_metadata(out, &format!("entry.{}={}", entry.kind, entry.routine));
+    }
+    for import in &module.imports {
+        let value = match &import.alias {
+            Some(alias) => format!("import.{}={}", alias, import.module),
+            None => format!("import={}", import.module),
+        };
+        emit_metadata(out, &value);
+    }
+    for library in &module.libraries {
+        emit_metadata(out, &format!("library={}", library.name));
+    }
+    for metadata in &module.metadata {
+        emit_metadata(out, &format!("{}={}", metadata.key, metadata.value));
+    }
+}
+
+fn emit_metadata(out: &mut String, value: &str) {
+    out.push_str("\t.asciiz ");
+    out.push_str(&quoted(value));
+    out.push('\n');
 }
 
 fn quoted(value: &str) -> String {

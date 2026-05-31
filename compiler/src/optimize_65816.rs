@@ -19,6 +19,9 @@ pub fn optimize_module(module: &AsmModule) -> AsmModule {
         banked_symbols: module.banked_symbols.clone(),
         vectors: module.vectors.clone(),
         metadata: module.metadata.clone(),
+        imports: module.imports.clone(),
+        libraries: module.libraries.clone(),
+        entry: module.entry.clone(),
         routines: module
             .routines
             .iter()

@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, Global, GlobalPlacement, IrInst, Label, Local, Metadata, Module, Param,
-    PointerKind, Routine, RoutineKind, Storage, Type, Value, Vector, Width,
+    Abi, Address, Const, Entry, EntryKind, Field, Global, GlobalPlacement, Import, IrInst, Label,
+    Library, Local, Metadata, Module, Param, PointerKind, Routine, RoutineKind, Storage, Type,
+    Value, Vector, Width,
 };
 
 pub fn parse_source(source: &str) -> Result<SourceModule, FrontendError> {
@@ -17,10 +18,30 @@ pub fn compile_source(source: &str) -> Result<Module, FrontendError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceModule {
     pub name: String,
+    pub imports: Vec<ImportDecl>,
+    pub libraries: Vec<LibraryDecl>,
+    pub entry: Option<EntryDecl>,
     pub globals: Vec<GlobalDecl>,
     pub vectors: Vec<VectorDecl>,
     pub metadata: Vec<MetadataDecl>,
     pub routines: Vec<RoutineDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportDecl {
+    pub module: String,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryDecl {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryDecl {
+    pub kind: EntryKind,
+    pub routine: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +51,7 @@ pub struct GlobalDecl {
     pub placement: GlobalPlacement,
     pub volatile: bool,
     pub export: bool,
+    pub arena: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +117,8 @@ pub enum Expr {
     Number(u32),
     Name(String),
     Call { name: String, args: Vec<Expr> },
+    ResultOk(Box<Expr>),
+    ResultErr(Box<Expr>),
     Add(Box<Expr>, Box<Expr>),
     Deref(Box<Expr>),
 }
@@ -131,6 +155,8 @@ enum TokenKind {
     String(String),
     LParen,
     RParen,
+    LBracket,
+    RBracket,
     Colon,
     Comma,
     Caret,
@@ -162,6 +188,8 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             }
             '(' => out.push(token(TokenKind::LParen, offset)),
             ')' => out.push(token(TokenKind::RParen, offset)),
+            '[' => out.push(token(TokenKind::LBracket, offset)),
+            ']' => out.push(token(TokenKind::RBracket, offset)),
             ':' => out.push(token(TokenKind::Colon, offset)),
             ',' => out.push(token(TokenKind::Comma, offset)),
             '^' => out.push(token(TokenKind::Caret, offset)),
@@ -345,13 +373,30 @@ impl Parser {
     fn parse_module(&mut self) -> Result<SourceModule, FrontendError> {
         self.expect_keyword("module")?;
         let name = self.expect_ident()?;
+        let mut imports = Vec::new();
+        let mut libraries = Vec::new();
+        let mut entry = None;
         let mut globals = Vec::new();
         let mut vectors = Vec::new();
         let mut metadata = Vec::new();
         let mut routines = Vec::new();
 
         while !self.at_eof() {
-            if self.take_keyword("metadata") {
+            if self.take_keyword("import") {
+                imports.push(self.parse_import_decl()?);
+            } else if self.take_keyword("library") {
+                libraries.push(self.parse_library_decl()?);
+            } else if self.take_keyword("application") {
+                entry = Some(EntryDecl {
+                    kind: EntryKind::Application,
+                    routine: self.expect_ident()?,
+                });
+            } else if self.take_keyword("command") {
+                entry = Some(EntryDecl {
+                    kind: EntryKind::Command,
+                    routine: self.expect_ident()?,
+                });
+            } else if self.take_keyword("metadata") {
                 metadata.push(self.parse_metadata_decl()?);
             } else if self.take_keyword("vector") {
                 vectors.push(self.parse_vector_decl()?);
@@ -364,10 +409,29 @@ impl Parser {
 
         Ok(SourceModule {
             name,
+            imports,
+            libraries,
+            entry,
             globals,
             vectors,
             metadata,
             routines,
+        })
+    }
+
+    fn parse_import_decl(&mut self) -> Result<ImportDecl, FrontendError> {
+        let module = self.expect_ident()?;
+        let alias = if self.take_keyword("as") {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        Ok(ImportDecl { module, alias })
+    }
+
+    fn parse_library_decl(&mut self) -> Result<LibraryDecl, FrontendError> {
+        Ok(LibraryDecl {
+            name: self.expect_ident()?,
         })
     }
 
@@ -393,6 +457,7 @@ impl Parser {
 
     fn parse_global_decl(&mut self) -> Result<GlobalDecl, FrontendError> {
         let export = self.take_keyword("export");
+        let arena = self.take_keyword("arena");
         let placement = self.parse_global_placement()?;
         let volatile = self.take_keyword("volatile");
         self.expect_keyword("var")?;
@@ -404,7 +469,8 @@ impl Parser {
             ty,
             placement,
             volatile,
-            export,
+            export: export || arena,
+            arena,
         })
     }
 
@@ -537,6 +603,63 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> Result<Type, FrontendError> {
+        if self.take(TokenKind::LBracket) {
+            if self.take(TokenKind::RBracket) {
+                return Ok(Type::Slice {
+                    element: Box::new(self.parse_type()?),
+                });
+            }
+            let len = self
+                .take_number()
+                .ok_or_else(|| self.parse_error("expected array length"))?;
+            self.expect(TokenKind::RBracket)?;
+            if len > u16::MAX as u32 {
+                return Err(FrontendError::Parse(format!(
+                    "array length {len} is out of range"
+                )));
+            }
+            return Ok(Type::Array {
+                len: len as u16,
+                element: Box::new(self.parse_type()?),
+            });
+        }
+        if self.take_keyword("record") {
+            self.expect(TokenKind::LParen)?;
+            let mut fields = Vec::new();
+            let mut offset = 0u16;
+            if self.take(TokenKind::RParen) {
+                return Ok(Type::Record { fields });
+            }
+            loop {
+                let name = self.expect_ident()?;
+                self.expect(TokenKind::Colon)?;
+                let ty = self.parse_type()?;
+                fields.push(Field {
+                    name,
+                    offset,
+                    ty: ty.clone(),
+                });
+                offset = offset
+                    .checked_add(ty.size_bytes())
+                    .ok_or_else(|| FrontendError::Parse("record is too large".to_owned()))?;
+                if self.take(TokenKind::RParen) {
+                    break;
+                }
+                self.expect(TokenKind::Comma)?;
+            }
+            return Ok(Type::Record { fields });
+        }
+        if self.take_keyword("result") {
+            self.expect(TokenKind::LParen)?;
+            let ok = self.parse_type()?;
+            self.expect(TokenKind::Comma)?;
+            let err = self.parse_type()?;
+            self.expect(TokenKind::RParen)?;
+            return Ok(Type::Result {
+                ok: Box::new(ok),
+                err: Box::new(err),
+            });
+        }
         if self.take_keyword("near") {
             self.expect(TokenKind::Caret)?;
             return Ok(Type::near_ptr(self.parse_type()?));
@@ -655,6 +778,12 @@ impl Parser {
         if self.take(TokenKind::LParen) {
             let mut args = Vec::new();
             if self.take(TokenKind::RParen) {
+                if name == "ok" {
+                    return Err(self.parse_error("ok needs a value"));
+                }
+                if name == "err" {
+                    return Err(self.parse_error("err needs a value"));
+                }
                 return Ok(Expr::Call { name, args });
             }
             loop {
@@ -664,7 +793,19 @@ impl Parser {
                 }
                 self.expect(TokenKind::Comma)?;
             }
-            Ok(Expr::Call { name, args })
+            if name == "ok" || name == "err" {
+                if args.len() != 1 {
+                    return Err(self.parse_error("result constructor needs one value"));
+                }
+                let value = Box::new(args.remove(0));
+                if name == "ok" {
+                    Ok(Expr::ResultOk(value))
+                } else {
+                    Ok(Expr::ResultErr(value))
+                }
+            } else {
+                Ok(Expr::Call { name, args })
+            }
         } else {
             Ok(Expr::Name(name))
         }
@@ -683,11 +824,13 @@ impl Parser {
     fn starts_global_decl(&self) -> bool {
         self.is_keyword_at(0, "var")
             || self.is_keyword_at(0, "volatile")
+            || self.is_keyword_at(0, "arena")
             || self.is_keyword_at(0, "fixed")
             || self.is_keyword_at(0, "bank")
             || (self.is_keyword_at(0, "export")
                 && (self.is_keyword_at(1, "var")
                     || self.is_keyword_at(1, "volatile")
+                    || self.is_keyword_at(1, "arena")
                     || self.is_keyword_at(1, "fixed")
                     || self.is_keyword_at(1, "bank")))
     }
@@ -817,6 +960,25 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
     };
 
     let mut module = Module::new(source.name);
+    module.imports = source
+        .imports
+        .iter()
+        .map(|import| Import {
+            module: import.module.clone(),
+            alias: import.alias.clone(),
+        })
+        .collect();
+    module.libraries = source
+        .libraries
+        .iter()
+        .map(|library| Library {
+            name: library.name.clone(),
+        })
+        .collect();
+    module.entry = source.entry.as_ref().map(|entry| Entry {
+        kind: entry.kind,
+        routine: entry.routine.clone(),
+    });
     module.globals = source
         .globals
         .iter()
@@ -844,13 +1006,23 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
             value: metadata.value.clone(),
         })
         .collect();
+    for global in &source.globals {
+        if global.arena {
+            module.metadata.push(Metadata {
+                key: "arena".to_owned(),
+                value: format!("{}:{}", global.name, global.ty.size_bytes()),
+            });
+        }
+    }
 
     for routine in &source.routines {
-        module
-            .routines
-            .push(lowerer.lower_routine(routine, &source.globals)?);
+        module.routines.push(lowerer.lower_routine(
+            routine,
+            &source.globals,
+            source.entry.as_ref(),
+        )?);
     }
-    lowerer.validate_vectors(&module)?;
+    lowerer.validate_vectors_and_entry(&module)?;
     Ok(module)
 }
 
@@ -885,6 +1057,7 @@ impl Lowerer {
         &mut self,
         source: &RoutineDecl,
         globals: &[GlobalDecl],
+        entry: Option<&EntryDecl>,
     ) -> Result<Routine, FrontendError> {
         let kind = match &source.kind {
             RoutineDeclKind::Procedure => RoutineKind::Procedure,
@@ -895,7 +1068,13 @@ impl Lowerer {
         let mut routine = Routine {
             name: source.name.clone(),
             kind,
-            abi: source.abi,
+            abi: if entry.is_some_and(|entry| entry.routine == source.name)
+                && matches!(source.abi, Abi::Internal)
+            {
+                Abi::Exported
+            } else {
+                source.abi
+            },
             params: source
                 .params
                 .iter()
@@ -931,7 +1110,7 @@ impl Lowerer {
         Ok(routine)
     }
 
-    fn validate_vectors(&self, module: &Module) -> Result<(), FrontendError> {
+    fn validate_vectors_and_entry(&self, module: &Module) -> Result<(), FrontendError> {
         for vector in &module.vectors {
             let Some(routine) = module
                 .routines
@@ -947,6 +1126,24 @@ impl Lowerer {
                 return Err(FrontendError::Type(format!(
                     "vector {} references non-interrupt routine {}",
                     vector.name, vector.routine
+                )));
+            }
+        }
+        if let Some(entry) = &module.entry {
+            let Some(routine) = module
+                .routines
+                .iter()
+                .find(|routine| routine.name == entry.routine)
+            else {
+                return Err(FrontendError::Type(format!(
+                    "entry references unknown routine {}",
+                    entry.routine
+                )));
+            };
+            if matches!(routine.abi, Abi::Interrupt) {
+                return Err(FrontendError::Type(format!(
+                    "entry references interrupt routine {}",
+                    entry.routine
                 )));
             }
         }
@@ -1148,6 +1345,32 @@ impl<'a> RoutineLowerer<'a> {
                 });
                 Ok(())
             }
+            Expr::ResultOk(value) => {
+                let Type::Result { ok, .. } = expected else {
+                    return Err(FrontendError::Type(
+                        "ok constructor needs result type".to_owned(),
+                    ));
+                };
+                let encoded = self.result_constructor_const(value, ok, 0)?;
+                self.body.push(IrInst::LoadConst {
+                    dst,
+                    value: Const::U16(encoded),
+                });
+                Ok(())
+            }
+            Expr::ResultErr(value) => {
+                let Type::Result { err, .. } = expected else {
+                    return Err(FrontendError::Type(
+                        "err constructor needs result type".to_owned(),
+                    ));
+                };
+                let encoded = self.result_constructor_const(value, err, 1)?;
+                self.body.push(IrInst::LoadConst {
+                    dst,
+                    value: Const::U16(encoded),
+                });
+                Ok(())
+            }
             Expr::Add(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
@@ -1184,6 +1407,9 @@ impl<'a> RoutineLowerer<'a> {
                 ensure_assignable(expected, &binding.ty)?;
                 Ok(binding.value.clone())
             }
+            Expr::ResultOk(_) | Expr::ResultErr(_) => Err(FrontendError::Type(
+                "result constructor is not an addressable value".to_owned(),
+            )),
             _ => {
                 let temp = self.parent.temp();
                 self.lower_expr_to(expr, expected, temp.clone())?;
@@ -1220,6 +1446,14 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Number(_) => Ok(Type::U24),
             Expr::Name(name) => Ok(self.binding(name)?.ty.clone()),
             Expr::Call { name, args } => self.check_call(name, args, false),
+            Expr::ResultOk(value) => Ok(Type::Result {
+                ok: Box::new(self.infer_expr(value)?),
+                err: Box::new(Type::U8),
+            }),
+            Expr::ResultErr(value) => Ok(Type::Result {
+                ok: Box::new(Type::U8),
+                err: Box::new(self.infer_expr(value)?),
+            }),
             Expr::Add(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
@@ -1278,6 +1512,30 @@ impl<'a> RoutineLowerer<'a> {
         }
     }
 
+    fn result_constructor_const(
+        &self,
+        value: &Expr,
+        payload_ty: &Type,
+        tag: u8,
+    ) -> Result<u16, FrontendError> {
+        let Expr::Number(payload) = value else {
+            return Err(FrontendError::Type(
+                "result constructors currently require constant payloads".to_owned(),
+            ));
+        };
+        if payload_ty.size_bytes() != 1 {
+            return Err(FrontendError::Type(
+                "result constructors currently support byte payloads".to_owned(),
+            ));
+        }
+        if *payload > u8::MAX as u32 {
+            return Err(FrontendError::Type(format!(
+                "result payload ${payload:x} does not fit in one byte"
+            )));
+        }
+        Ok(((*payload as u16) << 8) | tag as u16)
+    }
+
     fn binding(&self, name: &str) -> Result<&Binding, FrontendError> {
         self.bindings
             .get(name)
@@ -1298,12 +1556,35 @@ fn insert_binding(
 }
 
 fn ensure_assignable(expected: &Type, actual: &Type) -> Result<(), FrontendError> {
-    if expected == actual || integer_width(expected) == integer_width(actual) {
+    if expected == actual
+        || (integer_width(expected).is_some() && integer_width(expected) == integer_width(actual))
+        || result_constructor_matches(expected, actual)
+    {
         Ok(())
     } else {
         Err(FrontendError::Type(format!(
             "cannot assign {actual:?} to {expected:?}"
         )))
+    }
+}
+
+fn result_constructor_matches(expected: &Type, actual: &Type) -> bool {
+    match (expected, actual) {
+        (
+            Type::Result {
+                ok: expected_ok,
+                err: _,
+            },
+            Type::Result { ok, err },
+        ) if **err == Type::U8 => **expected_ok == **ok,
+        (
+            Type::Result {
+                ok: _,
+                err: expected_err,
+            },
+            Type::Result { ok, err },
+        ) if **ok == Type::U8 => **expected_err == **err,
+        _ => false,
     }
 }
 
@@ -1327,6 +1608,10 @@ fn integer_width(ty: &Type) -> Option<u16> {
             ..
         } => Some(3),
         Type::Pointer { .. } => Some(2),
+        Type::Slice { .. } => Some(4),
+        Type::Result { ok, err } if ok.size_bytes().max(err.size_bytes()) <= 1 => Some(2),
+        Type::Result { ok, err } => Some(ok.size_bytes().max(err.size_bytes()) + 1),
+        Type::Record { .. } | Type::Array { .. } => None,
     }
 }
 
@@ -1335,6 +1620,9 @@ fn width_for_type(ty: &Type) -> Result<Width, FrontendError> {
         Some(1) => Ok(Width::Byte),
         Some(2) => Ok(Width::Word),
         Some(3) => Ok(Width::Long),
+        Some(4) => Err(FrontendError::Type(format!(
+            "type {ty:?} is wider than current scalar operations"
+        ))),
         _ => Err(FrontendError::Type(format!("unsupported type {ty:?}"))),
     }
 }
@@ -1484,6 +1772,60 @@ mod tests {
             module BadVector
             vector irq = main
             procedure main()
+                return
+            end
+        ";
+
+        assert!(compile_source(source).is_err());
+    }
+
+    #[test]
+    fn compiles_application_level_types_and_metadata() {
+        let source = "
+            module App
+            import Bytes as B
+            library strings
+            application main
+            arena var heap: [16]u8
+            var point: record(x: u8, y: u16)
+            var view: []u8
+
+            procedure main()
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+
+        assert_eq!(module.imports[0].module, "Bytes");
+        assert_eq!(module.imports[0].alias.as_deref(), Some("B"));
+        assert_eq!(module.libraries[0].name, "strings");
+        assert_eq!(module.entry.as_ref().unwrap().routine, "main");
+        assert!(module.routines[0].abi == Abi::Exported);
+        assert_eq!(module.globals[0].ty.size_bytes(), 16);
+        assert_eq!(module.globals[1].ty.size_bytes(), 3);
+        assert_eq!(module.globals[2].ty.size_bytes(), 4);
+        assert!(module
+            .metadata
+            .iter()
+            .any(|metadata| metadata.key == "arena" && metadata.value == "heap:16"));
+
+        let (lowered, _assignment) =
+            crate::lower_65816::lower_module_with_storage(&module).unwrap();
+        let asm = crate::ca65::emit_module(&lowered);
+
+        assert!(asm.contains("\t.asciiz \"entry.application=main\"\n"));
+        assert!(asm.contains("\t.asciiz \"import.B=Bytes\"\n"));
+        assert!(asm.contains("\t.asciiz \"library=strings\"\n"));
+        assert!(asm.contains("\t.asciiz \"arena=heap:16\"\n"));
+    }
+
+    #[test]
+    fn rejects_missing_application_entry() {
+        let source = "
+            module BadEntry
+            application main
+            procedure other()
                 return
             end
         ";

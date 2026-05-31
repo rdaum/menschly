@@ -9,6 +9,9 @@ pub struct AsmModule {
     pub banked_symbols: Vec<BankedSymbol>,
     pub vectors: Vec<VectorEntry>,
     pub metadata: Vec<ModuleMetadata>,
+    pub imports: Vec<ModuleImport>,
+    pub libraries: Vec<ModuleLibrary>,
+    pub entry: Option<ModuleEntry>,
     pub routines: Vec<AsmRoutine>,
 }
 
@@ -22,6 +25,9 @@ impl AsmModule {
             banked_symbols: Vec::new(),
             vectors: Vec::new(),
             metadata: Vec::new(),
+            imports: Vec::new(),
+            libraries: Vec::new(),
+            entry: None,
             routines: Vec::new(),
         }
     }
@@ -70,6 +76,23 @@ pub struct VectorEntry {
 pub struct ModuleMetadata {
     pub key: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleImport {
+    pub module: String,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleLibrary {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleEntry {
+    pub kind: String,
+    pub routine: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

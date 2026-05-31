@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, GlobalPlacement, IrInst, Module, Routine, RoutineKind, Value, Width,
+    Abi, Address, Const, EntryKind, GlobalPlacement, IrInst, Module, Routine, RoutineKind, Value,
+    Width,
 };
 use crate::optimize_65816::optimize_module;
 use crate::storage::{apply_storage, assign_storage, StorageAssignment};
@@ -65,6 +66,32 @@ fn lower_module_declarations(module: &Module, out: &mut AsmModule) {
             value: metadata.value.clone(),
         })
         .collect();
+    out.imports = module
+        .imports
+        .iter()
+        .map(|import| crate::target_65816::ModuleImport {
+            module: import.module.clone(),
+            alias: import.alias.clone(),
+        })
+        .collect();
+    out.libraries = module
+        .libraries
+        .iter()
+        .map(|library| crate::target_65816::ModuleLibrary {
+            name: library.name.clone(),
+        })
+        .collect();
+    out.entry = module
+        .entry
+        .as_ref()
+        .map(|entry| crate::target_65816::ModuleEntry {
+            kind: match entry.kind {
+                EntryKind::Application => "application",
+                EntryKind::Command => "command",
+            }
+            .to_owned(),
+            routine: entry.routine.clone(),
+        });
 }
 
 pub fn lower_module_with_storage(
