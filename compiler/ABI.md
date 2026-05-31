@@ -177,3 +177,22 @@ The initial device tree has a single root/list node: device `2`, kind
 `$0001` for character I/O, flags `$0003` for readable and writable, and driver
 `$0001` for the x65-alike serial UART. Parent, first child, and next sibling
 are all `0` until more devices are registered.
+
+The current Hellord GEMDOS layer is a Mensch module over these BIOS calls. It
+owns the standard stream bindings instead of hardcoding a console device in
+callers: at boot it walks the BIOS device registry, chooses the first character
+device with both read and write flags, and binds stdin, stdout, and stderr to
+that device. Its console entry points then delegate to BIOS:
+
+```text
+gemdos_cconis()        ; stdin status
+gemdos_cconin()        ; stdin input byte
+gemdos_cconos()        ; stdout output-ready status
+gemdos_cconout(ch)     ; stdout output byte
+gemdos_get_stddev(n)   ; stdin=0, stdout=1, stderr=2
+gemdos_set_stddev(n,d) ; update one standard stream binding
+```
+
+These are module calls today, not `COP #$01` entries yet. Adding real GEMDOS
+software interrupts needs a shared COP-family dispatcher so BIOS `COP #$0d` and
+GEMDOS `COP #$01` can coexist on the single native COP vector.

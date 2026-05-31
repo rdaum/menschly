@@ -624,6 +624,14 @@ fn operand_for_value(value: &Value) -> Result<Operand, LowerError> {
 fn load_value_to_a(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerError> {
     match value {
         Value::Accumulator => Ok(()),
+        Value::IndexX => {
+            out.push(AsmInst::Txa);
+            Ok(())
+        }
+        Value::IndexY => {
+            out.push(AsmInst::Tya);
+            Ok(())
+        }
         Value::Const(value) => {
             out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
             Ok(())
@@ -645,13 +653,20 @@ fn load_value_to_a(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerErr
             out.push(AsmInst::Lda(Operand::Absolute(Symbol::Named(name.clone()))));
             Ok(())
         }
-        other => Err(LowerError::UnsupportedValue(other.clone())),
     }
 }
 
 fn store_a_to_value(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerError> {
     match value {
         Value::Accumulator => Ok(()),
+        Value::IndexX => {
+            out.push(AsmInst::Tax);
+            Ok(())
+        }
+        Value::IndexY => {
+            out.push(AsmInst::Tay);
+            Ok(())
+        }
         Value::Direct(name) => {
             out.push(AsmInst::Sta(Operand::Direct(Symbol::Named(name.clone()))));
             Ok(())

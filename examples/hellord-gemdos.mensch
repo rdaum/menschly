@@ -1,0 +1,103 @@
+module HellordGemdos
+
+external reentrant function bios_bconstat(dev: u16): u16
+external reentrant function bios_bconin(dev: u16): u8
+external reentrant procedure bios_bconout(dev: u16, ch: u8)
+external reentrant function bios_bcostat(dev: u16): u16
+external reentrant function bios_device_first(): u16
+external reentrant function bios_device_next(dev: u16): u16
+external reentrant function bios_device_kind(dev: u16): u16
+external reentrant function bios_device_flags(dev: u16): u16
+
+const DEVICE_KIND_CHAR = $0001
+const DEVICE_FLAG_READ = $0001
+const DEVICE_FLAG_WRITE = $0002
+const GEMDOS_STDIN = $0000
+const GEMDOS_STDOUT = $0001
+const GEMDOS_STDERR = $0002
+
+var gemdos_initialized: u8
+var gemdos_stdin_device: u16
+var gemdos_stdout_device: u16
+var gemdos_stderr_device: u16
+
+export reentrant procedure gemdos_init()
+    var dev: u16
+    dev = gemdos_find_default_console()
+    gemdos_stdin_device = dev
+    gemdos_stdout_device = dev
+    gemdos_stderr_device = dev
+    gemdos_initialized = 1
+    return
+end
+
+reentrant procedure gemdos_ensure_init()
+    if gemdos_initialized == 0
+        gemdos_init()
+    end
+    return
+end
+
+reentrant function gemdos_find_default_console(): u16
+    var dev: u16
+    var flags: u16
+    dev = bios_device_first()
+    while dev != 0
+        if bios_device_kind(dev) == DEVICE_KIND_CHAR
+            flags = bios_device_flags(dev)
+            if flags & DEVICE_FLAG_READ != 0
+                if flags & DEVICE_FLAG_WRITE != 0
+                    return dev
+                end
+            end
+        end
+        dev = bios_device_next(dev)
+    end
+    return 0
+end
+
+export reentrant function gemdos_get_stddev(stream: u16): u16
+    gemdos_ensure_init()
+    if stream == GEMDOS_STDIN
+        return gemdos_stdin_device
+    elsif stream == GEMDOS_STDOUT
+        return gemdos_stdout_device
+    elsif stream == GEMDOS_STDERR
+        return gemdos_stderr_device
+    else
+        return 0
+    end
+end
+
+export reentrant procedure gemdos_set_stddev(stream: u16, dev: u16)
+    gemdos_ensure_init()
+    if stream == GEMDOS_STDIN
+        gemdos_stdin_device = dev
+    elsif stream == GEMDOS_STDOUT
+        gemdos_stdout_device = dev
+    elsif stream == GEMDOS_STDERR
+        gemdos_stderr_device = dev
+    end
+    return
+end
+
+export reentrant function gemdos_cconis(): u16
+    gemdos_ensure_init()
+    return bios_bconstat(gemdos_stdin_device)
+end
+
+export reentrant function gemdos_cconin(): u8
+    gemdos_ensure_init()
+    return bios_bconin(gemdos_stdin_device)
+end
+
+export reentrant function gemdos_cconos(): u16
+    gemdos_ensure_init()
+    return bios_bcostat(gemdos_stdout_device)
+end
+
+export reentrant procedure gemdos_cconout(ch: u8)
+    gemdos_ensure_init()
+    bios_bconout(gemdos_stdout_device, ch)
+    return
+end

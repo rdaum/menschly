@@ -652,10 +652,14 @@ fn generated_frontend_reentrant_stack_temps_keep_parameter_offsets() {
 
         reentrant procedure write_value(value: u8, add: u16)
             var tmp: u16
-            tmp = add + 1 & 63
+            tmp = bump(add)
             word_out = tmp
             byte_out = value
             return
+        end
+
+        reentrant function bump(value: u16): u16
+            return value + 1 & 63
         end
         ",
     );

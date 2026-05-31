@@ -2039,9 +2039,11 @@ impl<'a> RoutineLowerer<'a> {
                 self.lower_call_args(name, args, &sig.params)?;
                 let capture_before_cleanup = matches!(sig.abi, Abi::Reentrant)
                     && !sig.params.is_empty()
-                    && matches!(dst, Value::Accumulator);
+                    && (matches!(dst, Value::Accumulator | Value::Stack { .. })
+                        || (matches!(self.routine.abi, Abi::Reentrant)
+                            && matches!(dst, Value::Temp(_) | Value::Local(_) | Value::Param(_))));
                 let call_dst = if capture_before_cleanup {
-                    self.parent.temp()
+                    Value::IndexX
                 } else {
                     dst.clone()
                 };

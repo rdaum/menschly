@@ -1,13 +1,11 @@
 module HellordConsole
 
-const BIOS_CONSOLE = $0002
-
-external reentrant function bios_bconstat(dev: u16): u16
-external reentrant function bios_bconin(dev: u16): u8
-external reentrant procedure bios_bconout(dev: u16, ch: u8)
+external reentrant function gemdos_cconis(): u16
+external reentrant function gemdos_cconin(): u8
+external reentrant procedure gemdos_cconout(ch: u8)
 
 export procedure console_write(value: u8)
-    bios_bconout(BIOS_CONSOLE, value)
+    gemdos_cconout(value)
     return
 end
 
@@ -23,9 +21,9 @@ export procedure console_prompt_drive(drive: u8)
 end
 
 export function console_read(): u8
-    while bios_bconstat(BIOS_CONSOLE) == 0
+    while gemdos_cconis() == 0
     end
-    return bios_bconin(BIOS_CONSOLE)
+    return gemdos_cconin()
 end
 
 export procedure console_write_text(text: near ^u8)

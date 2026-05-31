@@ -354,6 +354,73 @@ fn language_bios_bconout_runs_through_cop_syscall() {
 }
 
 #[test]
+fn language_gemdos_console_discovers_bios_device() {
+    let dir = temp_dir("language-gemdos-console-device");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let cfg_path = dir.join("image.cfg");
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    fs::write(
+        &caller_path,
+        "
+        module GemdosConsoleCaller
+        application main
+        vector irq = serial_irq
+        fixed($0002aa) volatile var stdin_device: u16
+        fixed($0002ac) volatile var stdout_device: u16
+        fixed($0002ae) volatile var input_status: u16
+        fixed($0002b0) volatile var input_value: u8
+
+        external interrupt procedure serial_irq()
+        external procedure serial_init()
+        external reentrant procedure gemdos_init()
+        external reentrant function gemdos_get_stddev(stream: u16): u16
+        external reentrant function gemdos_cconis(): u16
+        external reentrant function gemdos_cconin(): u8
+        external reentrant procedure gemdos_cconout(ch: u8)
+
+        procedure main()
+            serial_init()
+            gemdos_init()
+            stdin_device = gemdos_get_stddev(0)
+            stdout_device = gemdos_get_stddev(1)
+            input_status = gemdos_cconis()
+            input_value = gemdos_cconin()
+            gemdos_cconout(input_value)
+            return
+        end
+        ",
+    )
+    .expect("caller source should be written");
+    fs::write(&cfg_path, cop_xex_linker_config()).expect("linker config should be written");
+
+    let build = build_mensch_xex_sources(
+        "language-gemdos-console-device",
+        &[
+            caller_path,
+            repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/hellord-gemdos.mensch"),
+            repo_root.join("examples/serial-ring.mensch"),
+        ],
+        &cfg_path,
+    )
+    .expect("GEMDOS console image should build");
+
+    let run = run_image_until_output(&build.image, b"G", 1, 100_000)
+        .expect("GEMDOS console image should echo one byte");
+
+    assert_eq!(run.output, b"G");
+    assert_eq!(run.machine.byte(0x0002aa), 0x02);
+    assert_eq!(run.machine.byte(0x0002ab), 0x00);
+    assert_eq!(run.machine.byte(0x0002ac), 0x02);
+    assert_eq!(run.machine.byte(0x0002ad), 0x00);
+    assert_eq!(run.machine.byte(0x0002ae), 0xff);
+    assert_eq!(run.machine.byte(0x0002af), 0xff);
+    assert_eq!(run.machine.byte(0x0002b0), b'G');
+}
+
+#[test]
 fn language_irq_vector_handles_usb_uart_rx_interrupt() {
     let (code, vectors) = assemble_source_with_vectors_fixture(
         "language-uart-rx-irq",
@@ -957,6 +1024,7 @@ fn build_hellord_example() -> x65_runner::BuildOutput {
             repo_root.join("examples/hellord-files.mensch"),
             repo_root.join("examples/serial-ring.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/hellord-gemdos.mensch"),
         ],
         repo_root.join("examples/hellord-os-x65.cfg"),
     )
