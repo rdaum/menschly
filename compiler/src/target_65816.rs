@@ -1,0 +1,161 @@
+use std::fmt;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsmModule {
+    pub name: String,
+    pub routines: Vec<AsmRoutine>,
+}
+
+impl AsmModule {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            routines: Vec::new(),
+        }
+    }
+
+    pub fn with_routine(mut self, routine: AsmRoutine) -> Self {
+        self.routines.push(routine);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsmRoutine {
+    pub name: String,
+    pub export: bool,
+    pub insts: Vec<AsmInst>,
+}
+
+impl AsmRoutine {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            export: false,
+            insts: Vec::new(),
+        }
+    }
+
+    pub fn exported(mut self) -> Self {
+        self.export = true;
+        self
+    }
+
+    pub fn with_inst(mut self, inst: AsmInst) -> Self {
+        self.insts.push(inst);
+        self
+    }
+
+    pub fn with_insts(mut self, insts: Vec<AsmInst>) -> Self {
+        self.insts = insts;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsmInst {
+    Label(String),
+    Mode(Mode),
+    Lda(Operand),
+    Ldx(Operand),
+    Ldy(Operand),
+    Sta(Operand),
+    Stx(Operand),
+    Sty(Operand),
+    Stz(Operand),
+    Tax,
+    Tay,
+    Txa,
+    Tya,
+    Clc,
+    Sec,
+    Adc(Operand),
+    Sbc(Operand),
+    Inc(Operand),
+    Dec(Operand),
+    Cmp(Operand),
+    Beq(String),
+    Bne(String),
+    Bra(String),
+    Jsr(String),
+    Jsl(String),
+    Rts,
+    Rtl,
+    Rti,
+    Nop,
+    Stp,
+    Raw(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Acc8Index16,
+    Acc16Index16,
+    Acc8Index8,
+    Acc16Index8,
+}
+
+impl Mode {
+    pub fn directives(self) -> &'static [&'static str] {
+        match self {
+            Self::Acc8Index16 => &["sep #$20", ".a8", ".i16"],
+            Self::Acc16Index16 => &["rep #$30", ".a16", ".i16"],
+            Self::Acc8Index8 => &["sep #$30", ".a8", ".i8"],
+            Self::Acc16Index8 => &["rep #$20", "sep #$10", ".a16", ".i8"],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operand {
+    Immediate(Immediate),
+    Absolute(Symbol),
+    AbsoluteLong(Symbol),
+    Direct(Symbol),
+    DirectIndexedX(Symbol),
+    DirectIndexedY(Symbol),
+    IndirectDirect(Symbol),
+    IndirectDirectIndexedY(Symbol),
+    IndirectLongDirect(Symbol),
+    IndirectLongDirectIndexedY(Symbol),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Immediate {
+    Byte(u8),
+    Word(u16),
+    Long(u32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Symbol {
+    Named(String),
+    Address(u32),
+}
+
+impl From<&str> for Symbol {
+    fn from(value: &str) -> Self {
+        Self::Named(value.to_owned())
+    }
+}
+
+impl From<String> for Symbol {
+    fn from(value: String) -> Self {
+        Self::Named(value)
+    }
+}
+
+impl From<u32> for Symbol {
+    fn from(value: u32) -> Self {
+        Self::Address(value)
+    }
+}
+
+impl fmt::Display for Symbol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Named(name) => f.write_str(name),
+            Self::Address(address) => write!(f, "${address:06x}"),
+        }
+    }
+}

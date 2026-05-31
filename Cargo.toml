@@ -4,5 +4,8 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[lib]
+path = "compiler/src/lib.rs"
+
 [dev-dependencies]
 wdc65816 = "0.1.0"
