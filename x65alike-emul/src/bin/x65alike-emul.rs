@@ -1,11 +1,13 @@
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
+use std::path::Path;
 use std::process;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
+use x65alike_emul::image::{load_image, ImageFormat};
 use x65alike_emul::Machine;
 
 const DEFAULT_LOAD_ADDR: u32 = 0x020000;
@@ -23,8 +25,14 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let config = Config::parse(env::args().skip(1))?;
-    let image = fs::read(&config.image_path)
+    let image_bytes = fs::read(&config.image_path)
         .map_err(|error| format!("failed to read {}: {error}", config.image_path))?;
+    let image = load_image(
+        Path::new(&config.image_path),
+        &image_bytes,
+        config.format,
+        config.load_addr,
+    )?;
     let mut serial_input = Vec::new();
     let mut stdin = io::stdin();
     let live_input = if stdin.is_terminal() {
@@ -37,15 +45,17 @@ fn run() -> Result<(), String> {
     };
 
     let mut machine = Machine::new();
-    machine.load(config.load_addr, &image);
+    for range in &image.ranges {
+        machine.load(range.address, &range.bytes);
+    }
     machine.push_serial_input(&serial_input);
 
     let mut bus = BusMachine::new(machine);
     let mut cpu = Processor::new();
     cpu.p = StatusRegister::from_byte(config.status, false);
-    cpu.pbr = config.pbr;
+    cpu.pbr = config.pbr.or(image.entry.map(|entry| entry.pbr)).unwrap_or(0);
     cpu.dbr = config.dbr;
-    cpu.pc = config.pc;
+    cpu.pc = config.pc.or(image.entry.map(|entry| entry.pc)).unwrap_or(0);
     cpu.s = config.stack;
 
     let stdout = io::stdout();
@@ -184,9 +194,10 @@ impl HasAddressBus for BusMachine {
 #[derive(Debug, Clone)]
 struct Config {
     image_path: String,
+    format: ImageFormat,
     load_addr: u32,
-    pc: u16,
-    pbr: u8,
+    pc: Option<u16>,
+    pbr: Option<u8>,
     dbr: u8,
     stack: u16,
     status: u8,
@@ -198,6 +209,7 @@ struct Config {
 impl Config {
     fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut image_path = None;
+        let mut format = ImageFormat::Auto;
         let mut load_addr = DEFAULT_LOAD_ADDR;
         let mut pc = None;
         let mut pbr = None;
@@ -214,6 +226,9 @@ impl Config {
                 "-h" | "--help" => return Err(usage()),
                 "--load" => {
                     load_addr = parse_u24(next_arg(&mut args, "--load")?, "--load")?;
+                }
+                "--format" => {
+                    format = ImageFormat::parse(&next_arg(&mut args, "--format")?)?;
                 }
                 "--pc" => pc = Some(parse_u16(next_arg(&mut args, "--pc")?, "--pc")?),
                 "--pbr" => pbr = Some(parse_u8(next_arg(&mut args, "--pbr")?, "--pbr")?),
@@ -244,9 +259,10 @@ impl Config {
 
         Ok(Self {
             image_path,
+            format,
             load_addr,
-            pc: pc.unwrap_or(load_addr as u16),
-            pbr: pbr.unwrap_or((load_addr >> 16) as u8),
+            pc,
+            pbr,
             dbr,
             stack,
             status,
@@ -314,12 +330,13 @@ fn parse_number(value: &str) -> Result<u32, String> {
 }
 
 fn usage() -> String {
-    "usage: x65alike-emul [options] <image.bin>\n\
+    "usage: x65alike-emul [options] <image>\n\
      \n\
      Options:\n\
-       --load ADDR       Load image at 24-bit address, default $020000\n\
-       --pc PC           Initial 16-bit PC, default low word of --load\n\
-       --pbr BANK        Initial program bank, default bank of --load\n\
+       --format FORMAT   Image format: auto, raw, xex; default auto\n\
+       --load ADDR       Raw image load address, default $020000\n\
+       --pc PC           Initial 16-bit PC, default image entry or $0000\n\
+       --pbr BANK        Initial program bank, default image entry or $00\n\
        --dbr BANK        Initial data bank, default $00\n\
        --stack SP        Initial stack pointer, default $01fc\n\
        --status P        Initial status register byte, default $00\n\

@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+pub mod image;
+
 pub const SRAM_SIZE: usize = 2 * 1024 * 1024;
 pub const CPU_SPACE_SIZE: usize = 16 * 1024 * 1024;
 

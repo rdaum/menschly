@@ -120,20 +120,47 @@ map behind it, scripts serial input, and checks the captured output.
 The crate also provides a small runner binary:
 
 ```sh
-cargo run --manifest-path x65alike-emul/Cargo.toml --bin x65alike-emul -- path/to/image.bin
+cargo run --manifest-path x65alike-emul/Cargo.toml --bin x65alike-emul -- path/to/image.xex
 ```
 
-By default the image is loaded at `$02_0000` and execution starts at
-`PBR:PC = $02:$0000`. Stdin is queued as USB UART input, and bytes written to
-`USB_UART_DATA` are streamed to stdout.
+The runner currently accepts raw binaries and ld65's Atari/XEX output format.
+Format auto-detection is intentionally conservative: `.xex` and `.obx` files
+are parsed as Atari/XEX, `.bin` and `.raw` files are treated as flat binaries,
+and extensionless files default to raw unless `--format xex` is supplied.
+
+For raw binaries, the image is loaded at `$02_0000` by default and execution
+starts at `PBR:PC = $02:$0000`. For Atari/XEX images, each block is loaded at
+its 16-bit address in bank zero, and the optional `RUNAD` block sets the initial
+PC. Stdin is queued as USB UART input, and bytes written to `USB_UART_DATA` are
+streamed to stdout.
 
 Common options:
 
 ```sh
-x65alike-emul --load $020000 --pc $0000 --pbr $02 --max-steps 100000 image.bin
+x65alike-emul program.xex
+x65alike-emul --format xex program
+x65alike-emul --format raw --load $020000 --pc $0000 --pbr $02 --max-steps 100000 image.bin
 x65alike-emul --stop-at $03:$1234 image.bin
 printf 'hello' | x65alike-emul --quiet image.bin
 ```
 
+An ld65 config can produce a directly bootable XEX by selecting the Atari file
+format and naming the entry symbol as `RUNAD`:
+
+```text
+FILES {
+  %O: format = atari;
+}
+FORMATS {
+  atari: runad = main;
+}
+```
+
+Atari/XEX is useful as a common ld65-emitted, address-bearing test image format,
+but it is still a 16-bit loader format. It cannot describe arbitrary 65816
+program banks. Use a raw image with an explicit `--load` address for simple
+24-bit bank tests until a 24-bit address-bearing format such as S-record is
+implemented.
+
 The runner is deliberately minimal. It does not yet emulate reset-vector boot,
-NMI delivery, or cycle timing.
+NMI delivery, S-record/Intel HEX input, o65 host-side loading, or cycle timing.

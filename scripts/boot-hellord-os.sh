@@ -14,7 +14,7 @@ src="$build_dir/hellord-os.mensch"
 asm="$build_dir/hellord-os.a65"
 obj="$build_dir/hellord-os.o"
 cfg="$build_dir/hellord-os.cfg"
-bin="$build_dir/hellord-os.bin"
+xex="$build_dir/hellord-os.xex"
 max_steps=10000000
 if [ -t 0 ]; then
   max_steps=0
@@ -52,9 +52,15 @@ MENSCH
 cat > "$cfg" <<'CFG'
 MEMORY {
   ZP: start = $000080, size = $000080, type = rw;
-  CODE: start = $020000, size = $001000, file = %O;
-  META: start = $020f00, size = $000100, file = %O;
-  BSS: start = $021000, size = $001000, type = rw;
+  CODE: start = $008000, size = $001000, file = %O;
+  META: start = $008f00, size = $000100, file = %O;
+  BSS: start = $009000, size = $000f00, type = rw;
+}
+FILES {
+  %O: format = atari;
+}
+FORMATS {
+  atari: runad = main;
 }
 SEGMENTS {
   ZEROPAGE: load = ZP, type = zp;
@@ -66,11 +72,8 @@ CFG
 
 cargo run --quiet --manifest-path "$repo_root/Cargo.toml" --bin menschc -- "$src" -o "$asm"
 ca65 -g --cpu 65816 "$asm" -o "$obj"
-ld65 -C "$cfg" "$obj" -o "$bin"
+ld65 -C "$cfg" "$obj" -o "$xex"
 cargo run --quiet --manifest-path "$repo_root/x65alike-emul/Cargo.toml" --bin x65alike-emul -- \
   --quiet \
-  --load '$020000' \
-  --pbr '$02' \
-  --pc '$0000' \
   --max-steps "$max_steps" \
-  "$bin"
+  "$xex"
