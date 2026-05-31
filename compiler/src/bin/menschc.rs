@@ -30,7 +30,10 @@ fn run() -> Result<(), String> {
             if source_path == Path::new("-") {
                 return Err("stdin cannot be used with multiple input paths".to_owned());
             }
-            let compiled = compile_path(source_path, config.storage_report)?;
+            let remaining_direct_page = config
+                .direct_page_budget
+                .saturating_sub(assignments_direct_page_bytes(&assignments));
+            let compiled = compile_path(source_path, config.storage_report, remaining_direct_page)?;
             let stem = source_path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
@@ -40,17 +43,27 @@ fn run() -> Result<(), String> {
                 .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
             assignments.push(compiled.assignment);
         }
+        storage::validate_direct_page_budget(&assignments, config.direct_page_budget)
+            .map_err(|error| error.to_string())?;
         if config.storage_report {
             eprintln!(
                 "{}",
-                storage::direct_page_usage(&assignments, storage::DEFAULT_DIRECT_PAGE_BUDGET)
-                    .report()
+                storage::direct_page_usage(&assignments, config.direct_page_budget).report()
             );
         }
         return Ok(());
     }
 
-    let compiled = compile_path(&config.sources[0], config.storage_report)?;
+    let compiled = compile_path(
+        &config.sources[0],
+        config.storage_report,
+        config.direct_page_budget,
+    )?;
+    storage::validate_direct_page_budget(
+        std::slice::from_ref(&compiled.assignment),
+        config.direct_page_budget,
+    )
+    .map_err(|error| error.to_string())?;
 
     if let Some(output) = config.output {
         fs::write(&output, compiled.asm)
@@ -69,7 +82,11 @@ struct CompiledSource {
     assignment: storage::StorageAssignment,
 }
 
-fn compile_path(path: &Path, storage_report: bool) -> Result<CompiledSource, String> {
+fn compile_path(
+    path: &Path,
+    storage_report: bool,
+    direct_page_budget: u16,
+) -> Result<CompiledSource, String> {
     let mut source = String::new();
     if path == Path::new("-") {
         io::stdin()
@@ -82,7 +99,8 @@ fn compile_path(path: &Path, storage_report: bool) -> Result<CompiledSource, Str
 
     let module = frontend::compile_source(&source).map_err(|error| error.to_string())?;
     let (lowered, assignment) =
-        lower_65816::lower_module_with_storage(&module).map_err(|error| error.to_string())?;
+        lower_65816::lower_module_with_storage_budget(&module, direct_page_budget)
+            .map_err(|error| error.to_string())?;
     if storage_report {
         if path == Path::new("-") {
             eprintln!("{assignment}");
@@ -94,6 +112,13 @@ fn compile_path(path: &Path, storage_report: bool) -> Result<CompiledSource, Str
         asm: ca65::emit_module(&lowered),
         assignment,
     })
+}
+
+fn assignments_direct_page_bytes(assignments: &[storage::StorageAssignment]) -> u16 {
+    assignments
+        .iter()
+        .map(|assignment| assignment.direct_page_bytes)
+        .sum()
 }
 
 #[derive(Debug, Parser)]
@@ -109,4 +134,52 @@ struct Config {
     /// Print the compiler's storage and direct-page assignment report to stderr.
     #[arg(long)]
     storage_report: bool,
+
+    /// Direct-page bytes available to compiler-managed storage.
+    #[arg(long, default_value_t = storage::DEFAULT_DIRECT_PAGE_BUDGET)]
+    direct_page_budget: u16,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn compile_path_spills_scratch_when_direct_page_budget_is_full() {
+        let path = temp_source_path("scratch-budget");
+        fs::write(
+            &path,
+            "
+            module ScratchBudget
+
+            export procedure main()
+                direct var reserved: u16
+                scratch var value: u16
+
+                value = $1234
+                reserved = value
+                return
+            end
+            ",
+        )
+        .expect("source fixture should be written");
+
+        let compiled = compile_path(&path, false, 2).expect("source should compile");
+
+        assert_eq!(compiled.assignment.direct_page_bytes, 2);
+        assert!(compiled.asm.contains("$01,s"));
+        assert!(!compiled.asm.contains("__dp_scratch"));
+    }
+
+    fn temp_source_path(name: &str) -> PathBuf {
+        let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("menschc-{name}-{}-{id}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir.join("fixture.mensch")
+    }
 }

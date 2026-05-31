@@ -40,6 +40,7 @@ fn optimize_routine(routine: &AsmRoutine, direct_symbols: &BTreeSet<String>) -> 
     let insts = peephole(&insts);
     let insts = remove_redundant_modes(&insts);
     let insts = remove_redundant_accumulator_loads(&insts);
+    let insts = remove_redundant_index_loads(&insts);
     let insts = remove_redundant_index_transfers(&insts);
     let insts = remove_redundant_modes(&insts);
 
@@ -419,6 +420,193 @@ fn accumulator_store_cacheable(operand: &Operand) -> bool {
         operand,
         Operand::Direct(_) | Operand::DirectIndexedX(_) | Operand::StackRelative(_)
     )
+}
+
+fn remove_redundant_index_loads(insts: &[AsmInst]) -> Vec<AsmInst> {
+    let mut out = Vec::with_capacity(insts.len());
+    let mut state = IndexLoadState::default();
+
+    for inst in insts {
+        match inst {
+            AsmInst::Ldx(operand)
+                if state.x.flags_match
+                    && state.x.aliases.iter().any(|alias| alias == operand)
+                    && index_load_cacheable(operand) => {}
+            AsmInst::Ldy(operand)
+                if state.y.flags_match
+                    && state.y.aliases.iter().any(|alias| alias == operand)
+                    && index_load_cacheable(operand) => {}
+            _ => {
+                out.push(inst.clone());
+                state.observe(inst);
+            }
+        }
+    }
+
+    out
+}
+
+#[derive(Debug, Default)]
+struct IndexLoadState {
+    x: RegisterAliasState,
+    y: RegisterAliasState,
+}
+
+impl IndexLoadState {
+    fn observe(&mut self, inst: &AsmInst) {
+        match inst {
+            AsmInst::Ldx(operand) => {
+                self.x.load(operand, index_load_cacheable);
+                self.y.flags_no_longer_match();
+            }
+            AsmInst::Ldy(operand) => {
+                self.x.flags_no_longer_match();
+                self.y.load(operand, index_load_cacheable);
+            }
+            AsmInst::Tax => {
+                self.x.aliases.clear();
+                self.x.flags_match = true;
+                self.y.flags_no_longer_match();
+            }
+            AsmInst::Tay => {
+                self.y.aliases.clear();
+                self.y.flags_match = true;
+                self.x.flags_no_longer_match();
+            }
+            AsmInst::Txa => {
+                self.x.flags_match = true;
+                self.y.flags_no_longer_match();
+            }
+            AsmInst::Tya => {
+                self.x.flags_no_longer_match();
+                self.y.flags_match = true;
+            }
+            AsmInst::Inx | AsmInst::Plx => {
+                self.x.aliases.clear();
+                self.x.flags_match = true;
+                self.y.flags_no_longer_match();
+            }
+            AsmInst::Ply => {
+                self.y.aliases.clear();
+                self.y.flags_match = true;
+                self.x.flags_no_longer_match();
+            }
+            AsmInst::Lda(_)
+            | AsmInst::Adc(_)
+            | AsmInst::Sbc(_)
+            | AsmInst::And(_)
+            | AsmInst::Pla => {
+                self.x.flags_no_longer_match();
+                self.y.flags_no_longer_match();
+            }
+            AsmInst::Cmp(_)
+            | AsmInst::Cpx(_)
+            | AsmInst::Inc(_)
+            | AsmInst::Dec(_)
+            | AsmInst::Plp => {
+                self.x.flags_no_longer_match();
+                self.y.flags_no_longer_match();
+            }
+            AsmInst::Stx(operand) => {
+                self.x.invalidate_memory_aliases_for_store(operand);
+                self.y
+                    .invalidate_memory_aliases_for_unrelated_store(operand);
+                if index_store_cacheable(operand) {
+                    self.x.add_alias(operand.clone());
+                }
+            }
+            AsmInst::Sty(operand) => {
+                self.x
+                    .invalidate_memory_aliases_for_unrelated_store(operand);
+                self.y.invalidate_memory_aliases_for_store(operand);
+                if index_store_cacheable(operand) {
+                    self.y.add_alias(operand.clone());
+                }
+            }
+            AsmInst::Sta(operand) | AsmInst::Stz(operand) => {
+                self.x
+                    .invalidate_memory_aliases_for_unrelated_store(operand);
+                self.y
+                    .invalidate_memory_aliases_for_unrelated_store(operand);
+            }
+            AsmInst::Mode(_)
+            | AsmInst::Label(_)
+            | AsmInst::Jsr(_)
+            | AsmInst::Jsl(_)
+            | AsmInst::Rts
+            | AsmInst::Rtl
+            | AsmInst::Rti
+            | AsmInst::Raw(_)
+            | AsmInst::Xba
+            | AsmInst::Tsc
+            | AsmInst::Tcs
+            | AsmInst::Bra(_)
+            | AsmInst::Brl(_)
+            | AsmInst::Beq(_)
+            | AsmInst::Bne(_)
+            | AsmInst::Bcc(_)
+            | AsmInst::Bcs(_) => self.clear(),
+            AsmInst::Clc
+            | AsmInst::Sec
+            | AsmInst::Pha
+            | AsmInst::Phx
+            | AsmInst::Phy
+            | AsmInst::Php
+            | AsmInst::Phb
+            | AsmInst::Phk
+            | AsmInst::Pea(_)
+            | AsmInst::Per(_)
+            | AsmInst::Plb
+            | AsmInst::Nop
+            | AsmInst::Stp => {}
+        }
+    }
+
+    fn clear(&mut self) {
+        self.x.clear();
+        self.y.clear();
+    }
+}
+
+#[derive(Debug, Default)]
+struct RegisterAliasState {
+    aliases: Vec<Operand>,
+    flags_match: bool,
+}
+
+impl RegisterAliasState {
+    fn clear(&mut self) {
+        self.aliases.clear();
+        self.flags_match = false;
+    }
+
+    fn load(&mut self, operand: &Operand, cacheable: impl Fn(&Operand) -> bool) {
+        self.aliases.clear();
+        if cacheable(operand) {
+            self.aliases.push(operand.clone());
+        }
+        self.flags_match = true;
+    }
+
+    fn flags_no_longer_match(&mut self) {
+        self.flags_match = false;
+    }
+
+    fn invalidate_memory_aliases_for_store(&mut self, operand: &Operand) {
+        self.aliases
+            .retain(|alias| operand_alias_survives_store(alias, operand));
+    }
+
+    fn invalidate_memory_aliases_for_unrelated_store(&mut self, operand: &Operand) {
+        self.aliases
+            .retain(|alias| memory_alias_survives_unrelated_store(alias, operand));
+    }
+
+    fn add_alias(&mut self, operand: Operand) {
+        if !self.aliases.iter().any(|alias| alias == &operand) {
+            self.aliases.push(operand);
+        }
+    }
 }
 
 fn remove_redundant_index_transfers(insts: &[AsmInst]) -> Vec<AsmInst> {
@@ -980,6 +1168,118 @@ mod tests {
                 AsmInst::Tax,
                 AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
                 AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("other".to_owned()))),
+            ]
+        );
+    }
+
+    #[test]
+    fn removes_redundant_index_load_when_flags_still_match() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+            AsmInst::Phx,
+            AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+            AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+                AsmInst::Phx,
+                AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
+            ]
+        );
+    }
+
+    #[test]
+    fn removes_redundant_y_load_when_flags_still_match() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Ldy(Operand::Direct(Symbol::Named("offset".to_owned()))),
+            AsmInst::Phy,
+            AsmInst::Ldy(Operand::Direct(Symbol::Named("offset".to_owned()))),
+            AsmInst::Lda(Operand::IndirectDirectIndexedY(Symbol::Named(
+                "ptr".to_owned(),
+            ))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Ldy(Operand::Direct(Symbol::Named("offset".to_owned()))),
+                AsmInst::Phy,
+                AsmInst::Lda(Operand::IndirectDirectIndexedY(Symbol::Named(
+                    "ptr".to_owned(),
+                ))),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_redundant_index_load_after_flags_stop_matching() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+            AsmInst::Lda(Operand::Immediate(Immediate::Byte(0))),
+            AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+            AsmInst::Beq("done".to_owned()),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+                AsmInst::Lda(Operand::Immediate(Immediate::Byte(0))),
+                AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+                AsmInst::Beq("done".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_redundant_index_load_after_other_index_load_sets_flags() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+            AsmInst::Ldy(Operand::Immediate(Immediate::Word(0))),
+            AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+            AsmInst::Beq("done".to_owned()),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+                AsmInst::Ldy(Operand::Immediate(Immediate::Word(0))),
+                AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+                AsmInst::Beq("done".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_redundant_index_load_after_label_boundary() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+            AsmInst::Label("entry".to_owned()),
+            AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+            AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+                AsmInst::Label("entry".to_owned()),
+                AsmInst::Ldx(Operand::Immediate(Immediate::Word(4))),
+                AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
             ]
         );
     }

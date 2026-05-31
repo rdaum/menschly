@@ -239,7 +239,18 @@ pub fn validate_direct_page_budget(
 }
 
 pub fn assign_storage(module: &Module) -> StorageAssignment {
-    let mut allocator = DirectAllocator::default();
+    assign_storage_with_direct_page_budget(module, None)
+}
+
+pub fn assign_storage_with_budget(module: &Module, budget: u16) -> StorageAssignment {
+    assign_storage_with_direct_page_budget(module, Some(budget))
+}
+
+fn assign_storage_with_direct_page_budget(
+    module: &Module,
+    budget: Option<u16>,
+) -> StorageAssignment {
+    let mut allocator = DirectAllocator::new(budget);
     let mut args = DirectSlotPool::new("__dp_arg");
     let mut scratch = DirectSlotPool::new("__dp_scratch");
     let routines = module
@@ -384,7 +395,7 @@ fn assign_params(
 ) {
     let lifetimes = param_lifetimes(routine);
     let mut used_arg_symbols = Vec::new();
-    let can_share_params = !routine.export && routine.params.len() <= 1;
+    let can_share_params = !routine.export;
     for param in &routine.params {
         let lifetime = lifetimes
             .iter()
@@ -533,10 +544,16 @@ fn assign_volatile_scratch_bindings(
     scratch: &mut DirectSlotPool,
     out: &mut RoutineStorage,
 ) {
+    let direct_keys = direct_scratch_keys(&lifetimes, &scratch.slots, allocator.remaining_budget());
     let mut active: Vec<ActiveDirectSlot> = Vec::new();
     let mut free = scratch.slots.clone();
 
     for temp in lifetimes {
+        if !direct_keys.contains(&temp.key) {
+            bind_stack_scratch(out, &temp);
+            continue;
+        }
+
         let mut i = 0;
         while i < active.len() {
             if active[i].last_use < temp.first_use {
@@ -554,7 +571,13 @@ fn assign_volatile_scratch_bindings(
         let slot_index = free.iter().position(|slot| slot.size >= temp.size);
         let slot = match slot_index {
             Some(index) => free.remove(index),
-            None => scratch.alloc(allocator, temp.size),
+            None if allocator.can_alloc(temp.size) || temp.direct_required => {
+                scratch.alloc(allocator, temp.size)
+            }
+            None => {
+                bind_stack_scratch(out, &temp);
+                continue;
+            }
         };
 
         bind_direct_scratch(out, &temp, &slot);
@@ -572,10 +595,16 @@ fn assign_private_scratch_bindings(
     allocator: &mut DirectAllocator,
     out: &mut RoutineStorage,
 ) {
+    let direct_keys = direct_scratch_keys(&lifetimes, &[], allocator.remaining_budget());
     let mut active: Vec<ActiveDirectSlot> = Vec::new();
     let mut free: Vec<AllocatedSlot> = Vec::new();
 
     for temp in lifetimes {
+        if !direct_keys.contains(&temp.key) {
+            bind_stack_scratch(out, &temp);
+            continue;
+        }
+
         let mut i = 0;
         while i < active.len() {
             if active[i].last_use < temp.first_use {
@@ -593,7 +622,13 @@ fn assign_private_scratch_bindings(
         let slot_index = free.iter().position(|slot| slot.size >= temp.size);
         let slot = match slot_index {
             Some(index) => free.remove(index),
-            None => allocator.alloc(temp.symbol_name.clone(), temp.size),
+            None if allocator.can_alloc(temp.size) || temp.direct_required => {
+                allocator.alloc(temp.symbol_name.clone(), temp.size)
+            }
+            None => {
+                bind_stack_scratch(out, &temp);
+                continue;
+            }
         };
 
         bind_direct_scratch(out, &temp, &slot);
@@ -603,6 +638,77 @@ fn assign_private_scratch_bindings(
             size: slot.size,
             last_use: temp.last_use,
         });
+    }
+}
+
+fn direct_scratch_keys(
+    lifetimes: &[ScratchLifetime],
+    reusable_slots: &[AllocatedSlot],
+    new_budget: Option<u16>,
+) -> BTreeSet<BindingKey> {
+    let Some(mut new_budget) = new_budget else {
+        return lifetimes
+            .iter()
+            .map(|binding| binding.key.clone())
+            .collect();
+    };
+
+    let mut slots = reusable_slots
+        .iter()
+        .map(|slot| PlannedDirectSlot {
+            size: slot.size,
+            intervals: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut candidates = lifetimes.iter().collect::<Vec<_>>();
+    candidates.sort_by_key(|binding| {
+        (
+            !binding.direct_required,
+            std::cmp::Reverse(binding.use_count),
+            binding.first_use,
+            binding.last_use,
+            binding.symbol_name.clone(),
+        )
+    });
+
+    let mut direct = BTreeSet::new();
+    for binding in candidates {
+        if let Some(slot) = slots
+            .iter_mut()
+            .find(|slot| slot.can_place(binding.first_use, binding.last_use, binding.size))
+        {
+            slot.place(binding.first_use, binding.last_use);
+            direct.insert(binding.key.clone());
+        } else if binding.direct_required || binding.size <= new_budget {
+            new_budget = new_budget.saturating_sub(binding.size);
+            slots.push(PlannedDirectSlot {
+                size: binding.size,
+                intervals: vec![(binding.first_use, binding.last_use)],
+            });
+            direct.insert(binding.key.clone());
+        }
+    }
+
+    direct
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannedDirectSlot {
+    size: u16,
+    intervals: Vec<(usize, usize)>,
+}
+
+impl PlannedDirectSlot {
+    fn can_place(&self, first_use: usize, last_use: usize, size: u16) -> bool {
+        self.size >= size
+            && self
+                .intervals
+                .iter()
+                .all(|(first, last)| *last < first_use || last_use < *first)
+    }
+
+    fn place(&mut self, first_use: usize, last_use: usize) {
+        self.intervals.push((first_use, last_use));
     }
 }
 
@@ -621,6 +727,23 @@ fn bind_direct_scratch(out: &mut RoutineStorage, binding: &ScratchLifetime, slot
         size: slot.size,
         source: binding.key.clone(),
     });
+}
+
+fn bind_stack_scratch(out: &mut RoutineStorage, binding: &ScratchLifetime) {
+    let offset = out.stack_frame_bytes + 1;
+    out.bindings.insert(
+        binding.key.clone(),
+        Location::Stack {
+            offset,
+            size: binding.size,
+        },
+    );
+    out.stack_slots.push(StackSlot {
+        name: binding.symbol_name.clone(),
+        offset,
+        size: binding.size,
+    });
+    out.stack_frame_bytes += binding.size;
 }
 
 fn allocate_direct_param(
@@ -900,8 +1023,9 @@ fn param_lifetimes(routine: &Routine) -> Vec<ParamLifetime> {
 }
 
 fn temp_lifetimes(routine: &Routine) -> Vec<TempLifetime> {
-    let mut temps = BTreeMap::<String, (usize, usize, u16)>::new();
+    let mut temps = BTreeMap::<String, (usize, usize, u16, usize)>::new();
     let mut call_indices = Vec::new();
+    let direct_required = direct_required_bindings(routine);
 
     for (index, inst) in routine.body.iter().enumerate() {
         if is_call_barrier(inst) {
@@ -913,21 +1037,28 @@ fn temp_lifetimes(routine: &Routine) -> Vec<TempLifetime> {
                 .and_modify(|entry| {
                     entry.1 = index;
                     entry.2 = entry.2.max(size);
+                    entry.3 += 1;
                 })
-                .or_insert((index, index, size));
+                .or_insert((index, index, size, 1));
         }
     }
 
     temps
         .into_iter()
-        .map(|(name, (first_use, last_use, size))| TempLifetime {
-            name,
-            first_use,
-            last_use,
-            size,
-            crosses_call: call_indices
-                .iter()
-                .any(|call| first_use < *call && *call < last_use),
+        .map(|(name, (first_use, last_use, size, use_count))| {
+            let requires_direct =
+                size > 2 || direct_required.contains(&BindingKey::Temp(name.clone()));
+            TempLifetime {
+                name,
+                first_use,
+                last_use,
+                size,
+                use_count,
+                direct_required: requires_direct,
+                crosses_call: call_indices
+                    .iter()
+                    .any(|call| first_use < *call && *call < last_use),
+            }
         })
         .collect()
 }
@@ -957,6 +1088,8 @@ fn scratch_lifetimes(routine: &Routine) -> Vec<ScratchLifetime> {
             first_use: temp.first_use,
             last_use: temp.last_use,
             size: temp.size,
+            use_count: temp.use_count,
+            direct_required: temp.direct_required,
             crosses_call: temp.crosses_call,
         })
         .collect::<Vec<_>>();
@@ -978,9 +1111,10 @@ fn scratch_local_lifetimes(routine: &Routine) -> Vec<ScratchLifetime> {
 
     let mut locals = scratch_locals
         .iter()
-        .map(|(name, size)| (name.clone(), (None::<usize>, None::<usize>, *size)))
+        .map(|(name, size)| (name.clone(), (None::<usize>, None::<usize>, *size, 0usize)))
         .collect::<BTreeMap<_, _>>();
     let mut call_indices = Vec::new();
+    let direct_required = direct_required_bindings(routine);
 
     for (index, inst) in routine.body.iter().enumerate() {
         if is_call_barrier(inst) {
@@ -990,13 +1124,14 @@ fn scratch_local_lifetimes(routine: &Routine) -> Vec<ScratchLifetime> {
             if let Some(entry) = locals.get_mut(&name) {
                 entry.0 = Some(entry.0.unwrap_or(index).min(index));
                 entry.1 = Some(index);
+                entry.3 += 1;
             }
         }
     }
 
     locals
         .into_iter()
-        .filter_map(|(name, (first_use, last_use, size))| {
+        .filter_map(|(name, (first_use, last_use, size, use_count))| {
             let (Some(first_use), Some(last_use)) = (first_use, last_use) else {
                 return None;
             };
@@ -1006,12 +1141,30 @@ fn scratch_local_lifetimes(routine: &Routine) -> Vec<ScratchLifetime> {
                 first_use,
                 last_use,
                 size,
+                use_count,
+                direct_required: size > 2
+                    || direct_required.contains(&BindingKey::Local(name.clone())),
                 crosses_call: call_indices
                     .iter()
                     .any(|call| first_use < *call && *call < last_use),
             })
         })
         .collect()
+}
+
+fn direct_required_bindings(routine: &Routine) -> BTreeSet<BindingKey> {
+    let mut out = BTreeSet::new();
+
+    for inst in &routine.body {
+        match inst {
+            IrInst::Load { addr, .. } | IrInst::Store { addr, .. } => {
+                collect_direct_required_address(addr, &mut out);
+            }
+            _ => {}
+        }
+    }
+
+    out
 }
 
 fn is_call_barrier(inst: &IrInst) -> bool {
@@ -1265,6 +1418,27 @@ fn collect_temp_address(addr: &Address, out: &mut Vec<(String, u16)>) {
     }
 }
 
+fn collect_direct_required_address(addr: &Address, out: &mut BTreeSet<BindingKey>) {
+    match addr {
+        Address::NearPtr(value) | Address::FarPtr(value) => {
+            collect_direct_required_value(value, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_direct_required_value(value: &Value, out: &mut BTreeSet<BindingKey>) {
+    match value {
+        Value::Local(name) => {
+            out.insert(BindingKey::Local(name.clone()));
+        }
+        Value::Temp(name) => {
+            out.insert(BindingKey::Temp(name.clone()));
+        }
+        _ => {}
+    }
+}
+
 fn collect_local_address(addr: &Address, out: &mut Vec<String>) {
     match addr {
         Address::ValueOffset { base, .. } => collect_local_value(base, out),
@@ -1331,6 +1505,8 @@ struct TempLifetime {
     first_use: usize,
     last_use: usize,
     size: u16,
+    use_count: usize,
+    direct_required: bool,
     crosses_call: bool,
 }
 
@@ -1341,6 +1517,8 @@ struct ScratchLifetime {
     first_use: usize,
     last_use: usize,
     size: u16,
+    use_count: usize,
+    direct_required: bool,
     crosses_call: bool,
 }
 
@@ -1359,12 +1537,30 @@ struct AllocatedSlot {
     size: u16,
 }
 
-#[derive(Default)]
 struct DirectAllocator {
     next_offset: u16,
+    budget: Option<u16>,
 }
 
 impl DirectAllocator {
+    fn new(budget: Option<u16>) -> Self {
+        Self {
+            next_offset: 0,
+            budget,
+        }
+    }
+
+    fn can_alloc(&self, size: u16) -> bool {
+        self.budget
+            .map(|budget| self.next_offset.saturating_add(size) <= budget)
+            .unwrap_or(true)
+    }
+
+    fn remaining_budget(&self) -> Option<u16> {
+        self.budget
+            .map(|budget| budget.saturating_sub(self.next_offset))
+    }
+
     fn alloc(&mut self, symbol: String, size: u16) -> AllocatedSlot {
         let slot = AllocatedSlot {
             symbol,
@@ -1439,8 +1635,8 @@ mod tests {
     use crate::ir::{Const, IrInst, Label, Local, Module, Routine, Storage, Type, Value, Width};
 
     use super::{
-        apply_storage, assign_storage, validate_direct_page_budget, validate_storage_assignment,
-        BindingKey, Location, RoutineStorage, StorageAssignment,
+        apply_storage, assign_storage, assign_storage_with_budget, validate_direct_page_budget,
+        validate_storage_assignment, BindingKey, Location, RoutineStorage, StorageAssignment,
     };
 
     #[test]
@@ -1663,6 +1859,235 @@ mod tests {
     }
 
     #[test]
+    fn spills_scratch_locals_to_stack_when_direct_page_budget_is_exhausted() {
+        let module = Module::new("layout").with_routine(
+            Routine::procedure("scratch_pressure")
+                .with_local(Local::new("reserved", Type::U16, Storage::Direct))
+                .with_local(Local::new("scratch", Type::U16, Storage::Scratch))
+                .with_body(vec![
+                    IrInst::LoadConst {
+                        dst: Value::Local("reserved".to_owned()),
+                        value: Const::U16(1),
+                    },
+                    IrInst::LoadConst {
+                        dst: Value::Local("scratch".to_owned()),
+                        value: Const::U16(2),
+                    },
+                    IrInst::Store {
+                        width: Width::Word,
+                        addr: crate::ir::Address::Direct("out".to_owned()),
+                        src: Value::Local("scratch".to_owned()),
+                    },
+                ]),
+        );
+
+        let assignment = assign_storage_with_budget(&module, 2);
+        let routine = assignment.routine("scratch_pressure").unwrap();
+
+        assert_eq!(assignment.direct_page_bytes, 2);
+        assert!(matches!(
+            routine.location(BindingKey::Local("reserved".to_owned())),
+            Some(Location::Direct {
+                offset: 0,
+                size: 2,
+                ..
+            })
+        ));
+        assert!(matches!(
+            routine.location(BindingKey::Local("scratch".to_owned())),
+            Some(Location::Stack { offset: 1, size: 2 })
+        ));
+        assert_eq!(routine.stack_frame_bytes, 2);
+        validate_storage_assignment(&module, &assignment).unwrap();
+    }
+
+    #[test]
+    fn keeps_indirect_pointer_scratch_local_direct_under_budget_pressure() {
+        let module = Module::new("layout").with_routine(
+            Routine::procedure("scratch_pointer")
+                .with_local(Local::new("reserved", Type::U16, Storage::Direct))
+                .with_local(Local::new(
+                    "ptr",
+                    Type::near_ptr(Type::U8),
+                    Storage::Scratch,
+                ))
+                .with_body(vec![
+                    IrInst::LoadConst {
+                        dst: Value::Local("reserved".to_owned()),
+                        value: Const::U16(1),
+                    },
+                    IrInst::LoadAddress {
+                        dst: Value::Local("ptr".to_owned()),
+                        symbol: "out".to_owned(),
+                        width: Width::Word,
+                    },
+                    IrInst::Store {
+                        width: Width::Byte,
+                        addr: crate::ir::Address::NearPtr(Value::Local("ptr".to_owned())),
+                        src: Value::Accumulator,
+                    },
+                ]),
+        );
+
+        let assignment = assign_storage_with_budget(&module, 2);
+        let routine = assignment.routine("scratch_pointer").unwrap();
+
+        assert_eq!(assignment.direct_page_bytes, 4);
+        assert!(matches!(
+            routine.location(BindingKey::Local("reserved".to_owned())),
+            Some(Location::Direct {
+                offset: 0,
+                size: 2,
+                ..
+            })
+        ));
+        assert!(matches!(
+            routine.location(BindingKey::Local("ptr".to_owned())),
+            Some(Location::Direct {
+                offset: 2,
+                size: 2,
+                ..
+            })
+        ));
+        validate_storage_assignment(&module, &assignment).unwrap();
+    }
+
+    #[test]
+    fn keeps_three_byte_scratch_local_direct_under_budget_pressure() {
+        let module = Module::new("layout").with_routine(
+            Routine::procedure("scratch_long")
+                .with_local(Local::new("reserved", Type::U16, Storage::Direct))
+                .with_local(Local::new("wide", Type::U24, Storage::Scratch))
+                .with_body(vec![
+                    IrInst::LoadConst {
+                        dst: Value::Local("reserved".to_owned()),
+                        value: Const::U16(1),
+                    },
+                    IrInst::LoadConst {
+                        dst: Value::Local("wide".to_owned()),
+                        value: Const::U24(0x12_3456),
+                    },
+                    IrInst::Store {
+                        width: Width::Long,
+                        addr: crate::ir::Address::Direct("out".to_owned()),
+                        src: Value::Local("wide".to_owned()),
+                    },
+                ]),
+        );
+
+        let assignment = assign_storage_with_budget(&module, 2);
+        let routine = assignment.routine("scratch_long").unwrap();
+
+        assert_eq!(assignment.direct_page_bytes, 5);
+        assert!(matches!(
+            routine.location(BindingKey::Local("reserved".to_owned())),
+            Some(Location::Direct {
+                offset: 0,
+                size: 2,
+                ..
+            })
+        ));
+        assert!(matches!(
+            routine.location(BindingKey::Local("wide".to_owned())),
+            Some(Location::Direct {
+                offset: 2,
+                size: 3,
+                ..
+            })
+        ));
+        validate_storage_assignment(&module, &assignment).unwrap();
+    }
+
+    #[test]
+    fn keeps_higher_use_scratch_local_direct_under_budget_pressure() {
+        let module = Module::new("layout").with_routine(
+            Routine::procedure("scratch_priority")
+                .with_local(Local::new("low_use", Type::U16, Storage::Scratch))
+                .with_local(Local::new("hot", Type::U16, Storage::Scratch))
+                .with_body(vec![
+                    IrInst::LoadConst {
+                        dst: Value::Local("low_use".to_owned()),
+                        value: Const::U16(1),
+                    },
+                    IrInst::LoadConst {
+                        dst: Value::Local("hot".to_owned()),
+                        value: Const::U16(2),
+                    },
+                    IrInst::Store {
+                        width: Width::Word,
+                        addr: crate::ir::Address::Direct("out".to_owned()),
+                        src: Value::Local("hot".to_owned()),
+                    },
+                    IrInst::Store {
+                        width: Width::Word,
+                        addr: crate::ir::Address::Direct("out".to_owned()),
+                        src: Value::Local("hot".to_owned()),
+                    },
+                    IrInst::Store {
+                        width: Width::Word,
+                        addr: crate::ir::Address::Direct("out".to_owned()),
+                        src: Value::Local("low_use".to_owned()),
+                    },
+                ]),
+        );
+
+        let assignment = assign_storage_with_budget(&module, 2);
+        let routine = assignment.routine("scratch_priority").unwrap();
+
+        assert_eq!(assignment.direct_page_bytes, 2);
+        assert!(matches!(
+            routine.location(BindingKey::Local("hot".to_owned())),
+            Some(Location::Direct { symbol, .. }) if symbol == "__dp_scratch_0"
+        ));
+        assert!(matches!(
+            routine.location(BindingKey::Local("low_use".to_owned())),
+            Some(Location::Stack { offset: 1, size: 2 })
+        ));
+        validate_storage_assignment(&module, &assignment).unwrap();
+    }
+
+    #[test]
+    fn keeps_explicit_direct_locals_direct_even_when_budget_is_exceeded() {
+        let module = Module::new("layout").with_routine(
+            Routine::procedure("hard_direct")
+                .with_local(Local::new("first", Type::U16, Storage::Direct))
+                .with_local(Local::new("second", Type::U16, Storage::Direct))
+                .with_body(vec![
+                    IrInst::LoadConst {
+                        dst: Value::Local("first".to_owned()),
+                        value: Const::U16(1),
+                    },
+                    IrInst::LoadConst {
+                        dst: Value::Local("second".to_owned()),
+                        value: Const::U16(2),
+                    },
+                ]),
+        );
+
+        let assignment = assign_storage_with_budget(&module, 2);
+        let routine = assignment.routine("hard_direct").unwrap();
+
+        assert_eq!(assignment.direct_page_bytes, 4);
+        assert!(matches!(
+            routine.location(BindingKey::Local("first".to_owned())),
+            Some(Location::Direct {
+                offset: 0,
+                size: 2,
+                ..
+            })
+        ));
+        assert!(matches!(
+            routine.location(BindingKey::Local("second".to_owned())),
+            Some(Location::Direct {
+                offset: 2,
+                size: 2,
+                ..
+            })
+        ));
+        validate_storage_assignment(&module, &assignment).unwrap();
+    }
+
+    #[test]
     fn keeps_call_live_scratch_locals_private() {
         let module = Module::new("layout")
             .with_routine(
@@ -1850,6 +2275,71 @@ mod tests {
     }
 
     #[test]
+    fn reuses_volatile_direct_param_slots_for_multi_param_internal_routines() {
+        let module = Module::new("layout")
+            .with_routine(
+                Routine::procedure("first")
+                    .with_param(crate::ir::Param::new("left", Type::U8).direct())
+                    .with_param(crate::ir::Param::new("right", Type::U16).direct())
+                    .with_body(vec![
+                        IrInst::Store {
+                            width: Width::Byte,
+                            addr: crate::ir::Address::Direct("out".to_owned()),
+                            src: Value::Param("left".to_owned()),
+                        },
+                        IrInst::Store {
+                            width: Width::Word,
+                            addr: crate::ir::Address::Direct("out".to_owned()),
+                            src: Value::Param("right".to_owned()),
+                        },
+                    ]),
+            )
+            .with_routine(
+                Routine::procedure("second")
+                    .with_param(crate::ir::Param::new("left", Type::U8).direct())
+                    .with_param(crate::ir::Param::new("right", Type::U16).direct())
+                    .with_body(vec![
+                        IrInst::Store {
+                            width: Width::Byte,
+                            addr: crate::ir::Address::Direct("out".to_owned()),
+                            src: Value::Param("left".to_owned()),
+                        },
+                        IrInst::Store {
+                            width: Width::Word,
+                            addr: crate::ir::Address::Direct("out".to_owned()),
+                            src: Value::Param("right".to_owned()),
+                        },
+                    ]),
+            );
+
+        let assignment = assign_storage(&module);
+        let first = assignment.routine("first").unwrap();
+        let second = assignment.routine("second").unwrap();
+
+        assert_eq!(assignment.direct_page_bytes, 3);
+        assert_eq!(
+            first.location(BindingKey::Param("left".to_owned())),
+            second.location(BindingKey::Param("left".to_owned()))
+        );
+        assert_eq!(
+            first.location(BindingKey::Param("right".to_owned())),
+            second.location(BindingKey::Param("right".to_owned()))
+        );
+        assert_ne!(
+            first.location(BindingKey::Param("left".to_owned())),
+            first.location(BindingKey::Param("right".to_owned()))
+        );
+        assert!(matches!(
+            first.location(BindingKey::Param("left".to_owned())),
+            Some(Location::Direct { symbol, size: 1, .. }) if symbol == "__dp_arg_0"
+        ));
+        assert!(matches!(
+            first.location(BindingKey::Param("right".to_owned())),
+            Some(Location::Direct { symbol, size: 2, .. }) if symbol == "__dp_arg_1"
+        ));
+    }
+
+    #[test]
     fn rewrites_direct_call_argument_symbols_to_shared_param_slots() {
         let module = Module::new("layout")
             .with_routine(Routine::procedure("caller").with_body(vec![
@@ -1884,6 +2374,59 @@ mod tests {
     }
 
     #[test]
+    fn rewrites_multi_param_call_argument_symbols_to_shared_param_slots() {
+        let module = Module::new("layout")
+            .with_routine(Routine::procedure("caller").with_body(vec![
+                IrInst::LoadConst {
+                    dst: Value::Direct(crate::ir::param_symbol("callee", "left")),
+                    value: Const::U8(7),
+                },
+                IrInst::LoadConst {
+                    dst: Value::Direct(crate::ir::param_symbol("callee", "right")),
+                    value: Const::U16(0x1234),
+                },
+                IrInst::CallProcedure {
+                    name: "callee".to_owned(),
+                },
+            ]))
+            .with_routine(
+                Routine::procedure("callee")
+                    .with_param(crate::ir::Param::new("left", Type::U8).direct())
+                    .with_param(crate::ir::Param::new("right", Type::U16).direct())
+                    .with_body(vec![
+                        IrInst::Store {
+                            width: Width::Byte,
+                            addr: crate::ir::Address::Direct("out".to_owned()),
+                            src: Value::Param("left".to_owned()),
+                        },
+                        IrInst::Store {
+                            width: Width::Word,
+                            addr: crate::ir::Address::Direct("out".to_owned()),
+                            src: Value::Param("right".to_owned()),
+                        },
+                    ]),
+            );
+
+        let assignment = assign_storage(&module);
+        let rewritten = apply_storage(&module, &assignment);
+
+        assert_eq!(
+            rewritten.routines[0].body[0],
+            IrInst::LoadConst {
+                dst: Value::Direct("__dp_arg_0".to_owned()),
+                value: Const::U8(7),
+            }
+        );
+        assert_eq!(
+            rewritten.routines[0].body[1],
+            IrInst::LoadConst {
+                dst: Value::Direct("__dp_arg_1".to_owned()),
+                value: Const::U16(0x1234),
+            }
+        );
+    }
+
+    #[test]
     fn keeps_call_live_direct_params_private() {
         let module = Module::new("layout").with_routine(
             Routine::procedure("caller")
@@ -1912,6 +2455,48 @@ mod tests {
         assert!(matches!(
             caller.location(BindingKey::Param("value".to_owned())),
             Some(Location::Direct { symbol, .. }) if symbol == "__dp_caller_param_value"
+        ));
+    }
+
+    #[test]
+    fn only_call_live_params_get_private_direct_slots() {
+        let module = Module::new("layout").with_routine(
+            Routine::procedure("mixed")
+                .with_param(crate::ir::Param::new("short", Type::U8).direct())
+                .with_param(crate::ir::Param::new("saved", Type::U16).direct())
+                .with_body(vec![
+                    IrInst::Store {
+                        width: Width::Byte,
+                        addr: crate::ir::Address::Direct("out".to_owned()),
+                        src: Value::Param("short".to_owned()),
+                    },
+                    IrInst::Compare {
+                        width: Width::Word,
+                        lhs: Value::Param("saved".to_owned()),
+                        rhs: Value::Accumulator,
+                    },
+                    IrInst::CallProcedure {
+                        name: "callee".to_owned(),
+                    },
+                    IrInst::Store {
+                        width: Width::Word,
+                        addr: crate::ir::Address::Direct("out".to_owned()),
+                        src: Value::Param("saved".to_owned()),
+                    },
+                ]),
+        );
+
+        let assignment = assign_storage(&module);
+        let mixed = assignment.routine("mixed").unwrap();
+
+        assert_eq!(assignment.direct_page_bytes, 3);
+        assert!(matches!(
+            mixed.location(BindingKey::Param("short".to_owned())),
+            Some(Location::Direct { symbol, size: 1, .. }) if symbol == "__dp_arg_0"
+        ));
+        assert!(matches!(
+            mixed.location(BindingKey::Param("saved".to_owned())),
+            Some(Location::Direct { symbol, size: 2, .. }) if symbol == "__dp_mixed_param_saved"
         ));
     }
 

@@ -84,8 +84,15 @@ pub fn build_mensch_xex_sources(
         let source = fs::read_to_string(source_path)
             .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
         let module = frontend::compile_source(&source).map_err(|error| error.to_string())?;
+        let used_direct_page = storage_assignments
+            .iter()
+            .map(|assignment: &storage::StorageAssignment| assignment.direct_page_bytes)
+            .sum::<u16>();
+        let remaining_direct_page =
+            storage::DEFAULT_DIRECT_PAGE_BUDGET.saturating_sub(used_direct_page);
         let (lowered, assignment) =
-            lower_65816::lower_module_with_storage(&module).map_err(|error| error.to_string())?;
+            lower_65816::lower_module_with_storage_budget(&module, remaining_direct_page)
+                .map_err(|error| error.to_string())?;
         storage_assignments.push(assignment);
         fs::write(&asm_path, ca65::emit_module(&lowered))
             .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;

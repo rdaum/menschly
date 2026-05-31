@@ -13,14 +13,28 @@ The compiler currently uses three layers of register and direct-page planning:
    lowering. Direct-page parameters, direct locals, scratch temps, and
    `scratch var` locals are assigned here. Non-overlapping scratch lifetimes can
    reuse direct-page slots; values that cross calls get private slots; reentrant
-   routines use stack storage.
+   routines use stack storage. When a direct-page budget is supplied, compiler
+   chosen scratch storage can spill to the stack while explicit `direct`
+   parameters and locals remain hard layout requests. The x65 build path and
+   `menschc` both pass a budget so separately compiled modules share the same
+   aggregate direct-page limit. Under budget pressure, scratch candidates are
+   ranked by use count so hotter values keep direct-page storage before colder
+   values. Internal direct-page parameters use a shared argument-slot pool, even
+   for multi-parameter routines, unless a parameter is live across a nested
+   call. Scratch values used as near/far indirect pointers are treated as
+   direct-page-required because the current 65816 lowering only supports
+   `(dp)`/`[dp]` pointer operands. Three-byte scratch values are also kept out
+   of stack spill storage until the lowerer has complete long-value stack
+   support.
 2. `lower_65816.rs` chooses 65816 addressing forms while emitting assembly IR.
    For example, direct-page near-pointer dereferences use `(ptr)` rather than
    zeroing `Y` and using `(ptr),y`.
 3. `optimize_65816.rs` performs conservative machine-level cleanup after
    lowering. It prefers direct operands for direct symbols, shortens local
-   branches, removes redundant accumulator reloads/stores, avoids redundant
-   index transfers in straight-line code, and cleans up repeated mode changes.
+   branches, removes redundant accumulator reloads/stores, removes redundant
+   `X`/`Y` reloads only when N/Z flags still match the index register, avoids
+   redundant index transfers in straight-line code, and cleans up repeated mode
+   changes.
 
 These passes are deliberately local and conservative. They are easy to reason
 about against 65816 flags, accumulator/index width changes, interrupt entry
@@ -61,6 +75,7 @@ assembly. It should make these facts explicit:
 - values that are valid only if condition flags still match `A`
 - call, interrupt, raw-assembly, and label boundaries
 - direct-page candidates, direct-page aliases, and call-live direct-page values
+- direct-page allocation pressure and stack-spill choices for scratch values
 - fixed/volatile memory accesses that must not be cached or coalesced
 - costs for direct, absolute, stack-relative, indirect, and indexed forms
 

@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::Command;
 
-use mensch_systems_tests::{ca65, frontend, lower_65816, x65_runner};
+use mensch_systems_tests::{ca65, frontend, lower_65816, storage, x65_runner};
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
 use x65alike_emul::{
     Machine, RAMBLOCK_REG, ROMBLOCK_REG, USB_UART_CTRL, USB_UART_CTRL_IRQ_RX_NOT_EMPTY,
@@ -1135,6 +1135,69 @@ fn external_multi_argument_call_links_and_runs() {
     assert_eq!(run.output, b"X");
     assert_eq!(run.machine.byte(0x000284), 0x56);
     assert_eq!(run.machine.byte(0x000285), 0x34);
+}
+
+#[test]
+fn cross_module_scratch_spills_to_stack_when_direct_page_budget_is_full() {
+    let dir = temp_dir("cross-module-scratch-budget");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let callee_path = dir.join("callee.mensch");
+    let cfg_path = dir.join("image.cfg");
+
+    let mut caller = String::from(
+        "
+        module Caller
+        application main
+        external procedure use_scratch()
+
+        procedure main()
+        ",
+    );
+    for index in 0..storage::DEFAULT_DIRECT_PAGE_BUDGET {
+        caller.push_str(&format!("            direct var zp{index}: u8\n"));
+    }
+    caller.push_str(
+        "
+            use_scratch()
+            asm \"stp\"
+            return
+        end
+        ",
+    );
+    fs::write(&caller_path, caller).expect("caller source should be written");
+    fs::write(
+        &callee_path,
+        "
+        module Callee
+        fixed($000284) volatile var out: u8
+
+        export procedure use_scratch()
+            scratch var value: u8
+            value = $5a
+            out = value
+            return
+        end
+        ",
+    )
+    .expect("callee source should be written");
+    fs::write(&cfg_path, xex_linker_config()).expect("linker config should be written");
+
+    let build = build_mensch_xex_sources(
+        "cross-module-scratch-budget",
+        &[caller_path, callee_path],
+        &cfg_path,
+    )
+    .expect("scratch spill image should build inside the ZP budget");
+    let mut output = Vec::new();
+    let run = x65_runner::run_image(
+        &build.image,
+        x65_runner::RunConfig::scripted(b"", 20_000),
+        &mut output,
+    )
+    .expect("scratch spill image should run");
+
+    assert_eq!(run.machine.byte(0x000284), 0x5a);
 }
 
 #[test]

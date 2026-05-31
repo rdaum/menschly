@@ -6,7 +6,9 @@ use crate::ir::{
     Module, Routine, RoutineKind, Type, Value, Width,
 };
 use crate::optimize_65816::optimize_module;
-use crate::storage::{apply_storage, assign_storage, StorageAssignment};
+use crate::storage::{
+    apply_storage, assign_storage, assign_storage_with_budget, StorageAssignment,
+};
 use crate::target_65816::{AsmInst, AsmModule, AsmRoutine, Immediate, Mode, Operand, Symbol};
 
 const COP_SIGNATURE_SYMBOL: &str = "__mensch_cop_signature";
@@ -125,6 +127,21 @@ pub fn lower_module_with_storage(
     module: &Module,
 ) -> Result<(AsmModule, StorageAssignment), LowerError> {
     let assignment = assign_storage(module);
+    lower_module_with_assignment(module, assignment)
+}
+
+pub fn lower_module_with_storage_budget(
+    module: &Module,
+    direct_page_budget: u16,
+) -> Result<(AsmModule, StorageAssignment), LowerError> {
+    let assignment = assign_storage_with_budget(module, direct_page_budget);
+    lower_module_with_assignment(module, assignment)
+}
+
+fn lower_module_with_assignment(
+    module: &Module,
+    assignment: StorageAssignment,
+) -> Result<(AsmModule, StorageAssignment), LowerError> {
     let assigned = apply_storage(module, &assignment);
     let mut lowered = lower_module_unoptimized(&assigned)?;
     let routine_exports = assigned
@@ -321,6 +338,12 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
         IrInst::Dec { width, value } => {
             set_mode_for_width(out, *width);
             match value {
+                Value::Stack { .. } => {
+                    load_value_to_a(out, value)?;
+                    out.push(AsmInst::Sec);
+                    out.push(AsmInst::Sbc(Operand::Immediate(one_immediate(*width)?)));
+                    store_a_to_value(out, value)?;
+                }
                 Value::Direct(name) => {
                     out.push(AsmInst::Dec(Operand::Direct(Symbol::Named(name.clone()))))
                 }
@@ -337,6 +360,12 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             set_mode_for_width(out, *width);
             match value {
                 Value::IndexX => out.push(AsmInst::Inx),
+                Value::Stack { .. } => {
+                    load_value_to_a(out, value)?;
+                    out.push(AsmInst::Clc);
+                    out.push(AsmInst::Adc(Operand::Immediate(one_immediate(*width)?)));
+                    store_a_to_value(out, value)?;
+                }
                 Value::Direct(name) => {
                     out.push(AsmInst::Inc(Operand::Direct(Symbol::Named(name.clone()))))
                 }
@@ -647,6 +676,14 @@ fn immediate(value: Const) -> Immediate {
     }
 }
 
+fn one_immediate(width: Width) -> Result<Immediate, LowerError> {
+    match width {
+        Width::Byte => Ok(Immediate::Byte(1)),
+        Width::Word => Ok(Immediate::Word(1)),
+        Width::Long => Err(LowerError::UnsupportedWidth(3)),
+    }
+}
+
 fn operand_for_address(addr: &Address) -> Result<Operand, LowerError> {
     match addr {
         Address::Symbol(name) => Ok(Operand::Absolute(Symbol::Named(name.clone()))),
@@ -868,7 +905,7 @@ impl std::error::Error for LowerError {}
 #[cfg(test)]
 mod tests {
     use crate::ir::{Address, IrInst, Module, Routine, Storage, Type, Value, Width};
-    use crate::target_65816::{AsmInst, Operand, Symbol};
+    use crate::target_65816::{AsmInst, Immediate, Operand, Symbol};
 
     use super::lower_module;
 
@@ -954,5 +991,51 @@ mod tests {
             .contains(&AsmInst::Lda(Operand::IndirectLongDirect(Symbol::Named(
                 "ptr".to_owned()
             )))));
+    }
+
+    #[test]
+    fn lowers_stack_increment_as_load_add_store() {
+        let module =
+            Module::new("stack_inc").with_routine(Routine::procedure("stack_inc").with_body(vec![
+                IrInst::Inc {
+                    width: Width::Word,
+                    value: Value::Stack { offset: 1, size: 2 },
+                },
+                IrInst::Return,
+            ]));
+
+        let lowered = lower_module(&module).unwrap();
+        let insts = &lowered.routines[0].insts;
+
+        assert!(insts.windows(4).any(|window| window
+            == [
+                AsmInst::Lda(Operand::StackRelative(1)),
+                AsmInst::Clc,
+                AsmInst::Adc(Operand::Immediate(Immediate::Word(1))),
+                AsmInst::Sta(Operand::StackRelative(1)),
+            ]));
+    }
+
+    #[test]
+    fn lowers_stack_decrement_as_load_sub_store() {
+        let module =
+            Module::new("stack_dec").with_routine(Routine::procedure("stack_dec").with_body(vec![
+                IrInst::Dec {
+                    width: Width::Byte,
+                    value: Value::Stack { offset: 1, size: 1 },
+                },
+                IrInst::Return,
+            ]));
+
+        let lowered = lower_module(&module).unwrap();
+        let insts = &lowered.routines[0].insts;
+
+        assert!(insts.windows(4).any(|window| window
+            == [
+                AsmInst::Lda(Operand::StackRelative(1)),
+                AsmInst::Sec,
+                AsmInst::Sbc(Operand::Immediate(Immediate::Byte(1))),
+                AsmInst::Sta(Operand::StackRelative(1)),
+            ]));
     }
 }
