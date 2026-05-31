@@ -18,7 +18,10 @@ external procedure files_type_readme()
 external procedure files_type_system()
 external procedure files_type_demo()
 external procedure files_write_not_found()
+external procedure files_write_program_not_found()
 external procedure files_write_path_not_found()
+external procedure files_run_hello()
+external procedure files_run_demo()
 external function serial_rx_overflow(): u8
 external function serial_tx_overflow(): u8
 
@@ -36,11 +39,14 @@ const COMMAND_TYPE = 10
 const COMMAND_CLS = 11
 const COMMAND_PROMPT = 12
 const COMMAND_SET = 13
+const COMMAND_RUN = 14
 const COMMAND_EMPTY = 255
 const FILE_UNKNOWN = 0
 const FILE_README = 1
 const FILE_SYSTEM = 2
 const FILE_DEMO = 3
+const PROGRAM_HELLO = 1
+const PROGRAM_DEMO = 2
 const DIR_ROOT = 0
 const DIR_GAMES = 1
 const PROMPT_SHORT = 0
@@ -93,6 +99,8 @@ function command_code(): u8
         return COMMAND_PROMPT
     elsif is_set() != 0
         return COMMAND_SET
+    elsif is_run() != 0
+        return COMMAND_RUN
     elsif is_type() != 0
         return COMMAND_TYPE
     elsif is_cd() != 0
@@ -380,6 +388,16 @@ function is_type(): u8
     end
 end
 
+function is_run(): u8
+    if command_argument_matches("R") != 0
+        return 1
+    elsif command_argument_matches("RUN") != 0
+        return 1
+    else
+        return 0
+    end
+end
+
 function is_cd(): u8
     if command_word_matches("CD") != 0
         return 1
@@ -470,6 +488,8 @@ procedure dispatch_line()
         configure_prompt()
     elsif code == COMMAND_SET
         configure_set()
+    elsif code == COMMAND_RUN
+        run_program()
     elsif code == COMMAND_TYPE
         type_file()
     elsif code == COMMAND_CD
@@ -655,6 +675,39 @@ function type_file_code(): u8
     else
         return FILE_UNKNOWN
     end
+end
+
+function run_program_code(): u8
+    var start: u16
+    start = argument_start("R", "RUN")
+    if current_dir == DIR_ROOT
+        if argument_word_matches(start, "HELLO.PRG") != 0
+            return PROGRAM_HELLO
+        elsif argument_word_matches(start, "HELLO") != 0
+            return PROGRAM_HELLO
+        else
+            return FILE_UNKNOWN
+        end
+    elsif argument_word_matches(start, "DEMO.PRG") != 0
+        return PROGRAM_DEMO
+    elsif argument_word_matches(start, "DEMO") != 0
+        return PROGRAM_DEMO
+    else
+        return FILE_UNKNOWN
+    end
+end
+
+procedure run_program()
+    direct var code: u8
+    code = run_program_code()
+    if code == PROGRAM_HELLO
+        files_run_hello()
+    elsif code == PROGRAM_DEMO
+        files_run_demo()
+    else
+        files_write_program_not_found()
+    end
+    return
 end
 
 procedure type_file()

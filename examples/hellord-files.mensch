@@ -15,14 +15,16 @@ end
 export procedure files_write_root_dir()
     files_write_entry("README.TXT", 49)
     files_write_entry("SYSTEM.TXT", 65)
+    files_write_entry("HELLO.PRG", 37)
     console_write_text("GAMES      <DIR>\r\n")
-    console_write_text("2 file(s)  1 dir(s)\r\n")
+    console_write_text("3 file(s)  1 dir(s)\r\n")
     return
 end
 
 export procedure files_write_games_dir()
     files_write_entry("DEMO.TXT", 48)
-    console_write_text("1 file(s)  0 dir(s)\r\n")
+    files_write_entry("DEMO.PRG", 36)
+    console_write_text("2 file(s)  0 dir(s)\r\n")
     return
 end
 
@@ -46,7 +48,22 @@ export procedure files_write_not_found()
     return
 end
 
+export procedure files_write_program_not_found()
+    console_write_text("Program not found\r\n")
+    return
+end
+
 export procedure files_write_path_not_found()
     console_write_text("Path not found\r\n")
+    return
+end
+
+export procedure files_run_hello()
+    console_write_text("HELLO.PRG says: Hello from ROM.\r\n")
+    return
+end
+
+export procedure files_run_demo()
+    console_write_text("DEMO.PRG says: sprites someday.\r\n")
     return
 end
