@@ -274,7 +274,7 @@ fn generated_frontend_program_runs() {
         "
         module FrontendDemo
 
-        export procedure main()
+        export far procedure main()
             direct var p: near ^u8
             var x: u8
 
@@ -309,7 +309,7 @@ fn generated_frontend_fixed_volatile_io_program_runs() {
         module FixedVolatileDemo
         fixed($040005) volatile var io: u8
 
-        export procedure main()
+        export far procedure main()
             asm \"nop\"
             io = $5a
             return

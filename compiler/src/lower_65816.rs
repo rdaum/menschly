@@ -137,7 +137,7 @@ pub fn lower_module_with_storage(
 
 fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
     let mut out = AsmRoutine::new(routine.name.clone());
-    out.export = true;
+    out.export = routine.export;
 
     for inst in &routine.body {
         lower_inst(routine, inst, &mut out.insts)?;

@@ -226,7 +226,7 @@ fn language_serial_program_runs_on_fantasy_machine() {
             fixed(${serial_status:06x}) volatile var serial_status: u8
             fixed(${serial_data:06x}) volatile var serial_data: u8
 
-            export procedure main()
+            export far procedure main()
                 serial_data = 'O'
                 serial_data = 'K'
                 while serial_status & $80 != 0
@@ -263,7 +263,7 @@ fn language_irq_vector_handles_usb_uart_rx_interrupt() {
             var rx_tail: u16
             var rx_buffer: [4]u8
 
-            export procedure main()
+            export far procedure main()
                 rx_head = 0
                 rx_tail = 0
                 uart_ctrl = ${rx_irq:02x}

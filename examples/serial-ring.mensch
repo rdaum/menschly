@@ -8,7 +8,7 @@ var rx_buffer: [16]u8
 fixed($000280) volatile var rx_overflow: u8
 fixed($000281) volatile var rx_drop: u8
 
-procedure serial_init()
+export procedure serial_init()
     rx_head = 0
     rx_tail = 0
     rx_next = 0
@@ -17,7 +17,7 @@ procedure serial_init()
     return
 end
 
-function serial_has_data(): u8
+export function serial_has_data(): u8
     if rx_head == rx_tail
         return 0
     else
@@ -25,14 +25,14 @@ function serial_has_data(): u8
     end
 end
 
-function serial_read(): u8
+export function serial_read(): u8
     direct var value: u8
     value = rx_buffer[rx_tail]
     rx_tail = rx_tail + 1 & 15
     return value
 end
 
-interrupt procedure serial_irq()
+export interrupt procedure serial_irq()
     rx_next = rx_head + 1 & 15
     if rx_next == rx_tail
         rx_drop = serial_data

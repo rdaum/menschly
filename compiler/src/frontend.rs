@@ -80,6 +80,7 @@ pub struct RoutineDecl {
     pub name: String,
     pub kind: RoutineDeclKind,
     pub abi: Abi,
+    pub export: bool,
     pub params: Vec<VarDecl>,
     pub locals: Vec<VarDecl>,
     pub body: Vec<Stmt>,
@@ -540,7 +541,7 @@ impl Parser {
     }
 
     fn parse_external_decl(&mut self) -> Result<ExternalDecl, FrontendError> {
-        let (abi, kind, name, params) = self.parse_routine_header(Abi::Internal)?;
+        let (_export, abi, kind, name, params) = self.parse_routine_header()?;
         Ok(ExternalDecl {
             name,
             kind,
@@ -593,7 +594,7 @@ impl Parser {
     }
 
     fn parse_routine(&mut self) -> Result<RoutineDecl, FrontendError> {
-        let (abi, kind, name, params) = self.parse_routine_header(Abi::Exported)?;
+        let (export, abi, kind, name, params) = self.parse_routine_header()?;
 
         let mut locals = Vec::new();
         let mut body = Vec::new();
@@ -612,6 +613,7 @@ impl Parser {
             name,
             kind,
             abi,
+            export,
             params,
             locals,
             body,
@@ -620,12 +622,9 @@ impl Parser {
 
     fn parse_routine_header(
         &mut self,
-        export_abi: Abi,
-    ) -> Result<(Abi, RoutineDeclKind, String, Vec<VarDecl>), FrontendError> {
+    ) -> Result<(bool, Abi, RoutineDeclKind, String, Vec<VarDecl>), FrontendError> {
+        let export = self.take_keyword("export");
         let mut abi = Abi::Internal;
-        if self.take_keyword("export") {
-            abi = export_abi;
-        }
         if self.take_keyword("far") {
             abi = Abi::Far;
         } else if self.take_keyword("interrupt") {
@@ -654,7 +653,7 @@ impl Parser {
             }
         };
 
-        Ok((abi, kind, name, params))
+        Ok((export, abi, kind, name, params))
     }
 
     fn parse_params(&mut self) -> Result<Vec<VarDecl>, FrontendError> {
@@ -1236,6 +1235,7 @@ impl Lowerer {
         let mut routine = Routine {
             name: source.name.clone(),
             kind,
+            export: source.export || entry.is_some_and(|entry| entry.routine == source.name),
             abi: if entry.is_some_and(|entry| entry.routine == source.name)
                 && matches!(source.abi, Abi::Internal)
             {
@@ -1935,7 +1935,7 @@ mod tests {
                 return 1
             end
 
-            export procedure main()
+            export far procedure main()
                 direct var x: u8
                 x = one()
                 if x != 0
@@ -2040,7 +2040,8 @@ mod tests {
         let module = compile_source(source).unwrap();
         let main = &module.routines[0];
 
-        assert!(matches!(main.abi, Abi::Exported));
+        assert!(main.export);
+        assert!(matches!(main.abi, Abi::Internal));
         assert!(main.body.iter().any(|inst| matches!(
             inst,
             IrInst::Store {
@@ -2189,6 +2190,37 @@ mod tests {
         assert!(!asm.contains(".proc serial_irq\n"));
         assert!(!asm.contains(".proc serial_init\n"));
         assert!(!asm.contains(".proc serial_has_data\n"));
+    }
+
+    #[test]
+    fn exports_only_declared_public_routines() {
+        let source = "
+            module Visibility
+            vector irq = irq
+
+            export procedure public_helper()
+                return
+            end
+
+            procedure private_helper()
+                return
+            end
+
+            export interrupt procedure irq()
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        let (lowered, _assignment) =
+            crate::lower_65816::lower_module_with_storage(&module).unwrap();
+        let asm = crate::ca65::emit_module(&lowered);
+
+        assert!(asm.contains(".export public_helper\n"));
+        assert!(asm.contains(".export irq\n"));
+        assert!(!asm.contains(".export private_helper\n"));
+        assert!(asm.contains("\trts\n"));
+        assert!(asm.contains("\trti\n"));
     }
 
     #[test]

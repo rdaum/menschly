@@ -119,6 +119,7 @@ pub enum EntryKind {
 pub struct Routine {
     pub name: String,
     pub kind: RoutineKind,
+    pub export: bool,
     pub abi: Abi,
     pub params: Vec<Param>,
     pub locals: Vec<Local>,
@@ -130,6 +131,7 @@ impl Routine {
         Self {
             name: name.into(),
             kind: RoutineKind::Procedure,
+            export: false,
             abi: Abi::Internal,
             params: Vec::new(),
             locals: Vec::new(),
@@ -141,6 +143,7 @@ impl Routine {
         Self {
             name: name.into(),
             kind: RoutineKind::Function { result },
+            export: false,
             abi: Abi::Internal,
             params: Vec::new(),
             locals: Vec::new(),
@@ -149,7 +152,13 @@ impl Routine {
     }
 
     pub fn exported(mut self) -> Self {
+        self.export = true;
         self.abi = Abi::Exported;
+        self
+    }
+
+    pub fn public(mut self) -> Self {
+        self.export = true;
         self
     }
 
