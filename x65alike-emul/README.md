@@ -26,11 +26,13 @@ small assembled programs under the existing `wdc65816` CPU core:
   - `$9F53`: `RMBCTRL`
 - RAMBLOCK frame at `$A000..$BFFF`.
 - ROMBLOCK frame at `$C000..$FFFF`.
-- A scriptable subset of NORA's USB UART registers in the I/O window.
+- A scriptable subset of NORA's USB UART registers in the I/O window, including
+  minimal UART IRQ line assertion.
 
 The model deliberately skips most of the real X65 peripheral set for now. VERA,
-AURA, VIA, W6100, flash, interrupts, timers, keyboard, video, and storage
-devices are not implemented yet.
+AURA, VIA, W6100, flash, timers, keyboard, video, and storage devices are not
+implemented yet. Interrupt support is currently limited to USB UART IRQ
+assertion and runner-side maskable interrupt dispatch.
 
 ## Memory Map
 
@@ -78,8 +80,19 @@ so tests can script input and inspect output without a terminal:
 | `$9F57` | `USB_UART_DATA` | Read pops one input byte; write appends one output byte |
 
 The emulated TX path is never full, so bit 3 currently reads as 0 and bit 2
-reads as 1. UART interrupt-enable bits are retained in `USB_UART_CTRL`, but
-interrupt delivery is not implemented yet.
+reads as 1. `USB_UART_CTRL` bit 6 asserts the machine IRQ line while RX is not
+empty, and bit 7 asserts it while TX is not full.
+
+## Interrupts
+
+`Machine::irq_pending()` reports the current level of the emulated IRQ line.
+The runner checks that line between CPU instructions. If the CPU interrupt
+disable flag is clear, it pushes a 65816 interrupt frame, sets `I`, clears `D`,
+sets `PBR` to zero, and loads `PC` through the native IRQ vector at `$FFEE`
+or the emulation IRQ vector at `$FFFE`.
+
+This is still deliberately minimal: there is no interrupt priority controller,
+edge/latch model, NMI source, or cycle timing.
 
 Example use from tests:
 
@@ -123,4 +136,4 @@ printf 'hello' | x65alike-emul --quiet image.bin
 ```
 
 The runner is deliberately minimal. It does not yet emulate reset-vector boot,
-interrupt delivery, or real-time terminal input.
+NMI delivery, or cycle timing.

@@ -131,6 +131,10 @@ impl Machine {
         &self.serial_tx
     }
 
+    pub fn irq_pending(&self) -> bool {
+        self.usb_uart_irq_pending()
+    }
+
     pub fn byte(&self, address: u32) -> u8 {
         let Some(index) = self.physical_sram_address(address & 0x00ff_ffff) else {
             return 0xff;
@@ -162,6 +166,18 @@ impl Machine {
             } else {
                 0
             }
+    }
+
+    fn usb_uart_irq_pending(&self) -> bool {
+        let rx_not_empty =
+            self.usb_uart_ctrl & USB_UART_CTRL_IRQ_RX_NOT_EMPTY != 0 && !self.serial_rx.is_empty();
+        let tx_not_full =
+            self.usb_uart_ctrl & USB_UART_CTRL_IRQ_TX_NOT_FULL != 0 && !self.usb_uart_tx_full();
+        rx_not_empty || tx_not_full
+    }
+
+    fn usb_uart_tx_full(&self) -> bool {
+        false
     }
 
     fn decode(&self, address: u32) -> Mapping {
@@ -321,5 +337,22 @@ mod tests {
 
         machine.write(USB_UART_DATA, b'!');
         assert_eq!(machine.serial_output(), b"!");
+    }
+
+    #[test]
+    fn usb_uart_control_asserts_irq_for_enabled_ready_conditions() {
+        let mut machine = Machine::new();
+
+        assert!(!machine.irq_pending());
+        machine.write(USB_UART_CTRL, USB_UART_CTRL_IRQ_RX_NOT_EMPTY);
+        assert!(!machine.irq_pending());
+
+        machine.push_serial_input(b"A");
+        assert!(machine.irq_pending());
+        assert_eq!(machine.read(USB_UART_DATA), b'A');
+        assert!(!machine.irq_pending());
+
+        machine.write(USB_UART_CTRL, USB_UART_CTRL_IRQ_TX_NOT_FULL);
+        assert!(machine.irq_pending());
     }
 }

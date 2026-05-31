@@ -11,6 +11,8 @@ use x65alike_emul::Machine;
 const DEFAULT_LOAD_ADDR: u32 = 0x020000;
 const DEFAULT_STEPS: usize = 1_000_000;
 const STP_OPCODE: u8 = 0xdb;
+const NATIVE_IRQ_VECTOR: usize = 0x00ffee;
+const EMULATION_IRQ_VECTOR: usize = 0x00fffe;
 
 fn main() {
     if let Err(error) = run() {
@@ -64,6 +66,9 @@ fn run() -> Result<(), String> {
             break;
         }
 
+        if !cpu.p.i && bus.0.irq_pending() {
+            service_irq(&mut cpu, &mut bus);
+        }
         cpu.step(&mut bus);
         steps += 1;
         write_serial_output(&mut bus.0, &mut stdout)?;
@@ -81,6 +86,43 @@ fn run() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn service_irq(cpu: &mut Processor, bus: &mut BusMachine) {
+    if cpu.p.e {
+        push_u16(cpu, bus, cpu.pc);
+        let mut p = cpu.p;
+        p.xb = false;
+        push_u8(cpu, bus, p.to_byte(true));
+        cpu.pbr = 0;
+        cpu.pc = read_u16(bus, EMULATION_IRQ_VECTOR);
+    } else {
+        push_u8(cpu, bus, cpu.pbr);
+        push_u16(cpu, bus, cpu.pc);
+        push_u8(cpu, bus, cpu.p.to_byte(true));
+        cpu.pbr = 0;
+        cpu.pc = read_u16(bus, NATIVE_IRQ_VECTOR);
+    }
+    cpu.p.d = false;
+    cpu.p.i = true;
+}
+
+fn push_u8(cpu: &mut Processor, bus: &mut BusMachine, value: u8) {
+    bus.write(cpu.s as usize, value);
+    cpu.s = cpu.s.wrapping_sub(1);
+    if cpu.p.e {
+        cpu.s = 0x0100 | (cpu.s & 0x00ff);
+    }
+}
+
+fn push_u16(cpu: &mut Processor, bus: &mut BusMachine, value: u16) {
+    let [low, high] = value.to_le_bytes();
+    push_u8(cpu, bus, high);
+    push_u8(cpu, bus, low);
+}
+
+fn read_u16(bus: &mut BusMachine, address: usize) -> u16 {
+    u16::from_le_bytes([bus.read(address), bus.read(address + 1)])
 }
 
 fn spawn_stdin_reader() -> Receiver<u8> {
