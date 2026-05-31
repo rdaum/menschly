@@ -305,6 +305,50 @@ fn language_irq_vector_handles_usb_uart_rx_interrupt() {
 }
 
 #[test]
+fn language_irq_preserves_interrupted_accumulator_by_default() {
+    let (code, vectors) = assemble_source_with_vectors_fixture(
+        "language-uart-irq-preserves-a",
+        &format!(
+            "
+            module UartIrqPreserveDemo
+            vector irq = irq
+            fixed(${uart_ctrl:06x}) volatile var uart_ctrl: u8
+            fixed(${serial_data:06x}) volatile var serial_data: u8
+            fixed($000292) volatile var seen: u8
+
+            export far procedure main()
+                asm \"sei\"
+                uart_ctrl = ${rx_irq:02x}
+                asm \"lda #$5a\"
+                asm \"cli\"
+                asm \"nop\"
+                asm \"sta ${serial_data:06x}\"
+                return
+            end
+
+            interrupt procedure irq()
+                seen = serial_data
+                return
+            end
+            ",
+            uart_ctrl = USB_UART_CTRL,
+            serial_data = USB_UART_DATA,
+            rx_irq = USB_UART_CTRL_IRQ_RX_NOT_EMPTY,
+        ),
+    );
+
+    let mut machine = Machine::new();
+    machine.load(IRQ_ROUTINE_ADDR as u32, &code);
+    machine.load(DEFAULT_ROMBLOCK_IRQ_VECTOR_PHYSICAL, &vectors);
+    machine.push_serial_input(b"!");
+
+    let (_cpu, machine) = run_loaded_routine_at(machine, IRQ_ROUTINE_ADDR);
+
+    assert_eq!(machine.byte(0x000292), b'!');
+    assert_eq!(machine.serial_output(), b"Z");
+}
+
+#[test]
 fn hellord_example_boots_as_interrupt_driven_xex() {
     let build = build_hellord_example();
     let expected = b"Hellord!\r\nabc123\n";

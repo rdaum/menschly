@@ -285,6 +285,7 @@ fn resets_mode_state(inst: &AsmInst) -> bool {
             | AsmInst::Rts
             | AsmInst::Rtl
             | AsmInst::Rti
+            | AsmInst::Plp
             | AsmInst::Raw(_)
     )
 }

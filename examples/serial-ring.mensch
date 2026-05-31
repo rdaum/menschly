@@ -57,7 +57,6 @@ export function serial_read(): u8
 end
 
 export interrupt procedure serial_irq()
-    asm "pha"
     if serial_status & $80 == 0
         rx_next = rx_head + 1 & 15
         if rx_next == rx_tail
@@ -81,6 +80,5 @@ export interrupt procedure serial_irq()
             serial_ctrl = $c0
         end
     end
-    asm "pla"
     return
 end

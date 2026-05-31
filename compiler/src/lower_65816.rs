@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, EntryKind, GlobalPlacement, IrInst, Module, Routine, RoutineKind, Type,
-    Value, Width,
+    Abi, Address, Const, EntryKind, GlobalPlacement, InterruptPreserve, IrInst, Module, Routine,
+    RoutineKind, Type, Value, Width,
 };
 use crate::optimize_65816::optimize_module;
 use crate::storage::{apply_storage, assign_storage, StorageAssignment};
@@ -162,6 +162,10 @@ fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
     let mut out = AsmRoutine::new(routine.name.clone());
     out.export = routine.export;
 
+    emit_interrupt_prologue(&mut out.insts, routine.interrupt_preserve);
+    if matches!(routine.abi, Abi::Interrupt) {
+        out.insts.push(AsmInst::Mode(Mode::Acc8Index16));
+    }
     emit_stack_frame_adjust(
         &mut out.insts,
         routine.stack_frame_bytes,
@@ -306,8 +310,7 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             }
         }
         IrInst::Return => {
-            emit_stack_frame_adjust(out, routine.stack_frame_bytes, StackFrameOp::Release);
-            out.push(return_inst(routine));
+            emit_return_sequence(routine, out);
         }
         IrInst::ReturnValue(value) => {
             if let RoutineKind::Function { result } = &routine.kind {
@@ -316,8 +319,7 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             if !matches!(value, Value::Accumulator) {
                 load_value_to_a(out, value)?;
             }
-            emit_stack_frame_adjust(out, routine.stack_frame_bytes, StackFrameOp::Release);
-            out.push(return_inst(routine));
+            emit_return_sequence(routine, out);
         }
     }
 
@@ -357,6 +359,54 @@ fn return_inst(routine: &Routine) -> AsmInst {
         Abi::Internal | Abi::Reentrant => match routine.kind {
             RoutineKind::Procedure | RoutineKind::Function { .. } => AsmInst::Rts,
         },
+    }
+}
+
+fn emit_return_sequence(routine: &Routine, out: &mut Vec<AsmInst>) {
+    emit_stack_frame_adjust(out, routine.stack_frame_bytes, StackFrameOp::Release);
+    emit_interrupt_epilogue(out, routine.interrupt_preserve);
+    out.push(return_inst(routine));
+}
+
+fn emit_interrupt_prologue(out: &mut Vec<AsmInst>, preserve: InterruptPreserve) {
+    if preserve.is_empty() {
+        return;
+    }
+    if preserve.p {
+        out.push(AsmInst::Php);
+    }
+    if preserve.a || preserve.x || preserve.y {
+        out.push(AsmInst::Mode(Mode::Acc16Index16));
+    }
+    if preserve.a {
+        out.push(AsmInst::Pha);
+    }
+    if preserve.x {
+        out.push(AsmInst::Phx);
+    }
+    if preserve.y {
+        out.push(AsmInst::Phy);
+    }
+}
+
+fn emit_interrupt_epilogue(out: &mut Vec<AsmInst>, preserve: InterruptPreserve) {
+    if preserve.is_empty() {
+        return;
+    }
+    if preserve.a || preserve.x || preserve.y {
+        out.push(AsmInst::Mode(Mode::Acc16Index16));
+    }
+    if preserve.y {
+        out.push(AsmInst::Ply);
+    }
+    if preserve.x {
+        out.push(AsmInst::Plx);
+    }
+    if preserve.a {
+        out.push(AsmInst::Pla);
+    }
+    if preserve.p {
+        out.push(AsmInst::Plp);
     }
 }
 

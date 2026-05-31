@@ -123,6 +123,7 @@ pub struct Routine {
     pub kind: RoutineKind,
     pub export: bool,
     pub abi: Abi,
+    pub interrupt_preserve: InterruptPreserve,
     pub params: Vec<Param>,
     pub locals: Vec<Local>,
     pub stack_frame_bytes: u16,
@@ -136,6 +137,7 @@ impl Routine {
             kind: RoutineKind::Procedure,
             export: false,
             abi: Abi::Internal,
+            interrupt_preserve: InterruptPreserve::default_for_abi(Abi::Internal),
             params: Vec::new(),
             locals: Vec::new(),
             stack_frame_bytes: 0,
@@ -149,6 +151,7 @@ impl Routine {
             kind: RoutineKind::Function { result },
             export: false,
             abi: Abi::Internal,
+            interrupt_preserve: InterruptPreserve::default_for_abi(Abi::Internal),
             params: Vec::new(),
             locals: Vec::new(),
             stack_frame_bytes: 0,
@@ -196,6 +199,42 @@ pub enum Abi {
     Far,
     Interrupt,
     Reentrant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptPreserve {
+    pub a: bool,
+    pub x: bool,
+    pub y: bool,
+    pub p: bool,
+}
+
+impl InterruptPreserve {
+    pub const NONE: Self = Self {
+        a: false,
+        x: false,
+        y: false,
+        p: false,
+    };
+
+    pub const DEFAULT: Self = Self {
+        a: true,
+        x: true,
+        y: true,
+        p: true,
+    };
+
+    pub fn default_for_abi(abi: Abi) -> Self {
+        if matches!(abi, Abi::Interrupt) {
+            Self::DEFAULT
+        } else {
+            Self::NONE
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        !self.a && !self.x && !self.y && !self.p
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
