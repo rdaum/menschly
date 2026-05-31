@@ -18,10 +18,12 @@ small assembled programs under the existing `wdc65816` CPU core:
 - 24-bit CPU address space.
 - 2 MiB SRAM backing store.
 - Direct SRAM mapping for `$00_0000..$1F_FFFF`.
-- BANK 0 control registers:
-  - `$0000`: `RAMBLOCK`
-  - `$0001`: `ROMBLOCK`
 - BANK 0 I/O window at `$9F00..$9FFF`.
+- NORA block registers:
+  - `$9F50`: `RAMBLOCK`
+  - `$9F51`: `ROMBLOCK`
+  - `$9F52`: `RAMBMASK`
+  - `$9F53`: `RMBCTRL`
 - RAMBLOCK frame at `$A000..$BFFF`.
 - ROMBLOCK frame at `$C000..$FFFF`.
 - A scriptable subset of NORA's USB UART registers in the I/O window.
@@ -37,16 +39,20 @@ The broad shape follows X65's documented NORA address decoding:
 | CPU address range | Current behavior |
 | --- | --- |
 | `$00_0000..$1F_FFFF` | Direct 2 MiB SRAM mapping |
-| `$00_0000` | `RAMBLOCK` register in BANK 0 |
-| `$00_0001` | `ROMBLOCK` register in BANK 0 |
+| `$00_0000` | SRAM byte, or `RAMBLOCK` mirror when `RMBCTRL.MIRROR_ZP` is set |
+| `$00_0001` | SRAM byte, or `ROMBLOCK` mirror when `RMBCTRL.MIRROR_ZP` is set |
 | `$00_9F00..$00_9FFF` | I/O window |
+| `$00_9F50` | NORA `RAMBLOCK` register |
+| `$00_9F51` | NORA `ROMBLOCK` register |
+| `$00_9F52` | NORA `RAMBMASK` register |
+| `$00_9F53` | NORA `RMBCTRL` register |
 | `$00_A000..$00_BFFF` | RAMBLOCK-selected 8 KiB SRAM frame |
 | `$00_C000..$00_FFFF` | ROMBLOCK-selected 16 KiB frame |
 
 RAMBLOCK uses the X65-style inverted high bit for the selected frame:
 
 ```text
-physical = (RAMBLOCK xor $80) * $2000 + (addr - $A000)
+physical = ((RAMBLOCK & RAMBMASK) xor $80) * $2000 + (addr - $A000)
 ```
 
 ROMBLOCK currently maps into the middle SRAM region starting at `$08_0000`:
@@ -55,8 +61,10 @@ ROMBLOCK currently maps into the middle SRAM region starting at `$08_0000`:
 physical = $08_0000 + (ROMBLOCK & $1f) * $4000 + (addr - $C000)
 ```
 
-If bit 7 of `ROMBLOCK` is set, the ROM frame maps to a small placeholder PBL
-buffer instead.
+`RMBCTRL.MIRROR_ZP` bit 5 controls whether `$0000/$0001` mirror the block
+registers. The emulator defaults that bit off, so plain zero-page reads and
+writes hit SRAM until software enables the mirror. `RMBCTRL.MAP_BOOTROM` bit 7
+maps the ROM frame to a small placeholder PBL buffer instead of SRAM.
 
 ## USB UART I/O
 

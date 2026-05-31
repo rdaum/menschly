@@ -3,8 +3,8 @@ use std::collections::VecDeque;
 pub const SRAM_SIZE: usize = 2 * 1024 * 1024;
 pub const CPU_SPACE_SIZE: usize = 16 * 1024 * 1024;
 
-pub const RAMBLOCK_REG: u32 = 0x000000;
-pub const ROMBLOCK_REG: u32 = 0x000001;
+pub const RAMBLOCK_ZP_MIRROR: u32 = 0x000000;
+pub const ROMBLOCK_ZP_MIRROR: u32 = 0x000001;
 
 pub const IO_START: u32 = 0x009f00;
 pub const IO_END: u32 = 0x009fff;
@@ -13,6 +13,17 @@ pub const RAMBLOCK_FRAME_START: u32 = 0x00a000;
 pub const RAMBLOCK_FRAME_END: u32 = 0x00bfff;
 pub const ROMBLOCK_FRAME_START: u32 = 0x00c000;
 pub const ROMBLOCK_FRAME_END: u32 = 0x00ffff;
+
+pub const RAMBLOCK_REG: u32 = 0x009f50;
+pub const ROMBLOCK_REG: u32 = 0x009f51;
+pub const RAMBMASK_REG: u32 = 0x009f52;
+pub const RMBCTRL_REG: u32 = 0x009f53;
+
+pub const RMBCTRL_ENABLE_RAM_CD: u8 = 0x08;
+pub const RMBCTRL_ENABLE_ROM_CDEF: u8 = 0x10;
+pub const RMBCTRL_MIRROR_ZP: u8 = 0x20;
+pub const RMBCTRL_AUTO_UNMAP_BOOTROM: u8 = 0x40;
+pub const RMBCTRL_MAP_BOOTROM: u8 = 0x80;
 
 pub const USB_UART_CTRL: u32 = 0x009f55;
 pub const USB_UART_STAT: u32 = 0x009f56;
@@ -40,6 +51,8 @@ pub struct Machine {
     pbl: [u8; PBL_SIZE],
     ramblock: u8,
     romblock: u8,
+    rambmask: u8,
+    rmbctrl: u8,
     serial_rx: VecDeque<u8>,
     serial_tx: Vec<u8>,
     usb_uart_ctrl: u8,
@@ -53,6 +66,8 @@ impl Machine {
             pbl: [0; PBL_SIZE],
             ramblock: 0,
             romblock: 0,
+            rambmask: 0xff,
+            rmbctrl: RMBCTRL_ENABLE_ROM_CDEF,
             serial_rx: VecDeque::new(),
             serial_tx: Vec::new(),
             usb_uart_ctrl: 0x04,
@@ -74,6 +89,8 @@ impl Machine {
         match self.decode(address) {
             Mapping::RamBlockReg => self.ramblock,
             Mapping::RomBlockReg => self.romblock,
+            Mapping::RamBlockMaskReg => self.rambmask,
+            Mapping::RamBlockControlReg => self.rmbctrl,
             Mapping::UsbUartData => self.serial_rx.pop_front().unwrap_or(0),
             Mapping::UsbUartStatus => self.usb_uart_status(),
             Mapping::UsbUartControl => self.usb_uart_ctrl,
@@ -89,6 +106,8 @@ impl Machine {
         match self.decode(address) {
             Mapping::RamBlockReg => self.ramblock = value,
             Mapping::RomBlockReg => self.romblock = value,
+            Mapping::RamBlockMaskReg => self.rambmask = value,
+            Mapping::RamBlockControlReg => self.rmbctrl = value & !0x01,
             Mapping::UsbUartData => self.serial_tx.push(value),
             Mapping::UsbUartControl => self.usb_uart_ctrl = value,
             Mapping::UsbUartStatus => {
@@ -127,6 +146,14 @@ impl Machine {
         self.romblock
     }
 
+    pub fn rambmask(&self) -> u8 {
+        self.rambmask
+    }
+
+    pub fn rmbctrl(&self) -> u8 {
+        self.rmbctrl
+    }
+
     fn usb_uart_status(&self) -> u8 {
         USB_UART_STAT_TX_EMPTY_SENT
             | self.usb_uart_errors
@@ -139,24 +166,30 @@ impl Machine {
 
     fn decode(&self, address: u32) -> Mapping {
         match address {
+            RAMBLOCK_ZP_MIRROR if self.rmbctrl & RMBCTRL_MIRROR_ZP != 0 => {
+                Mapping::RamBlockReg
+            }
+            ROMBLOCK_ZP_MIRROR if self.rmbctrl & RMBCTRL_MIRROR_ZP != 0 => {
+                Mapping::RomBlockReg
+            }
             RAMBLOCK_REG => Mapping::RamBlockReg,
             ROMBLOCK_REG => Mapping::RomBlockReg,
+            RAMBMASK_REG => Mapping::RamBlockMaskReg,
+            RMBCTRL_REG => Mapping::RamBlockControlReg,
             USB_UART_DATA => Mapping::UsbUartData,
             USB_UART_STAT => Mapping::UsbUartStatus,
             USB_UART_CTRL => Mapping::UsbUartControl,
             IO_START..=IO_END => Mapping::Io,
             RAMBLOCK_FRAME_START..=RAMBLOCK_FRAME_END => Mapping::Sram(
-                (((self.ramblock ^ 0x80) as usize) * RAMBLOCK_SIZE)
+                ((((self.ramblock & self.rambmask) ^ 0x80) as usize) * RAMBLOCK_SIZE)
                     + ((address - RAMBLOCK_FRAME_START) as usize),
             ),
-            ROMBLOCK_FRAME_START..=ROMBLOCK_FRAME_END if self.romblock & 0x80 != 0 => {
+            ROMBLOCK_FRAME_START..=ROMBLOCK_FRAME_END if self.bootrom_mapped() => {
                 Mapping::Pbl(((address - ROMBLOCK_FRAME_START) as usize) % PBL_SIZE)
             }
-            ROMBLOCK_FRAME_START..=ROMBLOCK_FRAME_END => Mapping::Sram(
-                ROMBLOCK_BASE
-                    + ((self.romblock as usize & 0x1f) * ROMBLOCK_SIZE)
-                    + ((address - ROMBLOCK_FRAME_START) as usize),
-            ),
+            ROMBLOCK_FRAME_START..=ROMBLOCK_FRAME_END if self.romblock_frame_enabled() => {
+                Mapping::Sram(self.romblock_physical_address(address))
+            }
             _ => self
                 .physical_sram_address(address)
                 .map_or(Mapping::Unmapped, Mapping::Sram),
@@ -170,6 +203,20 @@ impl Machine {
             None
         }
     }
+
+    fn bootrom_mapped(&self) -> bool {
+        self.rmbctrl & RMBCTRL_MAP_BOOTROM != 0
+    }
+
+    fn romblock_frame_enabled(&self) -> bool {
+        self.rmbctrl & RMBCTRL_ENABLE_ROM_CDEF != 0
+    }
+
+    fn romblock_physical_address(&self, address: u32) -> usize {
+        ROMBLOCK_BASE
+            + ((self.romblock as usize & 0x1f) * ROMBLOCK_SIZE)
+            + ((address - ROMBLOCK_FRAME_START) as usize)
+    }
 }
 
 impl Default for Machine {
@@ -182,6 +229,8 @@ impl Default for Machine {
 enum Mapping {
     RamBlockReg,
     RomBlockReg,
+    RamBlockMaskReg,
+    RamBlockControlReg,
     UsbUartData,
     UsbUartStatus,
     UsbUartControl,
@@ -206,6 +255,39 @@ mod tests {
         machine.write(RAMBLOCK_REG, 0x80);
         machine.write(RAMBLOCK_FRAME_START, 0x55);
         assert_eq!(machine.byte(0x000000), 0x55);
+    }
+
+    #[test]
+    fn ramblock_mask_limits_ramblock_frame_selection() {
+        let mut machine = Machine::new();
+
+        machine.write(RAMBMASK_REG, 0x7f);
+        machine.write(RAMBLOCK_REG, 0xff);
+        machine.write(RAMBLOCK_FRAME_START, 0x33);
+
+        assert_eq!(machine.rambmask(), 0x7f);
+        assert_eq!(machine.byte(0x1fe000), 0x33);
+    }
+
+    #[test]
+    fn zero_page_block_register_mirrors_require_rmbctrl_bit() {
+        let mut machine = Machine::new();
+
+        machine.write(RAMBLOCK_ZP_MIRROR, 0x12);
+        machine.write(ROMBLOCK_ZP_MIRROR, 0x34);
+        assert_eq!(machine.ramblock(), 0);
+        assert_eq!(machine.romblock(), 0);
+        assert_eq!(machine.byte(RAMBLOCK_ZP_MIRROR), 0x12);
+        assert_eq!(machine.byte(ROMBLOCK_ZP_MIRROR), 0x34);
+
+        machine.write(RMBCTRL_REG, machine.rmbctrl() | RMBCTRL_MIRROR_ZP);
+        machine.write(RAMBLOCK_ZP_MIRROR, 0x56);
+        machine.write(ROMBLOCK_ZP_MIRROR, 0x78);
+
+        assert_eq!(machine.ramblock(), 0x56);
+        assert_eq!(machine.romblock(), 0x78);
+        assert_eq!(machine.read(RAMBLOCK_ZP_MIRROR), 0x56);
+        assert_eq!(machine.read(ROMBLOCK_ZP_MIRROR), 0x78);
     }
 
     #[test]
