@@ -153,7 +153,11 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
         IrInst::InlineAsm(line) => out.push(AsmInst::Raw(line.clone())),
         IrInst::Move { dst, src } => {
             load_value_to_a(out, src)?;
-            store_a_to_value(out, dst)?;
+            if matches!(dst, Value::IndexX) {
+                out.push(AsmInst::Tax);
+            } else {
+                store_a_to_value(out, dst)?;
+            }
         }
         IrInst::LoadConst { dst, value } => {
             set_mode_for_const(out, *value);

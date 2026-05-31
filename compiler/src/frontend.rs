@@ -122,6 +122,7 @@ pub enum Expr {
     Add(Box<Expr>, Box<Expr>),
     BitAnd(Box<Expr>, Box<Expr>),
     Deref(Box<Expr>),
+    Index(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -829,8 +830,16 @@ impl Parser {
 
     fn parse_postfix(&mut self) -> Result<Expr, FrontendError> {
         let mut expr = self.parse_primary()?;
-        while self.take(TokenKind::Caret) {
-            expr = Expr::Deref(Box::new(expr));
+        loop {
+            if self.take(TokenKind::Caret) {
+                expr = Expr::Deref(Box::new(expr));
+            } else if self.take(TokenKind::LBracket) {
+                let index = self.parse_expr()?;
+                self.expect(TokenKind::RBracket)?;
+                expr = Expr::Index(Box::new(expr), Box::new(index));
+            } else {
+                break;
+            }
         }
         Ok(expr)
     }
@@ -1327,6 +1336,16 @@ impl<'a> RoutineLowerer<'a> {
                 });
                 Ok(())
             }
+            Expr::Index(base, index) => {
+                let (addr, element) = self.address_for_index(base, index)?;
+                self.lower_expr_to(value, &element, Value::Accumulator)?;
+                self.body.push(IrInst::Store {
+                    width: width_for_type(&element)?,
+                    addr,
+                    src: Value::Accumulator,
+                });
+                Ok(())
+            }
             _ => Err(FrontendError::Type(
                 "assignment target is not assignable".to_owned(),
             )),
@@ -1440,7 +1459,7 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Add(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
-                let width = compatible_width(&lhs_ty, &rhs_ty)?;
+                let width = compatible_expr_width(&lhs_ty, &rhs_ty, rhs)?;
                 ensure_assignable(expected, &lhs_ty)?;
                 self.lower_expr_to(lhs, &lhs_ty, Value::Accumulator)?;
                 let rhs = self.expr_value(rhs, &lhs_ty)?;
@@ -1455,7 +1474,7 @@ impl<'a> RoutineLowerer<'a> {
             Expr::BitAnd(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
-                let width = compatible_width(&lhs_ty, &rhs_ty)?;
+                let width = compatible_expr_width(&lhs_ty, &rhs_ty, rhs)?;
                 ensure_assignable(expected, &lhs_ty)?;
                 self.lower_expr_to(lhs, &lhs_ty, Value::Accumulator)?;
                 let rhs = self.expr_value(rhs, &lhs_ty)?;
@@ -1472,6 +1491,16 @@ impl<'a> RoutineLowerer<'a> {
                 ensure_assignable(expected, &pointee)?;
                 self.body.push(IrInst::Load {
                     width: width_for_type(&pointee)?,
+                    dst,
+                    addr,
+                });
+                Ok(())
+            }
+            Expr::Index(base, index) => {
+                let (addr, element) = self.address_for_index(base, index)?;
+                ensure_assignable(expected, &element)?;
+                self.body.push(IrInst::Load {
+                    width: width_for_type(&element)?,
                     dst,
                     addr,
                 });
@@ -1520,6 +1549,43 @@ impl<'a> RoutineLowerer<'a> {
         Ok((addr, *to))
     }
 
+    fn address_for_index(
+        &mut self,
+        base: &Expr,
+        index: &Expr,
+    ) -> Result<(Address, Type), FrontendError> {
+        let Expr::Name(name) = base else {
+            return Err(FrontendError::Type(
+                "indexed access currently requires a named array".to_owned(),
+            ));
+        };
+        let binding = self.binding(name)?.clone();
+        let Type::Array { element, .. } = binding.ty else {
+            return Err(FrontendError::Type(
+                "indexed access needs an array".to_owned(),
+            ));
+        };
+
+        let index_ty = self.infer_expr(index)?;
+        if integer_width(&index_ty) != Some(2) {
+            return Err(FrontendError::Type(
+                "array indexes currently need a 16-bit scalar".to_owned(),
+            ));
+        }
+        self.lower_expr_to(index, &index_ty, Value::Accumulator)?;
+        self.body.push(IrInst::Move {
+            dst: Value::IndexX,
+            src: Value::Accumulator,
+        });
+
+        match binding.value {
+            Value::Global(symbol) => Ok((Address::SymbolIndexedX(symbol), *element)),
+            other => Err(FrontendError::Type(format!(
+                "indexed access currently requires a global array, got {other:?}"
+            ))),
+        }
+    }
+
     fn infer_expr(&self, expr: &Expr) -> Result<Type, FrontendError> {
         match expr {
             Expr::Number(value) if *value <= 0xff => Ok(Type::U8),
@@ -1538,13 +1604,13 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Add(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
-                compatible_width(&lhs_ty, &rhs_ty)?;
+                compatible_expr_width(&lhs_ty, &rhs_ty, rhs)?;
                 Ok(lhs_ty)
             }
             Expr::BitAnd(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
-                compatible_width(&lhs_ty, &rhs_ty)?;
+                compatible_expr_width(&lhs_ty, &rhs_ty, rhs)?;
                 Ok(lhs_ty)
             }
             Expr::Deref(ptr) => {
@@ -1553,6 +1619,21 @@ impl<'a> RoutineLowerer<'a> {
                     Type::Pointer { to, .. } => Ok(*to),
                     _ => Err(FrontendError::Type(
                         "dereference needs a pointer".to_owned(),
+                    )),
+                }
+            }
+            Expr::Index(base, index) => {
+                let base_ty = self.infer_expr(base)?;
+                let index_ty = self.infer_expr(index)?;
+                if integer_width(&index_ty) != Some(2) {
+                    return Err(FrontendError::Type(
+                        "array indexes currently need a 16-bit scalar".to_owned(),
+                    ));
+                }
+                match base_ty {
+                    Type::Array { element, .. } => Ok(*element),
+                    _ => Err(FrontendError::Type(
+                        "indexed access needs an array".to_owned(),
                     )),
                 }
             }
@@ -1677,6 +1758,18 @@ fn result_constructor_matches(expected: &Type, actual: &Type) -> bool {
 
 fn compatible_width(lhs: &Type, rhs: &Type) -> Result<Width, FrontendError> {
     if integer_width(lhs) == integer_width(rhs) {
+        width_for_type(lhs)
+    } else {
+        Err(FrontendError::Type(format!(
+            "incompatible expression types {lhs:?} and {rhs:?}"
+        )))
+    }
+}
+
+fn compatible_expr_width(lhs: &Type, rhs: &Type, rhs_expr: &Expr) -> Result<Width, FrontendError> {
+    if integer_width(lhs) == integer_width(rhs)
+        || (matches!(rhs_expr, Expr::Number(_)) && integer_width(lhs).is_some())
+    {
         width_for_type(lhs)
     } else {
         Err(FrontendError::Type(format!(
@@ -1815,6 +1908,42 @@ mod tests {
                 addr: Address::NearPtr(Value::Local(name)),
                 ..
             } if name == "p"
+        )));
+    }
+
+    #[test]
+    fn compiles_global_array_indexing_to_symbol_indexed_access() {
+        let source = "
+            module Arrays
+            var buffer: [4]u8
+            var head: u16
+            var out: u8
+
+            export procedure main()
+                head = head + 1 & 3
+                buffer[head] = '!'
+                head = head + 1 & 3
+                out = buffer[head]
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        let body = &module.routines[0].body;
+
+        assert!(body.iter().any(|inst| matches!(
+            inst,
+            IrInst::Store {
+                addr: Address::SymbolIndexedX(name),
+                ..
+            } if name == "buffer"
+        )));
+        assert!(body.iter().any(|inst| matches!(
+            inst,
+            IrInst::Load {
+                addr: Address::SymbolIndexedX(name),
+                ..
+            } if name == "buffer"
         )));
     }
 

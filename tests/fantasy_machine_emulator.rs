@@ -281,19 +281,24 @@ fn language_irq_vector_handles_usb_uart_rx_interrupt() {
             vector irq = irq
             fixed(${uart_ctrl:06x}) volatile var uart_ctrl: u8
             fixed(${serial_data:06x}) volatile var serial_data: u8
-            fixed($000200) volatile var done: u8
+            var rx_head: u16
+            var rx_tail: u16
+            var rx_buffer: [4]u8
 
             export procedure main()
-                done = 0
+                rx_head = 0
+                rx_tail = 0
                 uart_ctrl = ${rx_irq:02x}
-                while done == 0
+                while rx_head == rx_tail
                 end
+                serial_data = rx_buffer[rx_tail]
+                rx_tail = rx_tail + 1 & 3
                 return
             end
 
             interrupt procedure irq()
-                serial_data = serial_data
-                done = 1
+                rx_buffer[rx_head] = serial_data
+                rx_head = rx_head + 1 & 3
                 return
             end
             ",
@@ -312,6 +317,9 @@ fn language_irq_vector_handles_usb_uart_rx_interrupt() {
 
     assert_eq!(machine.serial_output(), b"!");
     assert_eq!(machine.byte(0x000200), 1);
+    assert_eq!(machine.byte(0x000202), 1);
+    assert_eq!(machine.byte(0x000204), b'!');
+    assert!(!machine.irq_pending());
 }
 
 #[test]
