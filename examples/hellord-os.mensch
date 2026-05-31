@@ -6,11 +6,16 @@ fixed($009f56) volatile var serial_status: u8
 fixed($009f57) volatile var serial_data: u8
 var rx_head: u16
 var rx_tail: u16
+var rx_next: u16
 var rx_buffer: [16]u8
+fixed($000280) volatile var rx_overflow: u8
+fixed($000281) volatile var rx_drop: u8
 
 export procedure main()
     rx_head = 0
     rx_tail = 0
+    rx_next = 0
+    rx_overflow = 0
 
     serial_data = 'H'
     serial_data = 'e'
@@ -33,7 +38,14 @@ export procedure main()
 end
 
 interrupt procedure serial_irq()
-    rx_buffer[rx_head] = serial_data
-    rx_head = rx_head + 1 & 15
+    rx_next = rx_head + 1 & 15
+    if rx_next == rx_tail
+        rx_drop = serial_data
+        rx_overflow = 1
+    end
+    if rx_next != rx_tail
+        rx_buffer[rx_head] = serial_data
+        rx_head = rx_next
+    end
     return
 end

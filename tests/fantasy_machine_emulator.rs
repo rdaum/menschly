@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use mensch_systems_tests::{ca65, frontend, lower_65816};
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
 use x65alike_emul::{
+    image::{load_image, ImageFormat, LoadedImage},
     Machine, RAMBLOCK_REG, ROMBLOCK_REG, USB_UART_CTRL, USB_UART_CTRL_IRQ_RX_NOT_EMPTY,
     USB_UART_DATA, USB_UART_STAT,
 };
@@ -17,6 +18,7 @@ const RETURN_BANK: u8 = 0x03;
 const RETURN_ADDR: u16 = 0x1234;
 const NATIVE_IRQ_VECTOR: usize = 0x00ffee;
 const DEFAULT_ROMBLOCK_IRQ_VECTOR_PHYSICAL: u32 = 0x083fee;
+const HELLORD_OVERFLOW_ADDR: u32 = 0x000280;
 
 static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -186,6 +188,44 @@ fn assemble_fixture_outputs(name: &str, asm: &str, cfg: &str) -> (Vec<u8>, Vec<u
     )
 }
 
+fn assemble_hellord_xex() -> Vec<u8> {
+    let dir = temp_dir("hellord-example");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source_path = repo_root.join("examples/hellord-os.mensch");
+    let cfg_path = repo_root.join("examples/hellord-os-x65.cfg");
+    let asm_path = dir.join("hellord-os.a65");
+    let obj_path = dir.join("hellord-os.o");
+    let xex_path = dir.join("hellord-os.xex");
+
+    let source = fs::read_to_string(&source_path).expect("Hellord source should be readable");
+    let module = frontend::compile_source(&source).expect("Hellord source should compile to IR");
+    let (lowered, _assignment) =
+        lower_65816::lower_module_with_storage(&module).expect("Hellord should lower to assembly");
+    fs::write(&asm_path, ca65::emit_module(&lowered)).expect("Hellord assembly should be written");
+
+    run_command(
+        Command::new("ca65")
+            .arg("-g")
+            .arg("--cpu")
+            .arg("65816")
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&obj_path),
+    );
+    run_command(
+        Command::new("ld65")
+            .arg("-C")
+            .arg(&cfg_path)
+            .arg(&obj_path)
+            .arg("-o")
+            .arg(&xex_path),
+    );
+
+    fs::read(&xex_path).expect("Hellord XEX should exist")
+}
+
 fn run_command(command: &mut Command) {
     let output = command
         .output()
@@ -195,6 +235,52 @@ fn run_command(command: &mut Command) {
         "command failed: {command:?}\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn machine_with_loaded_image(image: &LoadedImage) -> Machine {
+    let mut machine = Machine::new();
+    for range in &image.ranges {
+        if range.cpu_visible {
+            machine.load_cpu_visible(range.address, &range.bytes);
+        } else {
+            machine.load(range.address, &range.bytes);
+        }
+    }
+    machine
+}
+
+fn run_loaded_image_until_output(
+    image: &LoadedImage,
+    serial_input: &[u8],
+    output_len: usize,
+    max_steps: usize,
+) -> (Processor, Machine) {
+    let mut machine = machine_with_loaded_image(image);
+    machine.push_serial_input(serial_input);
+
+    let entry = image.entry.expect("image should include an entry point");
+    let mut bus = BusMachine::new(machine);
+    let mut cpu = Processor::new();
+    cpu.p = StatusRegister::from_byte(0x00, false);
+    cpu.pbr = entry.pbr;
+    cpu.dbr = 0;
+    cpu.pc = entry.pc;
+    cpu.s = 0x01fc;
+
+    for _ in 0..max_steps {
+        if bus.0.serial_output().len() >= output_len {
+            return (cpu, bus.into_inner());
+        }
+        if !cpu.p.i && bus.0.irq_pending() {
+            service_irq(&mut cpu, &mut bus);
+        }
+        cpu.step(&mut bus);
+    }
+
+    panic!(
+        "image did not produce {output_len} output bytes; got {:?}; cpu={cpu:?}",
+        String::from_utf8_lossy(bus.0.serial_output())
     );
 }
 
@@ -320,6 +406,43 @@ fn language_irq_vector_handles_usb_uart_rx_interrupt() {
     assert_eq!(machine.byte(0x000202), 1);
     assert_eq!(machine.byte(0x000204), b'!');
     assert!(!machine.irq_pending());
+}
+
+#[test]
+fn hellord_example_boots_as_interrupt_driven_xex() {
+    let xex = assemble_hellord_xex();
+    let image = load_image(
+        std::path::Path::new("hellord-os.xex"),
+        &xex,
+        ImageFormat::Auto,
+        0x020000,
+    )
+    .expect("Hellord XEX should load");
+    let expected = b"Hellord!\r\nabc123\n";
+
+    let (_cpu, machine) =
+        run_loaded_image_until_output(&image, b"abc123\n", expected.len(), 20_000);
+
+    assert_eq!(machine.serial_output(), expected);
+    assert_eq!(machine.byte(HELLORD_OVERFLOW_ADDR), 0);
+}
+
+#[test]
+fn hellord_example_flags_full_rx_ring_and_drops_input() {
+    let xex = assemble_hellord_xex();
+    let image = load_image(
+        std::path::Path::new("hellord-os.xex"),
+        &xex,
+        ImageFormat::Auto,
+        0x020000,
+    )
+    .expect("Hellord XEX should load");
+    let input = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let output_len = b"Hellord!\r\n".len() + 8;
+
+    let (_cpu, machine) = run_loaded_image_until_output(&image, input, output_len, 50_000);
+
+    assert_eq!(machine.byte(HELLORD_OVERFLOW_ADDR), 1);
 }
 
 #[test]
