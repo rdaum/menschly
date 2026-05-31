@@ -40,6 +40,7 @@ const COMMAND_CLS = 11
 const COMMAND_PROMPT = 12
 const COMMAND_SET = 13
 const COMMAND_RUN = 14
+const COMMAND_MEM = 15
 const COMMAND_EMPTY = 255
 const FILE_UNKNOWN = 0
 const FILE_README = 1
@@ -93,6 +94,8 @@ function command_code(): u8
         return COMMAND_PWD
     elsif is_map() != 0
         return COMMAND_MAP
+    elsif is_mem() != 0
+        return COMMAND_MEM
     elsif is_cls() != 0
         return COMMAND_CLS
     elsif is_prompt() != 0
@@ -348,6 +351,14 @@ function is_map(): u8
     end
 end
 
+function is_mem(): u8
+    if command_word_matches("MEM") != 0
+        return 1
+    else
+        return 0
+    end
+end
+
 function is_cls(): u8
     if command_word_matches("C") != 0
         return 1
@@ -482,6 +493,8 @@ procedure dispatch_line()
         write_path()
     elsif code == COMMAND_MAP
         write_memory_map()
+    elsif code == COMMAND_MEM
+        write_memory_status()
     elsif code == COMMAND_CLS
         console_clear()
     elsif code == COMMAND_PROMPT
@@ -575,6 +588,15 @@ procedure write_memory_map()
     write_memory_range("RAM", $0000, $8fff)
     write_memory_range("I/O", $9f00, $9fff)
     write_memory_range("ROM", $c000, $ffff)
+    return
+end
+
+procedure write_memory_status()
+    console_write_text("Memory status:\r\n")
+    write_memory_range("Direct", $0080, $00ff)
+    write_memory_range("BSS", $9000, $9eff)
+    console_write_text("Line buffer $0020\r\n")
+    console_write_text("Serial rings $0040\r\n")
     return
 end
 
