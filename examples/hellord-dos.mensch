@@ -46,6 +46,7 @@ const COMMAND_PROGRAM = 16
 const COMMAND_PATH = 17
 const COMMAND_PEEK = 18
 const COMMAND_POKE = 19
+const COMMAND_DUMP = 20
 const COMMAND_EMPTY = 255
 const FILE_UNKNOWN = 0
 const FILE_README = 1
@@ -121,6 +122,8 @@ function command_code(): u8
         return COMMAND_PEEK
     elsif is_poke() != 0
         return COMMAND_POKE
+    elsif is_dump() != 0
+        return COMMAND_DUMP
     elsif is_set() != 0
         return COMMAND_SET
     elsif is_run() != 0
@@ -431,6 +434,14 @@ function is_poke(): u8
     end
 end
 
+function is_dump(): u8
+    if command_argument_matches("DUMP") != 0
+        return 1
+    else
+        return 0
+    end
+end
+
 function is_set(): u8
     if command_word_matches("SET") != 0
         return 1
@@ -589,6 +600,8 @@ procedure dispatch_line()
         peek_memory()
     elsif code == COMMAND_POKE
         poke_memory()
+    elsif code == COMMAND_DUMP
+        dump_memory()
     elsif code == COMMAND_SET
         configure_set()
     elsif code == COMMAND_RUN
@@ -811,6 +824,50 @@ procedure poke_memory()
             ptr = addr
             ptr^ = value
             console_write_text("OK\r\n")
+        end
+    end
+    return
+end
+
+procedure dump_memory()
+    direct var addr: u16
+    direct var ptr: near ^u8
+    direct var count: u8
+    direct var length: u8
+    direct var value: u8
+    addr = parse_hex_u16(5)
+    if parse_ok == 0
+        console_write_unknown()
+    elsif parse_end >= line_len
+        console_write_unknown()
+    elsif command_buffer[parse_end] != ' '
+        console_write_unknown()
+    else
+        length = parse_hex_u8(parse_end + 1)
+        if parse_ok == 0
+            console_write_unknown()
+        elsif parse_end != line_len
+            console_write_unknown()
+        elsif length == 0
+            console_write_unknown()
+        elsif length > $10
+            console_write_unknown()
+        else
+            ptr = addr
+            count = 0
+            console_write('$')
+            console_write_hex16(addr)
+            console_write_text(": ")
+            while count != length
+                if count != 0
+                    console_write(' ')
+                end
+                value = ptr^
+                console_write_hex8(value)
+                ptr = ptr + 1
+                count = count + 1
+            end
+            console_newline()
         end
     end
     return
