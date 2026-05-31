@@ -933,18 +933,7 @@ impl Parser {
 
     fn parse_stmt(&mut self) -> Result<Stmt, FrontendError> {
         if self.take_keyword("if") {
-            let cond = self.parse_cond()?;
-            let (body, terminator) = self.parse_block_until(&["else", "end"])?;
-            let else_body = if terminator == "else" {
-                self.parse_block()?
-            } else {
-                Vec::new()
-            };
-            return Ok(Stmt::If {
-                cond,
-                body,
-                else_body,
-            });
+            return self.parse_if_after_keyword();
         }
         if self.take_keyword("while") {
             let cond = self.parse_cond()?;
@@ -984,6 +973,22 @@ impl Parser {
     fn parse_block(&mut self) -> Result<Vec<Stmt>, FrontendError> {
         let (body, _terminator) = self.parse_block_until(&["end"])?;
         Ok(body)
+    }
+
+    fn parse_if_after_keyword(&mut self) -> Result<Stmt, FrontendError> {
+        let cond = self.parse_cond()?;
+        let (body, terminator) = self.parse_block_until(&["elsif", "else", "end"])?;
+        let else_body = match terminator.as_str() {
+            "elsif" => vec![self.parse_if_after_keyword()?],
+            "else" => self.parse_block()?,
+            "end" => Vec::new(),
+            _ => unreachable!("if parser returned unexpected terminator"),
+        };
+        Ok(Stmt::If {
+            cond,
+            body,
+            else_body,
+        })
     }
 
     fn parse_block_until(
@@ -1158,7 +1163,9 @@ impl Parser {
     }
 
     fn next_is_block_end(&self) -> bool {
-        self.is_keyword_at(0, "end") || self.is_keyword_at(0, "else")
+        self.is_keyword_at(0, "end")
+            || self.is_keyword_at(0, "else")
+            || self.is_keyword_at(0, "elsif")
     }
 
     fn expect_keyword(&mut self, keyword: &str) -> Result<(), FrontendError> {
@@ -2534,6 +2541,37 @@ mod tests {
             inst,
             IrInst::Label(label) if label.0.starts_with("__if_else_")
         )));
+    }
+
+    #[test]
+    fn compiles_elsif_as_nested_else_if() {
+        let source = "
+            module Branches
+            export procedure main()
+                var x: u8
+                var out: u8
+                if x == 0
+                    out = 1
+                elsif x == 1
+                    out = 2
+                else
+                    out = 3
+                end
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        let body = &module.routines[0].body;
+
+        assert!(
+            body.iter()
+                .filter(
+                    |inst| matches!(inst, IrInst::Label(label) if label.0.starts_with("__if_else_"))
+                )
+                .count()
+                >= 2
+        );
     }
 
     #[test]

@@ -40,28 +40,18 @@ end
 function command_code(): u8
     if line_len == 0
         return COMMAND_EMPTY
+    elsif is_help() != 0
+        return COMMAND_HELP
+    elsif is_version() != 0
+        return COMMAND_VERSION
+    elsif is_dir() != 0
+        return COMMAND_DIR
+    elsif is_status() != 0
+        return COMMAND_STATUS
+    elsif is_echo() != 0
+        return COMMAND_ECHO
     else
-        if is_help() != 0
-            return COMMAND_HELP
-        else
-            if is_version() != 0
-                return COMMAND_VERSION
-            else
-                if is_dir() != 0
-                    return COMMAND_DIR
-                else
-                    if is_status() != 0
-                        return COMMAND_STATUS
-                    else
-                        if is_echo() != 0
-                            return COMMAND_ECHO
-                        else
-                            return COMMAND_UNKNOWN
-                        end
-                    end
-                end
-            end
-        end
+        return COMMAND_UNKNOWN
     end
 end
 
@@ -219,28 +209,18 @@ procedure dispatch_line()
     code = command_code()
     if code == COMMAND_EMPTY
         return
+    elsif code == COMMAND_HELP
+        console_write_help()
+    elsif code == COMMAND_VERSION
+        console_write_version()
+    elsif code == COMMAND_DIR
+        console_write_dir()
+    elsif code == COMMAND_STATUS
+        write_status()
+    elsif code == COMMAND_ECHO
+        echo_line()
     else
-        if code == COMMAND_HELP
-            console_write_help()
-        else
-            if code == COMMAND_VERSION
-                console_write_version()
-            else
-                if code == COMMAND_DIR
-                    console_write_dir()
-                else
-                    if code == COMMAND_STATUS
-                        write_status()
-                    else
-                        if code == COMMAND_ECHO
-                            echo_line()
-                        else
-                            console_write_unknown()
-                        end
-                    end
-                end
-            end
-        end
+        console_write_unknown()
     end
     return
 end
