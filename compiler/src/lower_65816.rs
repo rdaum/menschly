@@ -162,8 +162,10 @@ fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
     let mut out = AsmRoutine::new(routine.name.clone());
     out.export = routine.export;
 
-    emit_interrupt_prologue(&mut out.insts, routine.interrupt_preserve);
-    if matches!(routine.abi, Abi::Interrupt) {
+    if !routine.interrupt_raw {
+        emit_interrupt_prologue(&mut out.insts, routine.interrupt_preserve);
+    }
+    if matches!(routine.abi, Abi::Interrupt) && !routine.interrupt_raw {
         out.insts.push(AsmInst::Phk);
         out.insts.push(AsmInst::Plb);
         out.insts.push(AsmInst::Mode(Mode::Acc8Index16));
@@ -366,7 +368,9 @@ fn return_inst(routine: &Routine) -> AsmInst {
 
 fn emit_return_sequence(routine: &Routine, out: &mut Vec<AsmInst>) {
     emit_stack_frame_adjust(out, routine.stack_frame_bytes, StackFrameOp::Release);
-    emit_interrupt_epilogue(out, routine.interrupt_preserve);
+    if !routine.interrupt_raw {
+        emit_interrupt_epilogue(out, routine.interrupt_preserve);
+    }
     out.push(return_inst(routine));
 }
 

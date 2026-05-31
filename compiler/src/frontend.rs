@@ -73,6 +73,7 @@ pub struct ExternalDecl {
     pub kind: RoutineDeclKind,
     pub abi: Abi,
     pub interrupt_preserve: InterruptPreserve,
+    pub interrupt_raw: bool,
     pub params: Vec<VarDecl>,
 }
 
@@ -82,6 +83,7 @@ pub struct RoutineDecl {
     pub kind: RoutineDeclKind,
     pub abi: Abi,
     pub interrupt_preserve: InterruptPreserve,
+    pub interrupt_raw: bool,
     pub export: bool,
     pub params: Vec<VarDecl>,
     pub locals: Vec<VarDecl>,
@@ -543,12 +545,14 @@ impl Parser {
     }
 
     fn parse_external_decl(&mut self) -> Result<ExternalDecl, FrontendError> {
-        let (_export, abi, interrupt_preserve, kind, name, params) = self.parse_routine_header()?;
+        let (_export, abi, interrupt_preserve, interrupt_raw, kind, name, params) =
+            self.parse_routine_header()?;
         Ok(ExternalDecl {
             name,
             kind,
             abi,
             interrupt_preserve,
+            interrupt_raw,
             params,
         })
     }
@@ -597,7 +601,8 @@ impl Parser {
     }
 
     fn parse_routine(&mut self) -> Result<RoutineDecl, FrontendError> {
-        let (export, abi, interrupt_preserve, kind, name, params) = self.parse_routine_header()?;
+        let (export, abi, interrupt_preserve, interrupt_raw, kind, name, params) =
+            self.parse_routine_header()?;
 
         let mut locals = Vec::new();
         let mut body = Vec::new();
@@ -617,6 +622,7 @@ impl Parser {
             kind,
             abi,
             interrupt_preserve,
+            interrupt_raw,
             export,
             params,
             locals,
@@ -631,6 +637,7 @@ impl Parser {
             bool,
             Abi,
             InterruptPreserve,
+            bool,
             RoutineDeclKind,
             String,
             Vec<VarDecl>,
@@ -640,11 +647,14 @@ impl Parser {
         let export = self.take_keyword("export");
         let mut abi = Abi::Internal;
         let mut interrupt_preserve = InterruptPreserve::NONE;
+        let mut interrupt_raw = false;
         if self.take_keyword("far") {
             abi = Abi::Far;
         } else if self.take_keyword("interrupt") {
             abi = Abi::Interrupt;
-            interrupt_preserve = self.parse_interrupt_preserve()?;
+            let interrupt_attr = self.parse_interrupt_attr()?;
+            interrupt_preserve = interrupt_attr.preserve;
+            interrupt_raw = interrupt_attr.raw;
         } else if self.take_keyword("reentrant") {
             abi = Abi::Reentrant;
         }
@@ -669,12 +679,28 @@ impl Parser {
             }
         };
 
-        Ok((export, abi, interrupt_preserve, kind, name, params))
+        Ok((
+            export,
+            abi,
+            interrupt_preserve,
+            interrupt_raw,
+            kind,
+            name,
+            params,
+        ))
     }
 
-    fn parse_interrupt_preserve(&mut self) -> Result<InterruptPreserve, FrontendError> {
+    fn parse_interrupt_attr(&mut self) -> Result<InterruptAttr, FrontendError> {
         if !self.take(TokenKind::LParen) {
-            return Ok(InterruptPreserve::DEFAULT);
+            return Ok(InterruptAttr::default());
+        }
+
+        if self.take_keyword("raw") {
+            self.expect(TokenKind::RParen)?;
+            return Ok(InterruptAttr {
+                preserve: InterruptPreserve::NONE,
+                raw: true,
+            });
         }
 
         self.expect_keyword("preserve")?;
@@ -685,11 +711,17 @@ impl Parser {
             "default" => {
                 preserve = InterruptPreserve::DEFAULT;
                 self.expect(TokenKind::RParen)?;
-                return Ok(preserve);
+                return Ok(InterruptAttr {
+                    preserve,
+                    raw: false,
+                });
             }
             "none" => {
                 self.expect(TokenKind::RParen)?;
-                return Ok(preserve);
+                return Ok(InterruptAttr {
+                    preserve,
+                    raw: false,
+                });
             }
             _ => apply_interrupt_preserve_name(&mut preserve, &first)?,
         }
@@ -699,7 +731,10 @@ impl Parser {
             apply_interrupt_preserve_name(&mut preserve, &name)?;
         }
         self.expect(TokenKind::RParen)?;
-        Ok(preserve)
+        Ok(InterruptAttr {
+            preserve,
+            raw: false,
+        })
     }
 
     fn parse_params(&mut self) -> Result<Vec<VarDecl>, FrontendError> {
@@ -1132,6 +1167,21 @@ fn apply_interrupt_preserve_name(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InterruptAttr {
+    preserve: InterruptPreserve,
+    raw: bool,
+}
+
+impl Default for InterruptAttr {
+    fn default() -> Self {
+        Self {
+            preserve: InterruptPreserve::DEFAULT,
+            raw: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RoutineSig {
     kind: RoutineDeclKind,
@@ -1332,6 +1382,7 @@ impl Lowerer {
                 source.abi
             },
             interrupt_preserve: source.interrupt_preserve,
+            interrupt_raw: source.interrupt_raw,
             params: source
                 .params
                 .iter()
@@ -2441,6 +2492,47 @@ mod tests {
         assert!(!asm.contains("\tphy\n"));
         assert!(!asm.contains("\tphp\n"));
         assert!(!asm.contains("\tphb\n"));
+        assert!(asm.contains("\tphk\n"));
+        assert!(asm.contains("\tplb\n"));
+        assert!(asm.contains("\tsep #$20\n"));
+        assert!(asm.contains("\t.i16\n"));
+        assert!(asm.contains("\trti\n"));
+    }
+
+    #[test]
+    fn parses_raw_interrupt_attribute() {
+        let source = "
+            module Kernel
+            vector irq = irq
+
+            interrupt(raw) procedure irq()
+                asm \"nop\"
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        assert!(module.routines[0].interrupt_raw);
+        assert_eq!(
+            module.routines[0].interrupt_preserve,
+            InterruptPreserve::NONE
+        );
+
+        let (lowered, _assignment) =
+            crate::lower_65816::lower_module_with_storage(&module).unwrap();
+        let asm = crate::ca65::emit_module(&lowered);
+
+        assert!(asm.contains("\tnop\n"));
+        assert!(!asm.contains("\tpha\n"));
+        assert!(!asm.contains("\tphx\n"));
+        assert!(!asm.contains("\tphy\n"));
+        assert!(!asm.contains("\tphp\n"));
+        assert!(!asm.contains("\tphb\n"));
+        assert!(!asm.contains("\tphk\n"));
+        assert!(!asm.contains("\tplb\n"));
+        assert!(!asm.contains("\tsep #$20\n"));
+        assert!(!asm.contains("\t.a8\n"));
+        assert!(!asm.contains("\t.i16\n"));
         assert!(asm.contains("\trti\n"));
     }
 

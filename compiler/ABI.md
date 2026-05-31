@@ -71,6 +71,7 @@ Latency-sensitive handlers can override the generated save set:
 ```text
 interrupt(preserve = a, x) procedure scanline()
 interrupt(preserve = none) procedure hand_tuned_irq()
+interrupt(raw) procedure cycle_counted_irq()
 ```
 
 The current preserve names are `a`, `x`, `y`, `p`, and `dbr`; `default` expands
@@ -78,6 +79,11 @@ to the default save set. `preserve = none` is an expert mode for handlers whose
 clobber contract is managed outside the compiler-generated save/restore ABI; the
 compiler still establishes its handler body entry mode before generated
 statements.
+
+`interrupt(raw)` is for fully hand-tuned handlers. It emits no register
+save/restore, no `DBR` setup, and no accumulator/index width setup. The compiler
+still emits `rti` for `return`, but inline assembly in a raw handler owns every
+other machine-state detail.
 
 Interrupt handlers may call parameterless routines, or parameterized
 `reentrant` routines that use stack arguments. The frontend rejects calls from

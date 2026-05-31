@@ -445,6 +445,56 @@ fn language_irq_preserve_none_can_clobber_interrupted_accumulator() {
 }
 
 #[test]
+fn raw_interrupt_skips_generated_entry_state() {
+    let (code, vectors) = assemble_source_with_vectors_fixture(
+        "language-uart-raw-irq-skips-entry-state",
+        &format!(
+            "
+            module RawIrqEntryDemo
+            vector irq = irq
+            fixed(${uart_ctrl:06x}) volatile var uart_ctrl: u8
+            fixed($000298) volatile var seen: u8
+
+            export far procedure main()
+                asm \"sei\"
+                uart_ctrl = ${rx_irq:02x}
+                asm \"sep #$20\"
+                asm \"lda #$01\"
+                asm \"pha\"
+                asm \"plb\"
+                asm \"cli\"
+                asm \"nop\"
+                return
+            end
+
+            interrupt(raw) procedure irq()
+                asm \"sep #$20\"
+                asm \".a8\"
+                asm \"lda #$42\"
+                asm \"sta $9000\"
+                asm \"lda f:${serial_data:06x}\"
+                return
+            end
+            ",
+            uart_ctrl = USB_UART_CTRL,
+            serial_data = USB_UART_DATA,
+            rx_irq = USB_UART_CTRL_IRQ_RX_NOT_EMPTY,
+        ),
+    );
+
+    let mut machine = Machine::new();
+    machine.load(IRQ_ROUTINE_ADDR as u32, &code);
+    machine.load(DEFAULT_ROMBLOCK_IRQ_VECTOR_PHYSICAL, &vectors);
+    machine.push_serial_input(b"!");
+
+    let (_cpu, machine) = run_loaded_routine_at(machine, IRQ_ROUTINE_ADDR);
+
+    assert_eq!(machine.byte(0x019000), 0x42);
+    assert_ne!(machine.byte(0x009000), 0x42);
+    assert_eq!(machine.byte(0x000298), 0);
+}
+
+#[test]
 fn hellord_example_boots_as_interrupt_driven_xex() {
     let build = build_hellord_example();
     let expected = b"Hellord!\r\nabc123\n";
