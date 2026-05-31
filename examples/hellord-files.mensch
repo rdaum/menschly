@@ -1,0 +1,35 @@
+module HellordFiles
+
+external procedure console_write_text(text: near ^u8)
+external procedure console_write_hex16(value: u16)
+external procedure console_newline()
+
+procedure files_write_entry(name: near ^u8, size: u16)
+    console_write_text(name)
+    console_write_text("  $")
+    console_write_hex16(size)
+    console_newline()
+    return
+end
+
+export procedure files_write_dir()
+    files_write_entry("README.TXT", 49)
+    files_write_entry("SYSTEM.TXT", 65)
+    console_write_text("2 file(s)\r\n")
+    return
+end
+
+export procedure files_type_readme()
+    console_write_text("Hellord is a tiny Mensch DOS for the x65-alike.\r\n")
+    return
+end
+
+export procedure files_type_system()
+    console_write_text("CPU: 65816\r\nConsole: USB UART IRQ rings\r\nStorage: ROM file table\r\n")
+    return
+end
+
+export procedure files_write_not_found()
+    console_write_text("File not found\r\n")
+    return
+end

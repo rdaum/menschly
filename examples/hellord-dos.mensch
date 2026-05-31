@@ -9,9 +9,12 @@ external procedure console_write_greeting()
 external procedure console_write_help()
 external procedure console_write_version()
 external procedure console_prompt_drive(drive: u8)
-external procedure console_write_drive_missing(drive: u8)
 external procedure console_write_unknown()
 external procedure console_write_flag(name: u8, value: u8)
+external procedure files_write_dir()
+external procedure files_type_readme()
+external procedure files_type_system()
+external procedure files_write_not_found()
 external function serial_rx_overflow(): u8
 external function serial_tx_overflow(): u8
 
@@ -25,7 +28,11 @@ const COMMAND_DRIVE = 6
 const COMMAND_PWD = 7
 const COMMAND_CD = 8
 const COMMAND_MAP = 9
+const COMMAND_TYPE = 10
 const COMMAND_EMPTY = 255
+const FILE_UNKNOWN = 0
+const FILE_README = 1
+const FILE_SYSTEM = 2
 const LINE_LIMIT = 31
 const PATH_LIMIT = 15
 const BACKSPACE = $08
@@ -65,6 +72,8 @@ function command_code(): u8
         return COMMAND_PWD
     elsif is_map() != 0
         return COMMAND_MAP
+    elsif is_type() != 0
+        return COMMAND_TYPE
     elsif is_cd() != 0
         return COMMAND_CD
     elsif is_echo() != 0
@@ -162,6 +171,45 @@ function command_argument_matches(word: near ^u8): u8
     end
 end
 
+function argument_start(short: near ^u8, long: near ^u8): u16
+    var index: u16
+    index = 0
+    if command_argument_matches(short) != 0
+        while short^ != 0
+            index = index + 1
+            short = short + 1
+        end
+        return index + 1
+    else
+        while long^ != 0
+            index = index + 1
+            long = long + 1
+        end
+        return index + 1
+    end
+end
+
+function argument_word_matches(index: u16, word: near ^u8): u8
+    var ch: u8
+    ch = word^
+    while ch != 0
+        if index >= line_len
+            return 0
+        elsif command_char_matches(index, ch) == 0
+            return 0
+        else
+            index = index + 1
+            word = word + 1
+            ch = word^
+        end
+    end
+    if index == line_len
+        return 1
+    else
+        return 0
+    end
+end
+
 function is_help(): u8
     if command_word_matches("H") != 0
         return 1
@@ -230,6 +278,16 @@ function is_map(): u8
     if command_word_matches("M") != 0
         return 1
     elsif command_word_matches("MAP") != 0
+        return 1
+    else
+        return 0
+    end
+end
+
+function is_type(): u8
+    if command_argument_matches("T") != 0
+        return 1
+    elsif command_argument_matches("TYPE") != 0
         return 1
     else
         return 0
@@ -313,13 +371,15 @@ procedure dispatch_line()
     elsif code == COMMAND_VERSION
         console_write_version()
     elsif code == COMMAND_DIR
-        console_write_drive_missing(current_drive)
+        write_dir()
     elsif code == COMMAND_STATUS
         write_status()
     elsif code == COMMAND_PWD
         write_path()
     elsif code == COMMAND_MAP
         write_memory_map()
+    elsif code == COMMAND_TYPE
+        type_file()
     elsif code == COMMAND_CD
         change_dir()
     elsif code == COMMAND_ECHO
@@ -355,6 +415,13 @@ procedure write_path()
     return
 end
 
+procedure write_dir()
+    console_write_text("Directory of ")
+    write_path()
+    files_write_dir()
+    return
+end
+
 procedure write_memory_range(name: near ^u8, first: u16, last: u16)
     console_write_text(name)
     console_write(' ')
@@ -372,6 +439,35 @@ procedure write_memory_map()
     write_memory_range("RAM", $0000, $8fff)
     write_memory_range("I/O", $9f00, $9fff)
     write_memory_range("ROM", $c000, $ffff)
+    return
+end
+
+function type_file_code(): u8
+    var start: u16
+    start = argument_start("T", "TYPE")
+    if argument_word_matches(start, "README.TXT") != 0
+        return FILE_README
+    elsif argument_word_matches(start, "README") != 0
+        return FILE_README
+    elsif argument_word_matches(start, "SYSTEM.TXT") != 0
+        return FILE_SYSTEM
+    elsif argument_word_matches(start, "SYSTEM") != 0
+        return FILE_SYSTEM
+    else
+        return FILE_UNKNOWN
+    end
+end
+
+procedure type_file()
+    direct var code: u8
+    code = type_file_code()
+    if code == FILE_README
+        files_type_readme()
+    elsif code == FILE_SYSTEM
+        files_type_system()
+    else
+        files_write_not_found()
+    end
     return
 end
 

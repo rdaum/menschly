@@ -497,7 +497,7 @@ fn raw_interrupt_skips_generated_entry_state() {
 #[test]
 fn hellord_example_boots_as_interrupt_driven_xex() {
     let build = build_hellord_example();
-    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> HELP\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nE  echo\r\nS  status\r\nP  pwd\r\nM  map\r\nCD path\r\nA:-Z: drive\r\nA> VER\r\nHellord DOS 0.1\r\nA> DIR\r\nDrive A: not mounted\r\nA> b:\r\nB> DIR\r\nDrive B: not mounted\r\nB> PWD\r\nB:/\r\nB> CD GAMES\r\nB> PWD\r\nB:GAMES\r\nB> MAP\r\nMemory map:\r\nRAM $0000-$8FFF\r\nI/O $9F00-$9FFF\r\nROM $C000-$FFFF\r\nB> STAT\r\nR: 0\r\nT: 0\r\nB> ECHO heX\x08 \x08llo\r\nhello\r\nB> X\r\n?SYNTAX\r\nB> \r\nB> ";
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> HELP\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nT  type\r\nE  echo\r\nS  status\r\nP  pwd\r\nM  map\r\nCD path\r\nA:-Z: drive\r\nA> VER\r\nHellord DOS 0.1\r\nA> DIR\r\nDirectory of A:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\n2 file(s)\r\nA> b:\r\nB> DIR\r\nDirectory of B:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\n2 file(s)\r\nB> PWD\r\nB:/\r\nB> CD GAMES\r\nB> PWD\r\nB:GAMES\r\nB> MAP\r\nMemory map:\r\nRAM $0000-$8FFF\r\nI/O $9F00-$9FFF\r\nROM $C000-$FFFF\r\nB> STAT\r\nR: 0\r\nT: 0\r\nB> ECHO heX\x08 \x08llo\r\nhello\r\nB> X\r\n?SYNTAX\r\nB> \r\nB> ";
 
     let run = run_image_until_output(
         &build.image,
@@ -506,6 +506,24 @@ fn hellord_example_boots_as_interrupt_driven_xex() {
         200_000,
     )
     .expect("Hellord image should produce expected output");
+
+    assert_eq!(run.output, expected);
+    assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
+    assert_eq!(run.machine.byte(HELLORD_TX_OVERFLOW_ADDR), 0);
+}
+
+#[test]
+fn hellord_rom_files_can_be_listed_and_typed() {
+    let build = build_hellord_example();
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> dir\r\nDirectory of A:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\n2 file(s)\r\nA> t readme\r\nHellord is a tiny Mensch DOS for the x65-alike.\r\nA> type SYSTEM.TXT\r\nCPU: 65816\r\nConsole: USB UART IRQ rings\r\nStorage: ROM file table\r\nA> t missing\r\nFile not found\r\nA> ";
+
+    let run = run_image_until_output(
+        &build.image,
+        b"dir\nt readme\ntype SYSTEM.TXT\nt missing\n",
+        expected.len(),
+        250_000,
+    )
+    .expect("Hellord image should produce ROM file transcript");
 
     assert_eq!(run.output, expected);
     assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
@@ -643,6 +661,7 @@ fn build_hellord_example() -> x65_runner::BuildOutput {
             repo_root.join("examples/hellord-os.mensch"),
             repo_root.join("examples/hellord-dos.mensch"),
             repo_root.join("examples/hellord-console.mensch"),
+            repo_root.join("examples/hellord-files.mensch"),
             repo_root.join("examples/serial-ring.mensch"),
         ],
         repo_root.join("examples/hellord-os-x65.cfg"),
