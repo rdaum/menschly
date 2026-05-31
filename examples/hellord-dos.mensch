@@ -42,6 +42,7 @@ const COMMAND_SET = 13
 const COMMAND_RUN = 14
 const COMMAND_MEM = 15
 const COMMAND_PROGRAM = 16
+const COMMAND_PATH = 17
 const COMMAND_EMPTY = 255
 const FILE_UNKNOWN = 0
 const FILE_README = 1
@@ -53,6 +54,8 @@ const DIR_ROOT = 0
 const DIR_GAMES = 1
 const PROMPT_SHORT = 0
 const PROMPT_FULL = 1
+const PATH_CURRENT = 0
+const PATH_ROOT = 1
 const LINE_LIMIT = 31
 const PATH_LIMIT = 15
 const BACKSPACE = $08
@@ -62,6 +65,7 @@ const LOWERCASE_DELTA = 32
 var current_drive: u8
 var current_dir: u8
 var prompt_mode: u8
+var path_mode: u8
 var path_len: u16
 var line_len: u16
 var current_path: [16]u8
@@ -70,6 +74,7 @@ var command_buffer: [32]u8
 export procedure dos_boot()
     current_drive = 'A'
     prompt_mode = PROMPT_SHORT
+    path_mode = PATH_CURRENT
     init_path()
     console_write_greeting()
     prompt()
@@ -101,6 +106,8 @@ function command_code(): u8
         return COMMAND_CLS
     elsif is_prompt() != 0
         return COMMAND_PROMPT
+    elsif is_path() != 0
+        return COMMAND_PATH
     elsif is_set() != 0
         return COMMAND_SET
     elsif is_run() != 0
@@ -382,6 +389,16 @@ function is_prompt(): u8
     end
 end
 
+function is_path(): u8
+    if command_word_matches("PATH") != 0
+        return 1
+    elsif command_argument_matches("PATH") != 0
+        return 1
+    else
+        return 0
+    end
+end
+
 function is_set(): u8
     if command_word_matches("SET") != 0
         return 1
@@ -502,6 +519,8 @@ procedure dispatch_line()
         console_clear()
     elsif code == COMMAND_PROMPT
         configure_prompt()
+    elsif code == COMMAND_PATH
+        configure_path()
     elsif code == COMMAND_SET
         configure_set()
     elsif code == COMMAND_RUN
@@ -615,6 +634,16 @@ procedure write_prompt_mode()
     return
 end
 
+procedure write_path_mode()
+    console_write_text("PATH=")
+    if path_mode == PATH_CURRENT
+        console_write_text(".\r\n")
+    else
+        console_write_text("/\r\n")
+    end
+    return
+end
+
 procedure configure_prompt()
     if command_word_matches("PROMPT") != 0
         write_prompt_mode()
@@ -638,6 +667,27 @@ function set_prompt_mode(index: u16): u8
     end
 end
 
+function set_path_mode(index: u16): u8
+    if argument_word_matches(index, ".") != 0
+        path_mode = PATH_CURRENT
+        return 1
+    elsif argument_word_matches(index, "/") != 0
+        path_mode = PATH_ROOT
+        return 1
+    else
+        return 0
+    end
+end
+
+procedure configure_path()
+    if command_word_matches("PATH") != 0
+        write_path_mode()
+    elsif set_path_mode(5) == 0
+        console_write_unknown()
+    end
+    return
+end
+
 procedure write_environment()
     console_write_text("DRIVE=")
     console_write(current_drive)
@@ -651,6 +701,7 @@ procedure write_environment()
     else
         console_write_text("FULL\r\n")
     end
+    write_path_mode()
     return
 end
 
@@ -672,6 +723,10 @@ procedure configure_set()
         end
     elsif argument_name_matches(4, "DRIVE") != 0
         if set_drive_from_argument(10) == 0
+            console_write_unknown()
+        end
+    elsif argument_name_matches(4, "PATH") != 0
+        if set_path_mode(9) == 0
             console_write_unknown()
         end
     else
@@ -711,22 +766,34 @@ function run_program_code(): u8
 end
 
 function bare_program_code(): u8
-    return program_code_at(0)
+    var code: u8
+    code = program_code_at(0)
+    if code != FILE_UNKNOWN
+        return code
+    elsif path_mode == PATH_ROOT
+        return root_program_code_at(0)
+    else
+        return FILE_UNKNOWN
+    end
 end
 
 function program_code_at(start: u16): u8
     if current_dir == DIR_ROOT
-        if argument_word_matches(start, "HELLO.PRG") != 0
-            return PROGRAM_HELLO
-        elsif argument_word_matches(start, "HELLO") != 0
-            return PROGRAM_HELLO
-        else
-            return FILE_UNKNOWN
-        end
+        return root_program_code_at(start)
     elsif argument_word_matches(start, "DEMO.PRG") != 0
         return PROGRAM_DEMO
     elsif argument_word_matches(start, "DEMO") != 0
         return PROGRAM_DEMO
+    else
+        return FILE_UNKNOWN
+    end
+end
+
+function root_program_code_at(start: u16): u8
+    if argument_word_matches(start, "HELLO.PRG") != 0
+        return PROGRAM_HELLO
+    elsif argument_word_matches(start, "HELLO") != 0
+        return PROGRAM_HELLO
     else
         return FILE_UNKNOWN
     end
