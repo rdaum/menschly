@@ -1,0 +1,43 @@
+module HellordBios
+
+vector cop = bios_trap
+
+const BIOS_BCONOUT = $0003
+const BIOS_CONSOLE = $0002
+const BIOS_FAMILY = $0d
+const USB_UART_DATA = $009f57
+
+export reentrant procedure bios_bconout(dev: u16, ch: u16)
+    asm "rep #$30"
+    asm ".a16"
+    asm ".i16"
+    asm "lda $03,s"
+    asm "tax"
+    asm "lda $05,s"
+    asm "tay"
+    asm "lda #$0003"
+    asm "cop $0d"
+    return
+end
+
+interrupt(preserve = p, dbr) procedure bios_trap()
+    asm "rep #$30"
+    asm ".a16"
+    asm ".i16"
+    asm "cmp #$0003"
+    asm "bne bios_unknown"
+    asm "cpx #$0002"
+    asm "bne bios_unknown"
+    asm "tya"
+    asm "sep #$20"
+    asm ".a8"
+    asm "sta f:$009f57"
+    asm "rep #$20"
+    asm ".a16"
+    asm "lda #$0000"
+    asm "bra bios_done"
+    asm "bios_unknown:"
+    asm "lda #$ffff"
+    asm "bios_done:"
+    return
+end

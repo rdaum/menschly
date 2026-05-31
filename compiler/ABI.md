@@ -90,3 +90,45 @@ Interrupt handlers may call parameterless routines, or parameterized
 `interrupt procedure` bodies to non-reentrant routines or external declarations
 with parameters, because direct-page parameter slots can be clobbered if the
 interrupt fires while foreground code is preparing or using the same call.
+
+## System Calls
+
+Hellord system calls use the 65816 `COP` software-interrupt instruction as the
+machine equivalent of the TOS `TRAP` families. The immediate byte selects the
+call family:
+
+```text
+COP #$01   GEMDOS-like process, file, path, and memory services
+COP #$0d   BIOS-like device and block services
+COP #$0e   XBIOS-like machine-specific services
+```
+
+This keeps the public numbering close to TOS where it is useful: BIOS is family
+`$0d`, XBIOS is family `$0e`, and GEMDOS is family `$01`. The 65816 native COP
+vector is at `$FFE4`. In ca65 inline assembly the signature byte is spelled
+without `#`, for example `cop $0d`.
+
+The initial register convention is deliberately small:
+
+```text
+A   function number / return status
+X   word argument 0
+Y   word argument 1
+```
+
+Call stubs must be `reentrant` routines. They receive ordinary Mensch stack
+parameters, load the syscall registers, execute `COP`, and return. The kernel
+side syscall handlers must also be interrupt handlers that avoid caller-specific
+direct-page parameter slots. This keeps the syscall path safe if it is entered
+while foreground code or an interrupt handler is using non-reentrant routines.
+
+The first BIOS call is TOS-shaped `Bconout`:
+
+```text
+COP #$0d
+A = $0003       ; Bconout
+X = device      ; 2 is the console device
+Y = character
+```
+
+The call writes the low byte of `Y` to the console when `X == 2`.

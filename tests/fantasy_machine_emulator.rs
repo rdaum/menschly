@@ -254,6 +254,43 @@ fn language_serial_program_runs_on_fantasy_machine() {
 }
 
 #[test]
+fn language_bios_bconout_runs_through_cop_syscall() {
+    let dir = temp_dir("language-bios-bconout-cop");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let cfg_path = dir.join("image.cfg");
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    fs::write(
+        &caller_path,
+        "
+        module BiosSyscallCaller
+        application main
+        external reentrant procedure bios_bconout(dev: u16, ch: u16)
+
+        procedure main()
+            bios_bconout(2, $0042)
+            return
+        end
+        ",
+    )
+    .expect("caller source should be written");
+    fs::write(&cfg_path, cop_xex_linker_config()).expect("linker config should be written");
+
+    let build = build_mensch_xex_sources(
+        "language-bios-bconout-cop",
+        &[caller_path, repo_root.join("examples/hellord-bios.mensch")],
+        &cfg_path,
+    )
+    .expect("BIOS syscall image should build");
+
+    let run = run_image_until_output(&build.image, b"", 1, 50_000)
+        .expect("BIOS syscall image should write one console byte");
+
+    assert_eq!(run.output, b"B");
+}
+
+#[test]
 fn language_irq_vector_handles_usb_uart_rx_interrupt() {
     let (code, vectors) = assemble_source_with_vectors_fixture(
         "language-uart-rx-irq",
@@ -1027,6 +1064,10 @@ fn external_reentrant_stack_argument_call_links_and_runs() {
 
 fn xex_linker_config() -> &'static str {
     "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $008000, size = $001000, file = %O;\n  META: start = $008f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  VECTORS: start = $00ffee, size = $000002, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
+}
+
+fn cop_xex_linker_config() -> &'static str {
+    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $008000, size = $001000, file = %O;\n  META: start = $008f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  VECTORS: start = $00ffe4, size = $000002, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
 }
 
 #[test]
