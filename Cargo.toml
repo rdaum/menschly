@@ -8,4 +8,5 @@ publish = false
 path = "compiler/src/lib.rs"
 
 [dev-dependencies]
+x65alike-emul = { path = "x65alike-emul" }
 wdc65816 = "0.1.0"
