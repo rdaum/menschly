@@ -443,6 +443,45 @@ fn generated_frontend_multi_parameter_call_runs() {
 }
 
 #[test]
+fn generated_frontend_word_parameter_forwarding_restores_accumulator_width() {
+    let binary = assemble_source_fixture(
+        "frontend-word-parameter-forwarding-width",
+        "
+        module WordParamForwardingDemo
+        fixed($040006) volatile var byte_out: u8
+        fixed($040008) volatile var word_out: u16
+
+        export far procedure main()
+            store_source($8fff)
+            return
+        end
+
+        procedure store_source(value: u16)
+            force_byte('!')
+            store_word(value)
+            return
+        end
+
+        procedure force_byte(value: u8)
+            byte_out = value
+            return
+        end
+
+        procedure store_word(value: u16)
+            word_out = value
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x040006), b'!');
+    assert_eq!(memory.byte(0x040008), 0xff);
+    assert_eq!(memory.byte(0x040009), 0x8f);
+}
+
+#[test]
 fn generated_frontend_reentrant_stack_parameter_call_runs() {
     let binary = assemble_source_fixture(
         "frontend-reentrant-stack-parameter-call",

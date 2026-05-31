@@ -497,11 +497,11 @@ fn raw_interrupt_skips_generated_entry_state() {
 #[test]
 fn hellord_example_boots_as_interrupt_driven_xex() {
     let build = build_hellord_example();
-    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> HELP\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nE  echo\r\nS  status\r\nP  pwd\r\nCD path\r\nA:-Z: drive\r\nA> VER\r\nHellord DOS 0.1\r\nA> DIR\r\nDrive A: not mounted\r\nA> b:\r\nB> DIR\r\nDrive B: not mounted\r\nB> PWD\r\nB:/\r\nB> CD GAMES\r\nB> PWD\r\nB:GAMES\r\nB> STAT\r\nR: 0\r\nT: 0\r\nB> ECHO heX\x08 \x08llo\r\nhello\r\nB> X\r\n?SYNTAX\r\nB> \r\nB> ";
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> HELP\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nE  echo\r\nS  status\r\nP  pwd\r\nM  map\r\nCD path\r\nA:-Z: drive\r\nA> VER\r\nHellord DOS 0.1\r\nA> DIR\r\nDrive A: not mounted\r\nA> b:\r\nB> DIR\r\nDrive B: not mounted\r\nB> PWD\r\nB:/\r\nB> CD GAMES\r\nB> PWD\r\nB:GAMES\r\nB> MAP\r\nMemory map:\r\nRAM $0000-$8FFF\r\nI/O $9F00-$9FFF\r\nROM $C000-$FFFF\r\nB> STAT\r\nR: 0\r\nT: 0\r\nB> ECHO heX\x08 \x08llo\r\nhello\r\nB> X\r\n?SYNTAX\r\nB> \r\nB> ";
 
     let run = run_image_until_output(
         &build.image,
-        b"HELP\nVER\nDIR\nb:\nDIR\nPWD\nCD GAMES\nPWD\nSTAT\nECHO heX\x08llo\nX\n\n",
+        b"HELP\nVER\nDIR\nb:\nDIR\nPWD\nCD GAMES\nPWD\nMAP\nSTAT\nECHO heX\x08llo\nX\n\n",
         expected.len(),
         200_000,
     )

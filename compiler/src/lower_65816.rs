@@ -195,7 +195,8 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
     match inst {
         IrInst::Label(label) => out.push(AsmInst::Label(label.to_string())),
         IrInst::InlineAsm(line) => out.push(AsmInst::Raw(line.clone())),
-        IrInst::Move { dst, src } => {
+        IrInst::Move { width, dst, src } => {
+            set_mode_for_width(out, *width);
             load_value_to_a(out, src)?;
             if matches!(dst, Value::IndexX) {
                 out.push(AsmInst::Tax);

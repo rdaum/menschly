@@ -381,7 +381,8 @@ fn allocate_direct_local(
 fn rewrite_inst(inst: &IrInst, layout: &RoutineStorage) -> IrInst {
     match inst {
         IrInst::InlineAsm(_) => inst.clone(),
-        IrInst::Move { dst, src } => IrInst::Move {
+        IrInst::Move { width, dst, src } => IrInst::Move {
+            width: *width,
             dst: rewrite_value(dst, layout),
             src: rewrite_value(src, layout),
         },
@@ -532,9 +533,9 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
         IrInst::LoadAddress { dst, width, .. } => {
             collect_temp_value(dst, width.size_bytes(), &mut out)
         }
-        IrInst::Move { dst, src } => {
-            collect_temp_value(dst, 2, &mut out);
-            collect_temp_value(src, 2, &mut out);
+        IrInst::Move { width, dst, src } => {
+            collect_temp_value(dst, width.size_bytes(), &mut out);
+            collect_temp_value(src, width.size_bytes(), &mut out);
         }
         IrInst::Load { width, dst, addr } => {
             collect_temp_value(dst, width.size_bytes(), &mut out);

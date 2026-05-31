@@ -37,13 +37,63 @@ export procedure console_write_text(text: near ^u8)
     return
 end
 
+procedure console_write_hex_digit(value: u16)
+    var ch: u8
+    if value < 10
+        ch = '0'
+        while value != 0
+            ch = ch + 1
+            value = value - 1
+        end
+    else
+        ch = 'A'
+        value = value - 10
+        while value != 0
+            ch = ch + 1
+            value = value - 1
+        end
+    end
+    serial_write(ch)
+    return
+end
+
+procedure console_write_hex_place(value: u16, place: u16)
+    var digit: u16
+    digit = 0
+    while value >= place
+        value = value - place
+        digit = digit + 1
+    end
+    console_write_hex_digit(digit)
+    return
+end
+
+export procedure console_write_hex16(value: u16)
+    var remainder: u16
+    remainder = value
+    console_write_hex_place(remainder, $1000)
+    while remainder >= $1000
+        remainder = remainder - $1000
+    end
+    console_write_hex_place(remainder, $0100)
+    while remainder >= $0100
+        remainder = remainder - $0100
+    end
+    console_write_hex_place(remainder, $0010)
+    while remainder >= $0010
+        remainder = remainder - $0010
+    end
+    console_write_hex_digit(remainder)
+    return
+end
+
 export procedure console_write_greeting()
     console_write_text("Hellord DOS 0.1\r\nType H for help.\r\n")
     return
 end
 
 export procedure console_write_help()
-    console_write_text("Commands:\r\nH  help\r\nV  version\r\nD  dir\r\nE  echo\r\nS  status\r\nP  pwd\r\nCD path\r\nA:-Z: drive\r\n")
+    console_write_text("Commands:\r\nH  help\r\nV  version\r\nD  dir\r\nE  echo\r\nS  status\r\nP  pwd\r\nM  map\r\nCD path\r\nA:-Z: drive\r\n")
     return
 end
 

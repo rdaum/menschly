@@ -372,6 +372,7 @@ pub enum IrInst {
     Label(Label),
     InlineAsm(String),
     Move {
+        width: Width,
         dst: Value,
         src: Value,
     },

@@ -1925,6 +1925,7 @@ impl<'a> RoutineLowerer<'a> {
                 }
                 ensure_assignable(expected, &binding.ty)?;
                 self.body.push(IrInst::Move {
+                    width: width_for_type(expected)?,
                     dst,
                     src: binding.value,
                 });
@@ -2119,6 +2120,7 @@ impl<'a> RoutineLowerer<'a> {
         }
         self.lower_expr_to(index, &index_ty, Value::Accumulator)?;
         self.body.push(IrInst::Move {
+            width: Width::Word,
             dst: Value::IndexX,
             src: Value::Accumulator,
         });
