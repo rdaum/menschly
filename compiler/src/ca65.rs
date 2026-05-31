@@ -3,6 +3,18 @@ use crate::target_65816::{AsmInst, AsmModule, AsmRoutine, Immediate, Operand, Sy
 pub fn emit_module(module: &AsmModule) -> String {
     let mut out = String::new();
     out.push_str(".p816\n");
+
+    if !module.direct_symbols.is_empty() {
+        out.push_str(".segment \"ZEROPAGE\"\n");
+        for symbol in &module.direct_symbols {
+            out.push_str(&symbol.name);
+            out.push_str(": .res ");
+            out.push_str(&symbol.size.to_string());
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
     out.push_str(".code\n\n");
 
     for routine in &module.routines {
@@ -160,5 +172,16 @@ mod tests {
         assert!(asm.contains("\tsta $1100,x\n"));
         assert!(asm.contains("\tinx\n"));
         assert!(asm.contains("\tbne copy_loop\n"));
+    }
+
+    #[test]
+    fn emits_direct_page_symbols_for_storage_assigned_fixture() {
+        let (module, _assignment) =
+            crate::lower_65816::lower_module_with_storage(&fixtures::direct_local_store()).unwrap();
+        let asm = emit_module(&module);
+
+        assert!(asm.contains(".segment \"ZEROPAGE\"\n"));
+        assert!(asm.contains("__dp_direct_local_store_local_tmp: .res 1\n"));
+        assert!(asm.contains("\tsta __dp_direct_local_store_local_tmp\n"));
     }
 }

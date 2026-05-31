@@ -109,9 +109,14 @@ fn assemble_fixture(name: &str, asm: &str) -> Vec<u8> {
 }
 
 fn assemble_ir_fixture(name: &str, module: &mensch_systems_tests::ir::Module) -> Vec<u8> {
-    let asm = ca65::emit_module(
-        &lower_65816::lower_module(module).expect("fixture should lower to 65816 assembly"),
-    );
+    let asm = ca65::emit_module(&lower_65816::lower_module(module).unwrap());
+    assemble_fixture(name, &asm)
+}
+
+fn assemble_storage_fixture(name: &str, module: &mensch_systems_tests::ir::Module) -> Vec<u8> {
+    let (lowered, _assignment) = lower_65816::lower_module_with_storage(module)
+        .expect("fixture should assign storage and lower to 65816 assembly");
+    let asm = ca65::emit_module(&lowered);
     assemble_fixture(name, &asm)
 }
 
@@ -128,7 +133,7 @@ fn run_command(command: &mut Command) {
 }
 
 fn linker_config() -> &'static str {
-    "MEMORY {\n  CODE: start = $020000, size = $010000, file = %O;\n}\nSEGMENTS {\n  CODE: load = CODE, type = ro;\n}\n"
+    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $020000, size = $010000, file = %O;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n}\n"
 }
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -246,4 +251,13 @@ fn generated_exported_main_routine_runs() {
     let (_cpu, memory) = run_generated_routine(&binary);
 
     assert_eq!(memory.byte(fixtures::MAIN_STORE_ADDR as usize), 0x99);
+}
+
+#[test]
+fn generated_direct_local_storage_routine_runs() {
+    let binary = assemble_storage_fixture("direct-local-store", &fixtures::direct_local_store());
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(fixtures::DIRECT_STORE_ADDR as usize), 0x66);
 }

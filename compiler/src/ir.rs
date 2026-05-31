@@ -139,6 +139,19 @@ pub enum Type {
 }
 
 impl Type {
+    pub fn size_bytes(&self) -> u16 {
+        match self {
+            Self::U8 | Self::I8 => 1,
+            Self::U16 | Self::I16 => 2,
+            Self::U24
+            | Self::Pointer {
+                kind: PointerKind::Far,
+                ..
+            } => 3,
+            Self::Pointer { .. } => 2,
+        }
+    }
+
     pub fn near_ptr(to: Type) -> Self {
         Self::Pointer {
             to: Box::new(to),

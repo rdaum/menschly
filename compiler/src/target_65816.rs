@@ -3,6 +3,7 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsmModule {
     pub name: String,
+    pub direct_symbols: Vec<DirectSymbol>,
     pub routines: Vec<AsmRoutine>,
 }
 
@@ -10,6 +11,7 @@ impl AsmModule {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            direct_symbols: Vec::new(),
             routines: Vec::new(),
         }
     }
@@ -18,6 +20,12 @@ impl AsmModule {
         self.routines.push(routine);
         self
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectSymbol {
+    pub name: String,
+    pub size: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

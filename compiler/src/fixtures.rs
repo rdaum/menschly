@@ -1,4 +1,6 @@
-use crate::ir::{Abi, Address, Const, IrInst, Label, Module, Routine, Type, Value, Width};
+use crate::ir::{
+    Abi, Address, Const, IrInst, Label, Local, Module, Routine, Storage, Type, Value, Width,
+};
 
 pub const COPY_SRC: u32 = 0x1000;
 pub const COPY_DST: u32 = 0x1100;
@@ -7,6 +9,7 @@ pub const STORE_BYTE_ADDR: u32 = 0x040000;
 pub const HELPER_STORE_ADDR: u32 = 0x040001;
 pub const FUNCTION_STORE_ADDR: u32 = 0x040002;
 pub const MAIN_STORE_ADDR: u32 = 0x040003;
+pub const DIRECT_STORE_ADDR: u32 = 0x040004;
 
 pub fn return_constant_u16() -> Module {
     Module::new("return_constant_u16").with_routine(
@@ -189,4 +192,24 @@ pub fn exported_main() -> Module {
             IrInst::Return,
         ],
     })
+}
+
+pub fn direct_local_store() -> Module {
+    Module::new("direct_local_store").with_routine(
+        Routine::procedure("direct_local_store")
+            .exported()
+            .with_local(Local::new("tmp", Type::U8, Storage::Direct))
+            .with_body(vec![
+                IrInst::LoadConst {
+                    dst: Value::Local("tmp".to_owned()),
+                    value: Const::U8(0x66),
+                },
+                IrInst::Store {
+                    width: Width::Byte,
+                    addr: Address::Absolute(DIRECT_STORE_ADDR),
+                    src: Value::Local("tmp".to_owned()),
+                },
+                IrInst::Return,
+            ]),
+    )
 }

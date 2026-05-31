@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{Abi, Address, Const, IrInst, Module, Routine, RoutineKind, Value, Width};
+use crate::storage::{apply_storage, assign_storage, StorageAssignment};
 use crate::target_65816::{AsmInst, AsmModule, AsmRoutine, Immediate, Mode, Operand, Symbol};
 
 pub fn lower_module(module: &Module) -> Result<AsmModule, LowerError> {
@@ -9,6 +11,30 @@ pub fn lower_module(module: &Module) -> Result<AsmModule, LowerError> {
         out.routines.push(lower_routine(routine)?);
     }
     Ok(out)
+}
+
+pub fn lower_module_with_storage(
+    module: &Module,
+) -> Result<(AsmModule, StorageAssignment), LowerError> {
+    let assignment = assign_storage(module);
+    let assigned = apply_storage(module, &assignment);
+    let mut lowered = lower_module(&assigned)?;
+    let direct_symbols = assignment
+        .routines
+        .iter()
+        .flat_map(|routine| routine.direct_slots.iter())
+        .fold(BTreeMap::<String, u16>::new(), |mut symbols, slot| {
+            symbols
+                .entry(slot.symbol.clone())
+                .and_modify(|size| *size = (*size).max(slot.size))
+                .or_insert(slot.size);
+            symbols
+        });
+    lowered.direct_symbols = direct_symbols
+        .into_iter()
+        .map(|(name, size)| crate::target_65816::DirectSymbol { name, size })
+        .collect();
+    Ok((lowered, assignment))
 }
 
 fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
