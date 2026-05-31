@@ -322,6 +322,12 @@ pub enum IrInst {
         lhs: Value,
         rhs: Value,
     },
+    BitAnd {
+        width: Width,
+        dst: Value,
+        lhs: Value,
+        rhs: Value,
+    },
     Dec {
         width: Width,
         value: Value,

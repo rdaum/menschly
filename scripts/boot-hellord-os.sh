@@ -26,31 +26,26 @@ fi
 cat > "$src" <<'MENSCH'
 module HellordOs
 application main
+fixed($009f70) volatile var serial_data: u8
+fixed($009f71) volatile var serial_status: u8
 
 export procedure main()
-    asm "phk"
-    asm "plb"
-    asm "sep #$20"
-    asm ".a8"
-    asm "rep #$10"
-    asm ".i16"
-    asm "ldx #0"
-    asm "hellord_loop:"
-    asm "lda hellord_text,x"
-    asm "beq echo_loop"
-    asm "sta f:$009f70"
-    asm "inx"
-    asm "bra hellord_loop"
-    asm "echo_loop:"
-    asm "lda f:$009f71"
-    asm "and #$01"
-    asm "beq echo_loop"
-    asm "lda f:$009f70"
-    asm "sta f:$009f70"
-    asm "bra echo_loop"
-    asm "hellord_text:"
-    asm ".byte \"Hellord!\", $0d, $0a, 0"
-    return
+    serial_data = 'H'
+    serial_data = 'e'
+    serial_data = 'l'
+    serial_data = 'l'
+    serial_data = 'o'
+    serial_data = 'r'
+    serial_data = 'd'
+    serial_data = '!'
+    serial_data = '\r'
+    serial_data = '\n'
+
+    while 1 != 0
+        while serial_status & 1 == 0
+        end
+        serial_data = serial_data
+    end
 end
 MENSCH
 

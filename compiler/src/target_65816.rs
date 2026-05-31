@@ -147,6 +147,7 @@ pub enum AsmInst {
     Sec,
     Adc(Operand),
     Sbc(Operand),
+    And(Operand),
     Xba,
     Pha,
     Pea(Symbol),

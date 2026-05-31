@@ -78,6 +78,7 @@ fn map_operands(inst: &AsmInst, map: &mut impl FnMut(&Operand) -> Operand) -> As
         AsmInst::Stz(operand) => AsmInst::Stz(map(operand)),
         AsmInst::Adc(operand) => AsmInst::Adc(map(operand)),
         AsmInst::Sbc(operand) => AsmInst::Sbc(map(operand)),
+        AsmInst::And(operand) => AsmInst::And(map(operand)),
         AsmInst::Inc(operand) => AsmInst::Inc(map(operand)),
         AsmInst::Dec(operand) => AsmInst::Dec(map(operand)),
         AsmInst::Cmp(operand) => AsmInst::Cmp(map(operand)),

@@ -4,6 +4,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use mensch_systems_tests::{ca65, frontend, lower_65816};
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
 use x65alike_emul::{Machine, RAMBLOCK_REG, ROMBLOCK_REG, SERIAL_DATA, SERIAL_STATUS};
 
@@ -94,6 +95,13 @@ fn assemble_fixture(name: &str, asm: &str) -> Vec<u8> {
     fs::read(&bin_path).expect("linked fixture binary should exist")
 }
 
+fn assemble_source_fixture(name: &str, source: &str) -> Vec<u8> {
+    let module = frontend::compile_source(source).expect("source fixture should compile to IR");
+    let (lowered, _assignment) = lower_65816::lower_module_with_storage(&module)
+        .expect("source fixture should lower to 65816 assembly");
+    assemble_fixture(name, &ca65::emit_module(&lowered))
+}
+
 fn run_command(command: &mut Command) {
     let output = command
         .output()
@@ -128,6 +136,39 @@ fn scripted_serial_program_runs_on_fantasy_machine() {
         "serial-echo",
         &format!(
             ".p816\n.code\n.proc main\n\tsep #$20\n\t.a8\n\t.i16\n\tlda #$4f\n\tsta ${serial_data:04x}\n\tlda #$4b\n\tsta ${serial_data:04x}\nwait_rx:\n\tlda ${serial_status:04x}\n\tand #$01\n\tbeq wait_rx\n\tlda ${serial_data:04x}\n\tsta ${serial_data:04x}\n\trtl\n.endproc\n",
+            serial_data = SERIAL_DATA,
+            serial_status = SERIAL_STATUS,
+        ),
+    );
+
+    let mut machine = Machine::new();
+    machine.load(ROUTINE_ADDR as u32, &binary);
+    machine.push_serial_input(b"!");
+
+    let (_cpu, machine) = run_loaded_routine(machine);
+
+    assert_eq!(machine.serial_output(), b"OK!");
+}
+
+#[test]
+fn language_serial_program_runs_on_fantasy_machine() {
+    let binary = assemble_source_fixture(
+        "language-serial-echo",
+        &format!(
+            "
+            module SerialLanguageDemo
+            fixed(${serial_data:06x}) volatile var serial_data: u8
+            fixed(${serial_status:06x}) volatile var serial_status: u8
+
+            export procedure main()
+                serial_data = 'O'
+                serial_data = 'K'
+                while serial_status & 1 == 0
+                end
+                serial_data = serial_data
+                return
+            end
+            ",
             serial_data = SERIAL_DATA,
             serial_status = SERIAL_STATUS,
         ),

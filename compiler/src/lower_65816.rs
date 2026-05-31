@@ -209,6 +209,17 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             out.push(AsmInst::Adc(operand_for_value(rhs)?));
             store_a_to_value(out, dst)?;
         }
+        IrInst::BitAnd {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => {
+            set_mode_for_width(out, *width);
+            load_value_to_a(out, lhs)?;
+            out.push(AsmInst::And(operand_for_value(rhs)?));
+            store_a_to_value(out, dst)?;
+        }
         IrInst::Dec { width, value } => {
             set_mode_for_width(out, *width);
             match value {

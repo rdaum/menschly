@@ -178,6 +178,7 @@ fn emit_inst(inst: &AsmInst) -> String {
         AsmInst::Sec => "sec".to_owned(),
         AsmInst::Adc(operand) => one_operand("adc", operand),
         AsmInst::Sbc(operand) => one_operand("sbc", operand),
+        AsmInst::And(operand) => one_operand("and", operand),
         AsmInst::Xba => "xba".to_owned(),
         AsmInst::Pha => "pha".to_owned(),
         AsmInst::Pea(symbol) => format!("pea {}", emit_symbol(symbol)),

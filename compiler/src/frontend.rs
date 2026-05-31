@@ -120,6 +120,7 @@ pub enum Expr {
     ResultOk(Box<Expr>),
     ResultErr(Box<Expr>),
     Add(Box<Expr>, Box<Expr>),
+    BitAnd(Box<Expr>, Box<Expr>),
     Deref(Box<Expr>),
 }
 
@@ -161,6 +162,7 @@ enum TokenKind {
     Comma,
     Caret,
     Plus,
+    Amp,
     Equal,
     EqualEqual,
     BangEqual,
@@ -176,6 +178,10 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             ' ' | '\t' | '\r' | '\n' => {}
             '"' => out.push(token(
                 TokenKind::String(read_string(&mut chars, offset)?),
+                offset,
+            )),
+            '\'' => out.push(token(
+                TokenKind::Number(read_char_literal(&mut chars, offset)?),
                 offset,
             )),
             '#' => {
@@ -194,6 +200,7 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             ',' => out.push(token(TokenKind::Comma, offset)),
             '^' => out.push(token(TokenKind::Caret, offset)),
             '+' => out.push(token(TokenKind::Plus, offset)),
+            '&' => out.push(token(TokenKind::Amp, offset)),
             '=' => {
                 if matches!(chars.peek(), Some((_, '='))) {
                     chars.next();
@@ -292,6 +299,56 @@ fn read_string(
     Err(FrontendError::Lex(format!(
         "unterminated string at {offset}"
     )))
+}
+
+fn read_char_literal(
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    offset: usize,
+) -> Result<u32, FrontendError> {
+    let Some((_, ch)) = chars.next() else {
+        return Err(FrontendError::Lex(format!(
+            "unterminated character literal at {offset}"
+        )));
+    };
+    let value = match ch {
+        '\'' => {
+            return Err(FrontendError::Lex(format!(
+                "empty character literal at {offset}"
+            )));
+        }
+        '\\' => {
+            let Some((_, escaped)) = chars.next() else {
+                return Err(FrontendError::Lex(format!(
+                    "unterminated escape at {offset}"
+                )));
+            };
+            match escaped {
+                'n' => b'\n',
+                'r' => b'\r',
+                't' => b'\t',
+                '\'' => b'\'',
+                '\\' => b'\\',
+                '0' => 0,
+                other => {
+                    return Err(FrontendError::Lex(format!(
+                        "unsupported escape \\{other} at {offset}"
+                    )));
+                }
+            }
+        }
+        other if other.is_ascii() => other as u8,
+        other => {
+            return Err(FrontendError::Lex(format!(
+                "non-ASCII character literal '{other}' at {offset}"
+            )));
+        }
+    };
+    match chars.next() {
+        Some((_, '\'')) => Ok(value as u32),
+        _ => Err(FrontendError::Lex(format!(
+            "unterminated character literal at {offset}"
+        ))),
+    }
 }
 
 fn read_number(
@@ -753,6 +810,15 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, FrontendError> {
+        let mut expr = self.parse_add()?;
+        while self.take(TokenKind::Amp) {
+            let rhs = self.parse_add()?;
+            expr = Expr::BitAnd(Box::new(expr), Box::new(rhs));
+        }
+        Ok(expr)
+    }
+
+    fn parse_add(&mut self) -> Result<Expr, FrontendError> {
         let mut expr = self.parse_postfix()?;
         while self.take(TokenKind::Plus) {
             let rhs = self.parse_postfix()?;
@@ -1386,6 +1452,21 @@ impl<'a> RoutineLowerer<'a> {
                 });
                 Ok(())
             }
+            Expr::BitAnd(lhs, rhs) => {
+                let lhs_ty = self.infer_expr(lhs)?;
+                let rhs_ty = self.infer_expr(rhs)?;
+                let width = compatible_width(&lhs_ty, &rhs_ty)?;
+                ensure_assignable(expected, &lhs_ty)?;
+                self.lower_expr_to(lhs, &lhs_ty, Value::Accumulator)?;
+                let rhs = self.expr_value(rhs, &lhs_ty)?;
+                self.body.push(IrInst::BitAnd {
+                    width,
+                    dst,
+                    lhs: Value::Accumulator,
+                    rhs,
+                });
+                Ok(())
+            }
             Expr::Deref(ptr) => {
                 let (addr, pointee) = self.address_for_pointer(ptr)?;
                 ensure_assignable(expected, &pointee)?;
@@ -1455,6 +1536,12 @@ impl<'a> RoutineLowerer<'a> {
                 err: Box::new(self.infer_expr(value)?),
             }),
             Expr::Add(lhs, rhs) => {
+                let lhs_ty = self.infer_expr(lhs)?;
+                let rhs_ty = self.infer_expr(rhs)?;
+                compatible_width(&lhs_ty, &rhs_ty)?;
+                Ok(lhs_ty)
+            }
+            Expr::BitAnd(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
                 compatible_width(&lhs_ty, &rhs_ty)?;
@@ -1669,6 +1756,36 @@ mod tests {
         assert_eq!(module.name, "Demo");
         assert_eq!(module.routines.len(), 2);
         assert_eq!(module.routines[1].locals[0].storage, Storage::Direct);
+    }
+
+    #[test]
+    fn parses_character_literals_as_byte_constants() {
+        let source = "
+            module Chars
+            export procedure main()
+                direct var letter: u8
+                letter = 'H' & $ff
+                letter = '\\n'
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        let body = &module.routines[0].body;
+
+        assert!(body.contains(&IrInst::LoadConst {
+            dst: Value::Accumulator,
+            value: Const::U8(b'H'),
+        }));
+        assert!(body.iter().any(|inst| matches!(inst, IrInst::BitAnd {
+            dst: Value::Local(name),
+            rhs: Value::Const(Const::U8(0xff)),
+            ..
+        } if name == "letter")));
+        assert!(body.contains(&IrInst::LoadConst {
+            dst: Value::Local("letter".to_owned()),
+            value: Const::U8(b'\n'),
+        }));
     }
 
     #[test]
