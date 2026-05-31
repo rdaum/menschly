@@ -41,3 +41,9 @@ Interrupt handlers must preserve every register state they clobber unless the
 whole program ABI has explicitly reserved that state for interrupt use. In
 particular, an interrupt may arrive while foreground code is carrying a function
 return value or a call argument in the accumulator.
+
+Interrupt handlers may only call parameterless routines. The frontend rejects
+calls from `interrupt procedure` bodies to routines or external declarations
+with parameters, because the current direct-page parameter slots can be
+clobbered if the interrupt fires while foreground code is preparing or using
+the same call.

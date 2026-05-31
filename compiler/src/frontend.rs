@@ -1798,6 +1798,12 @@ impl<'a> RoutineLowerer<'a> {
                 args.len()
             )));
         }
+        if matches!(self.routine.abi, Abi::Interrupt) && !sig.params.is_empty() {
+            return Err(FrontendError::Type(format!(
+                "interrupt routine {} cannot call parameterized routine {name}; direct-page parameters are not interrupt-safe",
+                self.routine.name
+            )));
+        }
         for (arg, param_ty) in args.iter().zip(&sig.params) {
             let arg_ty = self.infer_expr(arg)?;
             ensure_assignable(&param_ty.ty, &arg_ty)?;
@@ -2333,6 +2339,70 @@ mod tests {
 
         assert!(asm.contains(".export store\n"));
         assert!(asm.contains(".exportzp __dp_store_param_value\n"));
+    }
+
+    #[test]
+    fn rejects_interrupt_calls_to_local_parameterized_routines() {
+        let source = "
+            module IrqHazard
+            vector irq = irq
+
+            procedure serial_write(value: u8)
+                return
+            end
+
+            interrupt procedure irq()
+                serial_write('!')
+                return
+            end
+        ";
+
+        let error = compile_source(source).unwrap_err().to_string();
+
+        assert!(
+            error.contains("interrupt routine irq cannot call parameterized routine serial_write")
+        );
+        assert!(error.contains("direct-page parameters are not interrupt-safe"));
+    }
+
+    #[test]
+    fn rejects_interrupt_calls_to_external_parameterized_routines() {
+        let source = "
+            module ExternalIrqHazard
+            vector irq = irq
+            external procedure serial_write(value: u8)
+
+            interrupt procedure irq()
+                serial_write('!')
+                return
+            end
+        ";
+
+        let error = compile_source(source).unwrap_err().to_string();
+
+        assert!(
+            error.contains("interrupt routine irq cannot call parameterized routine serial_write")
+        );
+        assert!(error.contains("direct-page parameters are not interrupt-safe"));
+    }
+
+    #[test]
+    fn allows_interrupt_calls_to_parameterless_routines() {
+        let source = "
+            module IrqSafeCall
+            vector irq = irq
+
+            procedure acknowledge()
+                return
+            end
+
+            interrupt procedure irq()
+                acknowledge()
+                return
+            end
+        ";
+
+        compile_source(source).unwrap();
     }
 
     #[test]
