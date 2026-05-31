@@ -285,6 +285,6 @@ fn usage() -> String {
        --stop-at B:PC    Stop before executing when PBR:PC matches\n\
        --quiet           Suppress final CPU status on stderr\n\
      \n\
-     Stdin is queued as serial RX. Writes to SERIAL_DATA ($9f70) are streamed to stdout."
+     Stdin is queued as USB UART RX. Writes to USB_UART_DATA ($9f57) are streamed to stdout."
         .to_owned()
 }

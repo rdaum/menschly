@@ -24,11 +24,11 @@ small assembled programs under the existing `wdc65816` CPU core:
 - BANK 0 I/O window at `$9F00..$9FFF`.
 - RAMBLOCK frame at `$A000..$BFFF`.
 - ROMBLOCK frame at `$C000..$FFFF`.
-- A simple scriptable serial device in the I/O window.
+- A scriptable subset of NORA's USB UART registers in the I/O window.
 
-The model deliberately skips the real X65 peripheral set for now. VERA, AURA,
-VIA, W6100, flash, interrupts, timers, keyboard, video, and storage devices are
-not implemented yet.
+The model deliberately skips most of the real X65 peripheral set for now. VERA,
+AURA, VIA, W6100, flash, interrupts, timers, keyboard, video, and storage
+devices are not implemented yet.
 
 ## Memory Map
 
@@ -58,23 +58,27 @@ physical = $08_0000 + (ROMBLOCK & $1f) * $4000 + (addr - $C000)
 If bit 7 of `ROMBLOCK` is set, the ROM frame maps to a small placeholder PBL
 buffer instead.
 
-## Serial I/O
+## USB UART I/O
 
-The serial device is intentionally simple so tests can script input and inspect
-output without a terminal:
+The emulator implements the polling-visible subset of NORA's USB UART registers
+so tests can script input and inspect output without a terminal:
 
 | Address | Name | Behavior |
 | --- | --- | --- |
-| `$9F70` | `SERIAL_DATA` | Read pops one input byte; write appends one output byte |
-| `$9F71` | `SERIAL_STATUS` | Bit 0: RX ready, bit 1: TX ready |
-| `$9F72` | `SERIAL_CONTROL` | Read/write latch, no behavior yet |
+| `$9F55` | `USB_UART_CTRL` | Read/write latch for UART control bits |
+| `$9F56` | `USB_UART_STAT` | Bit 7: RX FIFO empty, bit 3: TX FIFO full, bit 2: TX empty/sent |
+| `$9F57` | `USB_UART_DATA` | Read pops one input byte; write appends one output byte |
+
+The emulated TX path is never full, so bit 3 currently reads as 0 and bit 2
+reads as 1. UART interrupt-enable bits are retained in `USB_UART_CTRL`, but
+interrupt delivery is not implemented yet.
 
 Example use from tests:
 
 ```rust
 let mut machine = x65alike_emul::Machine::new();
 machine.push_serial_input(b"!");
-machine.write(x65alike_emul::SERIAL_DATA, b'O');
+machine.write(x65alike_emul::USB_UART_DATA, b'O');
 assert_eq!(machine.serial_output(), b"O");
 ```
 
@@ -99,8 +103,8 @@ cargo run --manifest-path x65alike-emul/Cargo.toml --bin x65alike-emul -- path/t
 ```
 
 By default the image is loaded at `$02_0000` and execution starts at
-`PBR:PC = $02:$0000`. Stdin is queued as serial input, and bytes written to the
-serial data register are streamed to stdout.
+`PBR:PC = $02:$0000`. Stdin is queued as USB UART input, and bytes written to
+`USB_UART_DATA` are streamed to stdout.
 
 Common options:
 

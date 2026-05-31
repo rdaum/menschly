@@ -26,8 +26,8 @@ fi
 cat > "$src" <<'MENSCH'
 module HellordOs
 application main
-fixed($009f70) volatile var serial_data: u8
-fixed($009f71) volatile var serial_status: u8
+fixed($009f56) volatile var serial_status: u8
+fixed($009f57) volatile var serial_data: u8
 
 export procedure main()
     serial_data = 'H'
@@ -42,7 +42,7 @@ export procedure main()
     serial_data = '\n'
 
     while 1 != 0
-        while serial_status & 1 == 0
+        while serial_status & $80 != 0
         end
         serial_data = serial_data
     end

@@ -14,12 +14,20 @@ pub const RAMBLOCK_FRAME_END: u32 = 0x00bfff;
 pub const ROMBLOCK_FRAME_START: u32 = 0x00c000;
 pub const ROMBLOCK_FRAME_END: u32 = 0x00ffff;
 
-pub const SERIAL_DATA: u32 = 0x009f70;
-pub const SERIAL_STATUS: u32 = 0x009f71;
-pub const SERIAL_CONTROL: u32 = 0x009f72;
+pub const USB_UART_CTRL: u32 = 0x009f55;
+pub const USB_UART_STAT: u32 = 0x009f56;
+pub const USB_UART_DATA: u32 = 0x009f57;
 
-pub const SERIAL_STATUS_RX_READY: u8 = 0x01;
-pub const SERIAL_STATUS_TX_READY: u8 = 0x02;
+pub const USB_UART_CTRL_IRQ_RX_NOT_EMPTY: u8 = 0x40;
+pub const USB_UART_CTRL_IRQ_TX_NOT_FULL: u8 = 0x80;
+
+pub const USB_UART_STAT_RX_FULL: u8 = 0x02;
+pub const USB_UART_STAT_TX_EMPTY_SENT: u8 = 0x04;
+pub const USB_UART_STAT_TX_FULL: u8 = 0x08;
+pub const USB_UART_STAT_FRAME_ERROR: u8 = 0x10;
+pub const USB_UART_STAT_PARITY_ERROR: u8 = 0x20;
+pub const USB_UART_STAT_CTS_INACTIVE: u8 = 0x40;
+pub const USB_UART_STAT_RX_EMPTY: u8 = 0x80;
 
 const RAMBLOCK_SIZE: usize = 0x2000;
 const ROMBLOCK_SIZE: usize = 0x4000;
@@ -34,7 +42,8 @@ pub struct Machine {
     romblock: u8,
     serial_rx: VecDeque<u8>,
     serial_tx: Vec<u8>,
-    serial_control: u8,
+    usb_uart_ctrl: u8,
+    usb_uart_errors: u8,
 }
 
 impl Machine {
@@ -46,7 +55,8 @@ impl Machine {
             romblock: 0,
             serial_rx: VecDeque::new(),
             serial_tx: Vec::new(),
-            serial_control: 0,
+            usb_uart_ctrl: 0x04,
+            usb_uart_errors: 0,
         }
     }
 
@@ -64,16 +74,9 @@ impl Machine {
         match self.decode(address) {
             Mapping::RamBlockReg => self.ramblock,
             Mapping::RomBlockReg => self.romblock,
-            Mapping::SerialData => self.serial_rx.pop_front().unwrap_or(0),
-            Mapping::SerialStatus => {
-                SERIAL_STATUS_TX_READY
-                    | if self.serial_rx.is_empty() {
-                        0
-                    } else {
-                        SERIAL_STATUS_RX_READY
-                    }
-            }
-            Mapping::SerialControl => self.serial_control,
+            Mapping::UsbUartData => self.serial_rx.pop_front().unwrap_or(0),
+            Mapping::UsbUartStatus => self.usb_uart_status(),
+            Mapping::UsbUartControl => self.usb_uart_ctrl,
             Mapping::Io => 0,
             Mapping::Sram(index) => self.sram[index],
             Mapping::Pbl(index) => self.pbl[index],
@@ -86,9 +89,13 @@ impl Machine {
         match self.decode(address) {
             Mapping::RamBlockReg => self.ramblock = value,
             Mapping::RomBlockReg => self.romblock = value,
-            Mapping::SerialData => self.serial_tx.push(value),
-            Mapping::SerialControl => self.serial_control = value,
-            Mapping::SerialStatus | Mapping::Io | Mapping::Pbl(_) | Mapping::Unmapped => {}
+            Mapping::UsbUartData => self.serial_tx.push(value),
+            Mapping::UsbUartControl => self.usb_uart_ctrl = value,
+            Mapping::UsbUartStatus => {
+                self.usb_uart_errors &=
+                    !(value & (USB_UART_STAT_FRAME_ERROR | USB_UART_STAT_PARITY_ERROR));
+            }
+            Mapping::Io | Mapping::Pbl(_) | Mapping::Unmapped => {}
             Mapping::Sram(index) => self.sram[index] = value,
         }
     }
@@ -120,13 +127,23 @@ impl Machine {
         self.romblock
     }
 
+    fn usb_uart_status(&self) -> u8 {
+        USB_UART_STAT_TX_EMPTY_SENT
+            | self.usb_uart_errors
+            | if self.serial_rx.is_empty() {
+                USB_UART_STAT_RX_EMPTY
+            } else {
+                0
+            }
+    }
+
     fn decode(&self, address: u32) -> Mapping {
         match address {
             RAMBLOCK_REG => Mapping::RamBlockReg,
             ROMBLOCK_REG => Mapping::RomBlockReg,
-            SERIAL_DATA => Mapping::SerialData,
-            SERIAL_STATUS => Mapping::SerialStatus,
-            SERIAL_CONTROL => Mapping::SerialControl,
+            USB_UART_DATA => Mapping::UsbUartData,
+            USB_UART_STAT => Mapping::UsbUartStatus,
+            USB_UART_CTRL => Mapping::UsbUartControl,
             IO_START..=IO_END => Mapping::Io,
             RAMBLOCK_FRAME_START..=RAMBLOCK_FRAME_END => Mapping::Sram(
                 (((self.ramblock ^ 0x80) as usize) * RAMBLOCK_SIZE)
@@ -165,9 +182,9 @@ impl Default for Machine {
 enum Mapping {
     RamBlockReg,
     RomBlockReg,
-    SerialData,
-    SerialStatus,
-    SerialControl,
+    UsbUartData,
+    UsbUartStatus,
+    UsbUartControl,
     Io,
     Sram(usize),
     Pbl(usize),
@@ -202,19 +219,25 @@ mod tests {
     }
 
     #[test]
-    fn serial_status_tracks_scripted_input_and_output_is_buffered() {
+    fn usb_uart_status_tracks_scripted_input_and_output_is_buffered() {
         let mut machine = Machine::new();
 
-        assert_eq!(machine.read(SERIAL_STATUS), SERIAL_STATUS_TX_READY);
+        assert_eq!(
+            machine.read(USB_UART_STAT),
+            USB_UART_STAT_TX_EMPTY_SENT | USB_UART_STAT_RX_EMPTY
+        );
         machine.push_serial_input(b"A");
         assert_eq!(
-            machine.read(SERIAL_STATUS),
-            SERIAL_STATUS_TX_READY | SERIAL_STATUS_RX_READY
+            machine.read(USB_UART_STAT),
+            USB_UART_STAT_TX_EMPTY_SENT
         );
-        assert_eq!(machine.read(SERIAL_DATA), b'A');
-        assert_eq!(machine.read(SERIAL_STATUS), SERIAL_STATUS_TX_READY);
+        assert_eq!(machine.read(USB_UART_DATA), b'A');
+        assert_eq!(
+            machine.read(USB_UART_STAT),
+            USB_UART_STAT_TX_EMPTY_SENT | USB_UART_STAT_RX_EMPTY
+        );
 
-        machine.write(SERIAL_DATA, b'!');
+        machine.write(USB_UART_DATA, b'!');
         assert_eq!(machine.serial_output(), b"!");
     }
 }

@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mensch_systems_tests::{ca65, frontend, lower_65816};
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
-use x65alike_emul::{Machine, RAMBLOCK_REG, ROMBLOCK_REG, SERIAL_DATA, SERIAL_STATUS};
+use x65alike_emul::{Machine, RAMBLOCK_REG, ROMBLOCK_REG, USB_UART_DATA, USB_UART_STAT};
 
 const ROUTINE_ADDR: usize = 0x020000;
 const RETURN_BANK: u8 = 0x03;
@@ -135,9 +135,9 @@ fn scripted_serial_program_runs_on_fantasy_machine() {
     let binary = assemble_fixture(
         "serial-echo",
         &format!(
-            ".p816\n.code\n.proc main\n\tsep #$20\n\t.a8\n\t.i16\n\tlda #$4f\n\tsta ${serial_data:04x}\n\tlda #$4b\n\tsta ${serial_data:04x}\nwait_rx:\n\tlda ${serial_status:04x}\n\tand #$01\n\tbeq wait_rx\n\tlda ${serial_data:04x}\n\tsta ${serial_data:04x}\n\trtl\n.endproc\n",
-            serial_data = SERIAL_DATA,
-            serial_status = SERIAL_STATUS,
+            ".p816\n.code\n.proc main\n\tsep #$20\n\t.a8\n\t.i16\n\tlda #$4f\n\tsta ${serial_data:04x}\n\tlda #$4b\n\tsta ${serial_data:04x}\nwait_rx:\n\tlda ${serial_status:04x}\n\tand #$80\n\tbne wait_rx\n\tlda ${serial_data:04x}\n\tsta ${serial_data:04x}\n\trtl\n.endproc\n",
+            serial_data = USB_UART_DATA,
+            serial_status = USB_UART_STAT,
         ),
     );
 
@@ -157,20 +157,20 @@ fn language_serial_program_runs_on_fantasy_machine() {
         &format!(
             "
             module SerialLanguageDemo
-            fixed(${serial_data:06x}) volatile var serial_data: u8
             fixed(${serial_status:06x}) volatile var serial_status: u8
+            fixed(${serial_data:06x}) volatile var serial_data: u8
 
             export procedure main()
                 serial_data = 'O'
                 serial_data = 'K'
-                while serial_status & 1 == 0
+                while serial_status & $80 != 0
                 end
                 serial_data = serial_data
                 return
             end
             ",
-            serial_data = SERIAL_DATA,
-            serial_status = SERIAL_STATUS,
+            serial_data = USB_UART_DATA,
+            serial_status = USB_UART_STAT,
         ),
     );
 
