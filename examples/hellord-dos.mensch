@@ -59,6 +59,7 @@ const PATH_ROOT = 1
 const LINE_LIMIT = 31
 const PATH_LIMIT = 15
 const BACKSPACE = $08
+const RECALL = $10
 const DELETE = $7f
 const LOWERCASE_DELTA = 32
 
@@ -68,8 +69,10 @@ var prompt_mode: u8
 var path_mode: u8
 var path_len: u16
 var line_len: u16
+var history_len: u16
 var current_path: [16]u8
 var command_buffer: [32]u8
+var history_buffer: [32]u8
 
 export procedure dos_boot()
     current_drive = 'A'
@@ -80,6 +83,7 @@ export procedure dos_boot()
     prompt()
     while 1 != 0
         read_line()
+        save_history()
         dispatch_line()
         prompt()
     end
@@ -130,6 +134,7 @@ end
 procedure init_path()
     current_path[0] = '/'
     path_len = 1
+    history_len = 0
     current_dir = DIR_ROOT
     return
 end
@@ -472,16 +477,48 @@ procedure read_line()
                     if ch == DELETE
                         erase_char()
                     else
-                        if line_len < LINE_LIMIT
-                            command_buffer[line_len] = ch
-                            line_len = line_len + 1
-                            console_write(ch)
+                        if ch == RECALL
+                            recall_history()
+                        else
+                            if line_len < LINE_LIMIT
+                                command_buffer[line_len] = ch
+                                line_len = line_len + 1
+                                console_write(ch)
+                            end
                         end
                     end
                 end
             end
         end
     until done != 0
+    return
+end
+
+procedure recall_history()
+    var index: u16
+    if line_len == 0
+        index = 0
+        while index != history_len
+            command_buffer[index] = history_buffer[index]
+            console_write(command_buffer[index])
+            index = index + 1
+        end
+        line_len = history_len
+    end
+    return
+end
+
+procedure save_history()
+    var index: u16
+    if line_len == 0
+        return
+    end
+    index = 0
+    while index != line_len
+        history_buffer[index] = command_buffer[index]
+        index = index + 1
+    end
+    history_len = line_len
     return
 end
 
