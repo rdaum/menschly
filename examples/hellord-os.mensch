@@ -42,8 +42,7 @@ interrupt procedure serial_irq()
     if rx_next == rx_tail
         rx_drop = serial_data
         rx_overflow = 1
-    end
-    if rx_next != rx_tail
+    else
         rx_buffer[rx_head] = serial_data
         rx_head = rx_next
     end

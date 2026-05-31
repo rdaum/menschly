@@ -91,10 +91,23 @@ pub struct VarDecl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
-    Assign { target: Expr, value: Expr },
-    Call { name: String, args: Vec<Expr> },
-    If { cond: Cond, body: Vec<Stmt> },
-    While { cond: Cond, body: Vec<Stmt> },
+    Assign {
+        target: Expr,
+        value: Expr,
+    },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
+    If {
+        cond: Cond,
+        body: Vec<Stmt>,
+        else_body: Vec<Stmt>,
+    },
+    While {
+        cond: Cond,
+        body: Vec<Stmt>,
+    },
     Return(Option<Expr>),
     InlineAsm(String),
 }
@@ -748,8 +761,17 @@ impl Parser {
     fn parse_stmt(&mut self) -> Result<Stmt, FrontendError> {
         if self.take_keyword("if") {
             let cond = self.parse_cond()?;
-            let body = self.parse_block()?;
-            return Ok(Stmt::If { cond, body });
+            let (body, terminator) = self.parse_block_until(&["else", "end"])?;
+            let else_body = if terminator == "else" {
+                self.parse_block()?
+            } else {
+                Vec::new()
+            };
+            return Ok(Stmt::If {
+                cond,
+                body,
+                else_body,
+            });
         }
         if self.take_keyword("while") {
             let cond = self.parse_cond()?;
@@ -787,14 +809,26 @@ impl Parser {
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, FrontendError> {
+        let (body, _terminator) = self.parse_block_until(&["end"])?;
+        Ok(body)
+    }
+
+    fn parse_block_until(
+        &mut self,
+        terminators: &[&str],
+    ) -> Result<(Vec<Stmt>, String), FrontendError> {
         let mut body = Vec::new();
-        while !self.take_keyword("end") {
+        loop {
+            for terminator in terminators {
+                if self.take_keyword(terminator) {
+                    return Ok((body, (*terminator).to_owned()));
+                }
+            }
             if self.at_eof() {
                 return Err(self.parse_error("unterminated block"));
             }
             body.push(self.parse_stmt()?);
         }
-        Ok(body)
     }
 
     fn parse_cond(&mut self) -> Result<Cond, FrontendError> {
@@ -911,7 +945,7 @@ impl Parser {
     }
 
     fn next_is_block_end(&self) -> bool {
-        self.is_keyword_at(0, "end")
+        self.is_keyword_at(0, "end") || self.is_keyword_at(0, "else")
     }
 
     fn expect_keyword(&mut self, keyword: &str) -> Result<(), FrontendError> {
@@ -1295,11 +1329,30 @@ impl<'a> RoutineLowerer<'a> {
                 self.body.push(IrInst::CallProcedure { name: name.clone() });
                 Ok(())
             }
-            Stmt::If { cond, body } => {
+            Stmt::If {
+                cond,
+                body,
+                else_body,
+            } => {
+                let else_label = self.parent.label("if_else");
                 let done = self.parent.label("if_done");
-                self.lower_branch_if_false(cond, done.clone())?;
+                let false_target = if else_body.is_empty() {
+                    done.clone()
+                } else {
+                    else_label.clone()
+                };
+                self.lower_branch_if_false(cond, false_target)?;
                 for stmt in body {
                     self.lower_stmt(stmt)?;
+                }
+                if !else_body.is_empty() {
+                    self.body.push(IrInst::Branch {
+                        target: done.clone(),
+                    });
+                    self.body.push(IrInst::Label(else_label));
+                    for stmt in else_body {
+                        self.lower_stmt(stmt)?;
+                    }
                 }
                 self.body.push(IrInst::Label(done));
                 Ok(())
@@ -1836,6 +1889,8 @@ mod tests {
                 x = one()
                 if x != 0
                     x = x + 1
+                else
+                    x = 1
                 end
                 while x != 3
                     x = x + 1
@@ -1849,6 +1904,39 @@ mod tests {
         assert_eq!(module.name, "Demo");
         assert_eq!(module.routines.len(), 2);
         assert_eq!(module.routines[1].locals[0].storage, Storage::Direct);
+        let Stmt::If { else_body, .. } = &module.routines[1].body[1] else {
+            panic!("expected if statement");
+        };
+        assert_eq!(else_body.len(), 1);
+    }
+
+    #[test]
+    fn compiles_if_else_to_branch_around_else_body() {
+        let source = "
+            module Branches
+            export procedure main()
+                direct var x: u8
+                x = 0
+                if x == 0
+                    x = 1
+                else
+                    x = 2
+                end
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        let body = &module.routines[0].body;
+
+        assert!(body.iter().any(|inst| matches!(
+            inst,
+            IrInst::Branch { target } if target.0.starts_with("__if_done_")
+        )));
+        assert!(body.iter().any(|inst| matches!(
+            inst,
+            IrInst::Label(label) if label.0.starts_with("__if_else_")
+        )));
     }
 
     #[test]
