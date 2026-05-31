@@ -43,7 +43,7 @@ export procedure console_write_greeting()
 end
 
 export procedure console_write_help()
-    console_write_text("Commands:\r\nH  help\r\nV  version\r\nD  dir\r\nE  echo\r\nS  status\r\nA:-Z: drive\r\n")
+    console_write_text("Commands:\r\nH  help\r\nV  version\r\nD  dir\r\nE  echo\r\nS  status\r\nP  pwd\r\nCD path\r\nA:-Z: drive\r\n")
     return
 end
 

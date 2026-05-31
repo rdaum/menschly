@@ -20,18 +20,24 @@ const COMMAND_DIR = 3
 const COMMAND_ECHO = 4
 const COMMAND_STATUS = 5
 const COMMAND_DRIVE = 6
+const COMMAND_PWD = 7
+const COMMAND_CD = 8
 const COMMAND_EMPTY = 255
 const LINE_LIMIT = 31
+const PATH_LIMIT = 15
 const BACKSPACE = $08
 const DELETE = $7f
 const LOWERCASE_DELTA = 32
 
 var current_drive: u8
+var path_len: u16
 var line_len: u16
+var current_path: [16]u8
 var command_buffer: [32]u8
 
 export procedure dos_boot()
     current_drive = 'A'
+    init_path()
     console_write_greeting()
     prompt()
     while 1 != 0
@@ -52,6 +58,10 @@ function command_code(): u8
         return COMMAND_DIR
     elsif is_status() != 0
         return COMMAND_STATUS
+    elsif is_pwd() != 0
+        return COMMAND_PWD
+    elsif is_cd() != 0
+        return COMMAND_CD
     elsif is_echo() != 0
         return COMMAND_ECHO
     elsif is_drive_select() != 0
@@ -59,6 +69,12 @@ function command_code(): u8
     else
         return COMMAND_UNKNOWN
     end
+end
+
+procedure init_path()
+    current_path[0] = '/'
+    path_len = 1
+    return
 end
 
 function normalized_drive(value: u8): u8
@@ -179,6 +195,40 @@ function is_status(): u8
     end
 end
 
+function is_pwd(): u8
+    if line_len == 3
+        if char_matches(0, 'P', 'p') != 0 and char_matches(1, 'W', 'w') != 0 and char_matches(2, 'D', 'd') != 0
+            return 1
+        else
+            return 0
+        end
+    else
+        return 0
+    end
+end
+
+function is_cd(): u8
+    if line_len == 2
+        return cd_prefix_matches()
+    elsif line_len > 3
+        if cd_prefix_matches() != 0 and command_buffer[2] == ' '
+            return 1
+        else
+            return 0
+        end
+    else
+        return 0
+    end
+end
+
+function cd_prefix_matches(): u8
+    if char_matches(0, 'C', 'c') != 0 and char_matches(1, 'D', 'd') != 0
+        return 1
+    else
+        return 0
+    end
+end
+
 function echo_start(): u16
     if line_len == 1
         return 1
@@ -249,6 +299,10 @@ procedure dispatch_line()
         console_write_drive_missing(current_drive)
     elsif code == COMMAND_STATUS
         write_status()
+    elsif code == COMMAND_PWD
+        write_path()
+    elsif code == COMMAND_CD
+        change_dir()
     elsif code == COMMAND_ECHO
         echo_line()
     elsif code == COMMAND_DRIVE
@@ -266,6 +320,41 @@ end
 
 procedure select_drive()
     current_drive = normalized_drive(command_buffer[0])
+    return
+end
+
+procedure write_path()
+    var index: u16
+    console_write(current_drive)
+    console_write(':')
+    index = 0
+    while index != path_len
+        console_write(current_path[index])
+        index = index + 1
+    end
+    console_newline()
+    return
+end
+
+procedure change_dir()
+    var src: u16
+    var dst: u16
+    if line_len == 2
+        init_path()
+    else
+        src = 3
+        dst = 0
+        while src != line_len and dst < PATH_LIMIT
+            current_path[dst] = command_buffer[src]
+            src = src + 1
+            dst = dst + 1
+        end
+        if dst == 0
+            init_path()
+        else
+            path_len = dst
+        end
+    end
     return
 end
 
