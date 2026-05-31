@@ -344,6 +344,10 @@ fn allocate_direct_local(
 
 fn rewrite_inst(inst: &IrInst, layout: &RoutineStorage) -> IrInst {
     match inst {
+        IrInst::Move { dst, src } => IrInst::Move {
+            dst: rewrite_value(dst, layout),
+            src: rewrite_value(src, layout),
+        },
         IrInst::LoadConst { dst, value } => IrInst::LoadConst {
             dst: rewrite_value(dst, layout),
             value: *value,
@@ -453,6 +457,10 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
 
     match inst {
         IrInst::LoadConst { dst, value } => collect_temp_value(dst, const_size(*value), &mut out),
+        IrInst::Move { dst, src } => {
+            collect_temp_value(dst, 2, &mut out);
+            collect_temp_value(src, 2, &mut out);
+        }
         IrInst::Load { width, dst, addr } => {
             collect_temp_value(dst, width.size_bytes(), &mut out);
             collect_temp_address(addr, &mut out);
@@ -486,6 +494,7 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
         IrInst::CallFunction { dst, .. } => collect_temp_value(dst, 2, &mut out),
         IrInst::Label(_)
         | IrInst::Branch { .. }
+        | IrInst::BranchIfEqual { .. }
         | IrInst::BranchIfNotEqual { .. }
         | IrInst::CallProcedure { .. }
         | IrInst::Return => {}

@@ -39,6 +39,21 @@ pub fn lower_module_with_storage(
         .into_iter()
         .map(|(name, size)| crate::target_65816::DirectSymbol { name, size })
         .collect();
+    let static_symbols = assignment
+        .routines
+        .iter()
+        .flat_map(|routine| routine.static_locals.iter())
+        .fold(BTreeMap::<String, u16>::new(), |mut symbols, local| {
+            symbols
+                .entry(local.symbol.clone())
+                .and_modify(|size| *size = (*size).max(local.size))
+                .or_insert(local.size);
+            symbols
+        });
+    lowered.static_symbols = static_symbols
+        .into_iter()
+        .map(|(name, size)| crate::target_65816::StaticSymbol { name, size })
+        .collect();
     Ok((optimize_module(&lowered), assignment))
 }
 
@@ -58,6 +73,10 @@ fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
 fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Result<(), LowerError> {
     match inst {
         IrInst::Label(label) => out.push(AsmInst::Label(label.to_string())),
+        IrInst::Move { dst, src } => {
+            load_value_to_a(out, src)?;
+            store_a_to_value(out, dst)?;
+        }
         IrInst::LoadConst { dst, value } => {
             set_mode_for_const(out, *value);
             match dst {
@@ -78,6 +97,10 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                 Value::Accumulator => out.push(AsmInst::Lda(operand)),
                 Value::IndexX => out.push(AsmInst::Ldx(operand)),
                 Value::IndexY => out.push(AsmInst::Ldy(operand)),
+                Value::Direct(_) | Value::Temp(_) | Value::Local(_) | Value::Param(_) => {
+                    out.push(AsmInst::Lda(operand));
+                    store_a_to_value(out, dst)?;
+                }
                 other => return Err(LowerError::UnsupportedValue(other.clone())),
             }
         }
@@ -132,6 +155,7 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             load_value_to_a(out, value)?;
             out.push(AsmInst::Beq(target.to_string()));
         }
+        IrInst::BranchIfEqual { target } => out.push(AsmInst::Beq(target.to_string())),
         IrInst::BranchIfNotEqual { target } => out.push(AsmInst::Bne(target.to_string())),
         IrInst::CallProcedure { name } => out.push(AsmInst::Jsr(name.clone())),
         IrInst::CallFunction { name, dst } => {

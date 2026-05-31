@@ -4,6 +4,7 @@ use std::fmt;
 pub struct AsmModule {
     pub name: String,
     pub direct_symbols: Vec<DirectSymbol>,
+    pub static_symbols: Vec<StaticSymbol>,
     pub routines: Vec<AsmRoutine>,
 }
 
@@ -12,6 +13,7 @@ impl AsmModule {
         Self {
             name: name.into(),
             direct_symbols: Vec::new(),
+            static_symbols: Vec::new(),
             routines: Vec::new(),
         }
     }
@@ -24,6 +26,12 @@ impl AsmModule {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectSymbol {
+    pub name: String,
+    pub size: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticSymbol {
     pub name: String,
     pub size: u16,
 }

@@ -189,6 +189,10 @@ pub enum Storage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrInst {
     Label(Label),
+    Move {
+        dst: Value,
+        src: Value,
+    },
     LoadConst {
         dst: Value,
         value: Const,
@@ -227,6 +231,9 @@ pub enum IrInst {
     },
     BranchIfZero {
         value: Value,
+        target: Label,
+    },
+    BranchIfEqual {
         target: Label,
     },
     BranchIfNotEqual {

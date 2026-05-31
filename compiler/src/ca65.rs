@@ -15,6 +15,17 @@ pub fn emit_module(module: &AsmModule) -> String {
         out.push('\n');
     }
 
+    if !module.static_symbols.is_empty() {
+        out.push_str(".bss\n");
+        for symbol in &module.static_symbols {
+            out.push_str(&symbol.name);
+            out.push_str(": .res ");
+            out.push_str(&symbol.size.to_string());
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
     out.push_str(".code\n\n");
 
     for routine in &module.routines {

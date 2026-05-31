@@ -4,7 +4,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mensch_systems_tests::{ca65, fixtures, lower_65816};
+use mensch_systems_tests::{ca65, fixtures, frontend, lower_65816};
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
 
 const ROUTINE_ADDR: usize = 0x020000;
@@ -120,6 +120,11 @@ fn assemble_storage_fixture(name: &str, module: &mensch_systems_tests::ir::Modul
     assemble_fixture(name, &asm)
 }
 
+fn assemble_source_fixture(name: &str, source: &str) -> Vec<u8> {
+    let module = frontend::compile_source(source).expect("source fixture should compile to IR");
+    assemble_storage_fixture(name, &module)
+}
+
 fn run_command(command: &mut Command) {
     let output = command
         .output()
@@ -133,7 +138,7 @@ fn run_command(command: &mut Command) {
 }
 
 fn linker_config() -> &'static str {
-    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $020000, size = $010000, file = %O;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n}\n"
+    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $020000, size = $001000, file = %O;\n  BSS: start = $021000, size = $001000, type = rw;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  BSS: load = BSS, type = bss;\n}\n"
 }
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -260,4 +265,38 @@ fn generated_direct_local_storage_routine_runs() {
     let (_cpu, memory) = run_generated_routine(&binary);
 
     assert_eq!(memory.byte(fixtures::DIRECT_STORE_ADDR as usize), 0x66);
+}
+
+#[test]
+fn generated_frontend_program_runs() {
+    let binary = assemble_source_fixture(
+        "frontend-program",
+        "
+        module FrontendDemo
+
+        export procedure main()
+            direct var p: near ^u8
+            var x: u8
+
+            p = $1300
+            x = one()
+            if x == 1
+                x = x + 1
+            end
+            while x != 4
+                x = x + 1
+            end
+            p^ = x
+            return
+        end
+
+        function one(): u8
+            return 1
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x020000 + 0x1300), 4);
 }

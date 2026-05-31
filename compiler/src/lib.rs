@@ -1,5 +1,6 @@
 pub mod ca65;
 pub mod fixtures;
+pub mod frontend;
 pub mod ir;
 pub mod lower_65816;
 pub mod optimize_65816;

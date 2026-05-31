@@ -14,6 +14,7 @@ pub fn optimize_module(module: &AsmModule) -> AsmModule {
     AsmModule {
         name: module.name.clone(),
         direct_symbols: module.direct_symbols.clone(),
+        static_symbols: module.static_symbols.clone(),
         routines: module
             .routines
             .iter()
