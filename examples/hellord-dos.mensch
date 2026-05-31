@@ -4,6 +4,7 @@ external procedure console_write(value: u8)
 external procedure console_newline()
 external function console_read(): u8
 external procedure console_write_text(text: near ^u8)
+external procedure console_write_hex8(value: u8)
 external procedure console_write_hex16(value: u16)
 external procedure console_clear()
 external procedure console_write_greeting()
@@ -43,6 +44,8 @@ const COMMAND_RUN = 14
 const COMMAND_MEM = 15
 const COMMAND_PROGRAM = 16
 const COMMAND_PATH = 17
+const COMMAND_PEEK = 18
+const COMMAND_POKE = 19
 const COMMAND_EMPTY = 255
 const FILE_UNKNOWN = 0
 const FILE_README = 1
@@ -70,6 +73,8 @@ var path_mode: u8
 var path_len: u16
 var line_len: u16
 var history_len: u16
+var parse_end: u16
+var parse_ok: u8
 var current_path: [16]u8
 var command_buffer: [32]u8
 var history_buffer: [32]u8
@@ -112,6 +117,10 @@ function command_code(): u8
         return COMMAND_PROMPT
     elsif is_path() != 0
         return COMMAND_PATH
+    elsif is_peek() != 0
+        return COMMAND_PEEK
+    elsif is_poke() != 0
+        return COMMAND_POKE
     elsif is_set() != 0
         return COMMAND_SET
     elsif is_run() != 0
@@ -135,6 +144,8 @@ procedure init_path()
     current_path[0] = '/'
     path_len = 1
     history_len = 0
+    parse_end = 0
+    parse_ok = 0
     current_dir = DIR_ROOT
     return
 end
@@ -404,6 +415,22 @@ function is_path(): u8
     end
 end
 
+function is_peek(): u8
+    if command_argument_matches("PEEK") != 0
+        return 1
+    else
+        return 0
+    end
+end
+
+function is_poke(): u8
+    if command_argument_matches("POKE") != 0
+        return 1
+    else
+        return 0
+    end
+end
+
 function is_set(): u8
     if command_word_matches("SET") != 0
         return 1
@@ -558,6 +585,10 @@ procedure dispatch_line()
         configure_prompt()
     elsif code == COMMAND_PATH
         configure_path()
+    elsif code == COMMAND_PEEK
+        peek_memory()
+    elsif code == COMMAND_POKE
+        poke_memory()
     elsif code == COMMAND_SET
         configure_set()
     elsif code == COMMAND_RUN
@@ -617,6 +648,170 @@ procedure write_dir_prefix()
     while index != path_len
         console_write(current_path[index])
         index = index + 1
+    end
+    return
+end
+
+function hex_digit(value: u8): u8
+    value = normalized_drive(value)
+    if value >= '0' and value <= '9'
+        return value - '0'
+    elsif value >= 'A' and value <= 'F'
+        return value - 'A' + 10
+    else
+        return $ff
+    end
+end
+
+function hex_argument_start(index: u16): u16
+    if index < line_len and command_buffer[index] == '$'
+        return index + 1
+    else
+        return index
+    end
+end
+
+function append_hex_digit(value: u16, digit: u8): u16
+    value = value + value
+    value = value + value
+    value = value + value
+    value = value + value
+    if digit == 0
+        return value
+    elsif digit == 1
+        return value + 1
+    elsif digit == 2
+        return value + 2
+    elsif digit == 3
+        return value + 3
+    elsif digit == 4
+        return value + 4
+    elsif digit == 5
+        return value + 5
+    elsif digit == 6
+        return value + 6
+    elsif digit == 7
+        return value + 7
+    elsif digit == 8
+        return value + 8
+    elsif digit == 9
+        return value + 9
+    elsif digit == 10
+        return value + 10
+    elsif digit == 11
+        return value + 11
+    elsif digit == 12
+        return value + 12
+    elsif digit == 13
+        return value + 13
+    elsif digit == 14
+        return value + 14
+    else
+        return value + 15
+    end
+end
+
+function parse_hex_u16(index: u16): u16
+    var value: u16
+    var digit: u8
+    var digits: u8
+    index = hex_argument_start(index)
+    value = 0
+    digits = 0
+    parse_ok = 0
+    while index < line_len and command_buffer[index] != ' '
+        digit = hex_digit(command_buffer[index])
+        if digit == $ff
+            parse_end = index
+            return 0
+        elsif digits == 4
+            parse_end = index
+            return 0
+        else
+            value = append_hex_digit(value, digit)
+            digits = digits + 1
+            index = index + 1
+        end
+    end
+    parse_end = index
+    parse_ok = digits
+    return value
+end
+
+function parse_hex_u8(index: u16): u8
+    var value: u8
+    var digit: u8
+    var digits: u8
+    index = hex_argument_start(index)
+    value = 0
+    digits = 0
+    parse_ok = 0
+    while index < line_len and command_buffer[index] != ' '
+        digit = hex_digit(command_buffer[index])
+        if digit == $ff
+            parse_end = index
+            return 0
+        elsif digits == 2
+            parse_end = index
+            return 0
+        else
+            value = value + value
+            value = value + value
+            value = value + value
+            value = value + value
+            value = value + digit
+            digits = digits + 1
+            index = index + 1
+        end
+    end
+    parse_end = index
+    parse_ok = digits
+    return value
+end
+
+procedure peek_memory()
+    direct var addr: u16
+    direct var ptr: near ^u8
+    direct var value: u8
+    addr = parse_hex_u16(5)
+    if parse_ok == 0
+        console_write_unknown()
+    elsif parse_end != line_len
+        console_write_unknown()
+    else
+        ptr = addr
+        value = ptr^
+        console_write('$')
+        console_write_hex16(addr)
+        console_write_text(" = $")
+        console_write_hex8(value)
+        console_newline()
+    end
+    return
+end
+
+procedure poke_memory()
+    direct var addr: u16
+    direct var ptr: near ^u8
+    direct var value: u8
+    addr = parse_hex_u16(5)
+    if parse_ok == 0
+        console_write_unknown()
+    elsif parse_end >= line_len
+        console_write_unknown()
+    elsif command_buffer[parse_end] != ' '
+        console_write_unknown()
+    else
+        value = parse_hex_u8(parse_end + 1)
+        if parse_ok == 0
+            console_write_unknown()
+        elsif parse_end != line_len
+            console_write_unknown()
+        else
+            ptr = addr
+            ptr^ = value
+            console_write_text("OK\r\n")
+        end
     end
     return
 end
