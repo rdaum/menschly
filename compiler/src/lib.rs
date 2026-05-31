@@ -6,3 +6,4 @@ pub mod lower_65816;
 pub mod optimize_65816;
 pub mod storage;
 pub mod target_65816;
+pub mod x65_runner;

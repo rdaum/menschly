@@ -1,16 +1,14 @@
 use std::fs;
 use std::process::Command;
 
-use mensch_systems_tests::{ca65, frontend, lower_65816};
+use mensch_systems_tests::{ca65, frontend, lower_65816, x65_runner};
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
 use x65alike_emul::{
     Machine, RAMBLOCK_REG, ROMBLOCK_REG, USB_UART_CTRL, USB_UART_CTRL_IRQ_RX_NOT_EMPTY,
     USB_UART_DATA, USB_UART_STAT,
 };
 
-mod support;
-
-use support::{build_mensch_xex, run_command, run_image_until_output, temp_dir};
+use x65_runner::{build_mensch_xex, run_image_until_output, temp_dir};
 
 const ROUTINE_ADDR: usize = 0x020000;
 const IRQ_ROUTINE_ADDR: usize = 0x008000;
@@ -186,6 +184,10 @@ fn assemble_fixture_outputs(name: &str, asm: &str, cfg: &str) -> (Vec<u8>, Vec<u
     )
 }
 
+fn run_command(command: &mut Command) {
+    x65_runner::run_command(command).expect("assembler/linker command should succeed");
+}
+
 fn linker_config() -> &'static str {
     "MEMORY {\n  CODE: start = $020000, size = $001000, file = %O;\n}\nSEGMENTS {\n  CODE: load = CODE, type = ro;\n}\n"
 }
@@ -303,9 +305,10 @@ fn hellord_example_boots_as_interrupt_driven_xex() {
     let build = build_hellord_example();
     let expected = b"Hellord!\r\nabc123\n";
 
-    let run = run_image_until_output(&build.image, b"abc123\n", expected.len(), 20_000);
+    let run = run_image_until_output(&build.image, b"abc123\n", expected.len(), 20_000)
+        .expect("Hellord image should produce expected output");
 
-    assert_eq!(run.machine.serial_output(), expected);
+    assert_eq!(run.output, expected);
     assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
 }
 
@@ -315,18 +318,20 @@ fn hellord_example_flags_full_rx_ring_and_drops_input() {
     let input = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let output_len = b"Hellord!\r\n".len() + 8;
 
-    let run = run_image_until_output(&build.image, input, output_len, 50_000);
+    let run = run_image_until_output(&build.image, input, output_len, 50_000)
+        .expect("Hellord image should produce overflow test output");
 
     assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 1);
 }
 
-fn build_hellord_example() -> support::BuildOutput {
+fn build_hellord_example() -> x65_runner::BuildOutput {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     build_mensch_xex(
         "hellord-os",
         repo_root.join("examples/hellord-os.mensch"),
         repo_root.join("examples/hellord-os-x65.cfg"),
     )
+    .expect("Hellord example should build")
 }
 
 #[test]

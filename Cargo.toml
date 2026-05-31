@@ -11,6 +11,13 @@ path = "compiler/src/lib.rs"
 name = "menschc"
 path = "compiler/src/bin/menschc.rs"
 
-[dev-dependencies]
+[[bin]]
+name = "mensch-run-x65"
+path = "compiler/src/bin/mensch-run-x65.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
 x65alike-emul = { path = "x65alike-emul" }
 wdc65816 = "0.1.0"
+
+[dev-dependencies]
