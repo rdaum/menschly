@@ -1636,7 +1636,7 @@ impl<'a> RoutineLowerer<'a> {
     ) -> Result<(), FrontendError> {
         let lhs_ty = self.infer_expr(&cond.lhs)?;
         let rhs_ty = self.infer_expr(&cond.rhs)?;
-        let width = compatible_width(&lhs_ty, &rhs_ty)?;
+        let width = compatible_expr_width(&lhs_ty, &rhs_ty, &cond.rhs)?;
         self.lower_expr_to(&cond.lhs, &lhs_ty, Value::Accumulator)?;
         let rhs = self.expr_value(&cond.rhs, &lhs_ty)?;
         self.body.push(IrInst::Compare {
@@ -1826,7 +1826,11 @@ impl<'a> RoutineLowerer<'a> {
             ));
         };
 
-        let index_ty = self.infer_expr(index)?;
+        let index_ty = if matches!(index, Expr::Number(_)) {
+            Type::U16
+        } else {
+            self.infer_expr(index)?
+        };
         if integer_width(&index_ty) != Some(2) {
             return Err(FrontendError::Type(
                 "array indexes currently need a 16-bit scalar".to_owned(),
@@ -1884,7 +1888,11 @@ impl<'a> RoutineLowerer<'a> {
             }
             Expr::Index(base, index) => {
                 let base_ty = self.infer_expr(base)?;
-                let index_ty = self.infer_expr(index)?;
+                let index_ty = if matches!(index.as_ref(), Expr::Number(_)) {
+                    Type::U16
+                } else {
+                    self.infer_expr(index)?
+                };
                 if integer_width(&index_ty) != Some(2) {
                     return Err(FrontendError::Type(
                         "array indexes currently need a 16-bit scalar".to_owned(),
@@ -2093,16 +2101,6 @@ fn result_constructor_matches(expected: &Type, actual: &Type) -> bool {
     }
 }
 
-fn compatible_width(lhs: &Type, rhs: &Type) -> Result<Width, FrontendError> {
-    if integer_width(lhs) == integer_width(rhs) {
-        width_for_type(lhs)
-    } else {
-        Err(FrontendError::Type(format!(
-            "incompatible expression types {lhs:?} and {rhs:?}"
-        )))
-    }
-}
-
 fn compatible_expr_width(lhs: &Type, rhs: &Type, rhs_expr: &Expr) -> Result<Width, FrontendError> {
     if integer_width(lhs) == integer_width(rhs)
         || (matches!(rhs_expr, Expr::Number(_)) && integer_width(lhs).is_some())
@@ -2293,6 +2291,7 @@ mod tests {
             var out: u8
 
             export procedure main()
+                buffer[0] = '?'
                 head = head + 1 & 3
                 buffer[head] = '!'
                 head = head + 1 & 3

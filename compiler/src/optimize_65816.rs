@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::target_65816::{AsmInst, AsmModule, AsmRoutine, Immediate, Mode, Operand, Symbol};
 
-const SHORT_BRANCH_DISTANCE: usize = 120;
+const SHORT_BRANCH_DISTANCE: usize = 40;
 
 pub fn optimize_module(module: &AsmModule) -> AsmModule {
     let direct_symbols = module

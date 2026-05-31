@@ -316,7 +316,7 @@ mod tests {
         assert!(asm.contains("\tlda $1000,x\n"));
         assert!(asm.contains("\tsta $1100,x\n"));
         assert!(asm.contains("\tinx\n"));
-        assert!(asm.contains("\tbne copy_loop\n"));
+        assert!(asm.contains("\tbeq :+\n\tbrl copy_loop\n:\n"));
     }
 
     #[test]

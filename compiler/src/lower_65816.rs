@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, EntryKind, GlobalPlacement, InterruptPreserve, IrInst, Module, Routine,
-    RoutineKind, Type, Value, Width,
+    Abi, Address, Const, EntryKind, GlobalPlacement, InterruptPreserve, IrInst, Label, Module,
+    Routine, RoutineKind, Type, Value, Width,
 };
 use crate::optimize_65816::optimize_module;
 use crate::storage::{apply_storage, assign_storage, StorageAssignment};
@@ -205,6 +205,10 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                     out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
                     out.push(AsmInst::Sta(Operand::Direct(Symbol::Named(name.clone()))));
                 }
+                Value::Temp(name) | Value::Local(name) | Value::Param(name) => {
+                    out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
+                    out.push(AsmInst::Sta(Operand::Absolute(Symbol::Named(name.clone()))));
+                }
                 Value::Global(name) => {
                     out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
                     out.push(AsmInst::Sta(Operand::Absolute(Symbol::Named(name.clone()))));
@@ -266,6 +270,12 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                 Value::Direct(name) => {
                     out.push(AsmInst::Dec(Operand::Direct(Symbol::Named(name.clone()))))
                 }
+                Value::Temp(name)
+                | Value::Local(name)
+                | Value::Param(name)
+                | Value::Global(name) => {
+                    out.push(AsmInst::Dec(Operand::Absolute(Symbol::Named(name.clone()))))
+                }
                 other => return Err(LowerError::UnsupportedValue(other.clone())),
             }
         }
@@ -276,6 +286,12 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                 Value::Direct(name) => {
                     out.push(AsmInst::Inc(Operand::Direct(Symbol::Named(name.clone()))))
                 }
+                Value::Temp(name)
+                | Value::Local(name)
+                | Value::Param(name)
+                | Value::Global(name) => {
+                    out.push(AsmInst::Inc(Operand::Absolute(Symbol::Named(name.clone()))))
+                }
                 other => return Err(LowerError::UnsupportedValue(other.clone())),
             }
         }
@@ -284,16 +300,19 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             match lhs {
                 Value::Accumulator => out.push(AsmInst::Cmp(operand_for_value(rhs)?)),
                 Value::IndexX => out.push(AsmInst::Cpx(operand_for_value(rhs)?)),
-                other => return Err(LowerError::UnsupportedValue(other.clone())),
+                other => {
+                    load_value_to_a(out, other)?;
+                    out.push(AsmInst::Cmp(operand_for_value(rhs)?));
+                }
             }
         }
-        IrInst::Branch { target } => out.push(AsmInst::Bra(target.to_string())),
+        IrInst::Branch { target } => out.push(AsmInst::Brl(target.to_string())),
         IrInst::BranchIfZero { value, target } => {
             load_value_to_a(out, value)?;
-            out.push(AsmInst::Beq(target.to_string()));
+            out.push(long_branch_if_equal(target));
         }
-        IrInst::BranchIfEqual { target } => out.push(AsmInst::Beq(target.to_string())),
-        IrInst::BranchIfNotEqual { target } => out.push(AsmInst::Bne(target.to_string())),
+        IrInst::BranchIfEqual { target } => out.push(long_branch_if_equal(target)),
+        IrInst::BranchIfNotEqual { target } => out.push(long_branch_if_not_equal(target)),
         IrInst::Push { width, value } => {
             set_mode_for_width(out, *width);
             load_value_to_a(out, value)?;
@@ -364,6 +383,14 @@ fn return_inst(routine: &Routine) -> AsmInst {
             RoutineKind::Procedure | RoutineKind::Function { .. } => AsmInst::Rts,
         },
     }
+}
+
+fn long_branch_if_equal(target: &Label) -> AsmInst {
+    AsmInst::Raw(format!("bne :+\n\tbrl {}\n:", target))
+}
+
+fn long_branch_if_not_equal(target: &Label) -> AsmInst {
+    AsmInst::Raw(format!("beq :+\n\tbrl {}\n:", target))
 }
 
 fn emit_return_sequence(routine: &Routine, out: &mut Vec<AsmInst>) {

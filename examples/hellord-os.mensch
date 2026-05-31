@@ -4,27 +4,10 @@ vector irq = serial_irq
 
 external interrupt procedure serial_irq()
 external procedure serial_init()
-external procedure serial_write(value: u8)
-external function serial_has_data(): u8
-external function serial_read(): u8
+external procedure dos_boot()
 
 export procedure main()
     serial_init()
-
-    serial_write('H')
-    serial_write('e')
-    serial_write('l')
-    serial_write('l')
-    serial_write('o')
-    serial_write('r')
-    serial_write('d')
-    serial_write('!')
-    serial_write('\r')
-    serial_write('\n')
-
-    while 1 != 0
-        while serial_has_data() == 0
-        end
-        serial_write(serial_read())
-    end
+    dos_boot()
+    return
 end

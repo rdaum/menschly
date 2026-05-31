@@ -497,10 +497,15 @@ fn raw_interrupt_skips_generated_entry_state() {
 #[test]
 fn hellord_example_boots_as_interrupt_driven_xex() {
     let build = build_hellord_example();
-    let expected = b"Hellord!\r\nabc123\n";
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> H\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nE  echo\r\nA> V\r\nHellord DOS 0.1\r\nA> D\r\nNo drives mounted\r\nA> E hello\r\n hello\r\nA> X\r\n?SYNTAX\r\nA> \r\nA> ";
 
-    let run = run_image_until_output(&build.image, b"abc123\n", expected.len(), 20_000)
-        .expect("Hellord image should produce expected output");
+    let run = run_image_until_output(
+        &build.image,
+        b"H\nV\nD\nE hello\nX\n\n",
+        expected.len(),
+        200_000,
+    )
+    .expect("Hellord image should produce expected output");
 
     assert_eq!(run.output, expected);
     assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
@@ -510,8 +515,8 @@ fn hellord_example_boots_as_interrupt_driven_xex() {
 #[test]
 fn hellord_example_flags_full_rx_ring_and_drops_input() {
     let build = build_hellord_example();
-    let input = b"abcdefghijklmnopqrstuvwxyz0123456789";
-    let output_len = b"Hellord!\r\n".len() + 8;
+    let input = b"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789overflow";
+    let output_len = b"Hellord DOS 0.1\r\nType H for help.\r\nA> ".len() + 8;
 
     let run = run_image_until_output(&build.image, input, output_len, 50_000)
         .expect("Hellord image should produce overflow test output");
@@ -618,6 +623,8 @@ fn build_hellord_example() -> x65_runner::BuildOutput {
         "hellord-os",
         &[
             repo_root.join("examples/hellord-os.mensch"),
+            repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-console.mensch"),
             repo_root.join("examples/serial-ring.mensch"),
         ],
         repo_root.join("examples/hellord-os-x65.cfg"),

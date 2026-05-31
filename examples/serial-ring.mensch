@@ -5,11 +5,11 @@ fixed($009f57) volatile var serial_data: u8
 var rx_head: u16
 var rx_tail: u16
 var rx_next: u16
-var rx_buffer: [16]u8
+var rx_buffer: [64]u8
 var tx_head: u16
 var tx_tail: u16
 var tx_next: u16
-var tx_buffer: [16]u8
+var tx_buffer: [64]u8
 fixed($000280) volatile var rx_overflow: u8
 fixed($000281) volatile var rx_drop: u8
 fixed($000282) volatile var tx_overflow: u8
@@ -29,7 +29,7 @@ export procedure serial_init()
 end
 
 export procedure serial_write(value: u8)
-    tx_next = tx_head + 1 & 15
+    tx_next = tx_head + 1 & 63
     if tx_next == tx_tail
         tx_drop = value
         tx_overflow = 1
@@ -52,13 +52,13 @@ end
 export function serial_read(): u8
     direct var value: u8
     value = rx_buffer[rx_tail]
-    rx_tail = rx_tail + 1 & 15
+    rx_tail = rx_tail + 1 & 63
     return value
 end
 
 export interrupt procedure serial_irq()
     if serial_status & $80 == 0
-        rx_next = rx_head + 1 & 15
+        rx_next = rx_head + 1 & 63
         if rx_next == rx_tail
             rx_drop = serial_data
             rx_overflow = 1
@@ -72,7 +72,7 @@ export interrupt procedure serial_irq()
     else
         if serial_status & $08 == 0
             serial_data = tx_buffer[tx_tail]
-            tx_tail = tx_tail + 1 & 15
+            tx_tail = tx_tail + 1 & 63
         end
         if tx_head == tx_tail
             serial_ctrl = $40
