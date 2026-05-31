@@ -214,6 +214,10 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                     out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
                     out.push(AsmInst::Sta(Operand::Direct(Symbol::Named(name.clone()))));
                 }
+                Value::Stack { .. } => {
+                    out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
+                    store_a_to_value(out, dst)?;
+                }
                 Value::Temp(name) | Value::Local(name) | Value::Param(name) => {
                     out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
                     out.push(AsmInst::Sta(Operand::Absolute(Symbol::Named(name.clone()))));
@@ -240,6 +244,7 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                 Value::IndexX => out.push(AsmInst::Ldx(operand)),
                 Value::IndexY => out.push(AsmInst::Ldy(operand)),
                 Value::Direct(_)
+                | Value::Stack { .. }
                 | Value::Temp(_)
                 | Value::Local(_)
                 | Value::Param(_)

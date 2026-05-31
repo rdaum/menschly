@@ -34,7 +34,7 @@ export procedure serial_init()
     return
 end
 
-export procedure serial_write(value: u8)
+export reentrant procedure serial_write(value: u8)
     tx_next = tx_head + 1 & RING_MASK
     if tx_next == tx_tail
         tx_drop = value

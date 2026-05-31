@@ -12,6 +12,7 @@ dos_src="$repo_root/examples/hellord-dos.mensch"
 console_src="$repo_root/examples/hellord-console.mensch"
 files_src="$repo_root/examples/hellord-files.mensch"
 serial_src="$repo_root/examples/serial-ring.mensch"
+bios_src="$repo_root/examples/hellord-bios.mensch"
 cfg="$repo_root/examples/hellord-os-x65.cfg"
 max_steps=10000000
 if [ -t 0 ]; then
@@ -28,4 +29,5 @@ cargo run --quiet --manifest-path "$repo_root/Cargo.toml" --bin mensch-run-x65 -
   "$dos_src" \
   "$console_src" \
   "$files_src" \
-  "$serial_src"
+  "$serial_src" \
+  "$bios_src"

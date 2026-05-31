@@ -122,7 +122,23 @@ side syscall handlers must also be interrupt handlers that avoid caller-specific
 direct-page parameter slots. This keeps the syscall path safe if it is entered
 while foreground code or an interrupt handler is using non-reentrant routines.
 
-The first BIOS call is TOS-shaped `Bconout`:
+The first BIOS calls are TOS-shaped console calls:
+
+```text
+COP #$0d
+A = $0001       ; Bconstat
+X = device      ; 2 is the console device
+```
+
+`Bconstat` returns `$ffff` in `A` when input is ready and `0` otherwise.
+
+```text
+COP #$0d
+A = $0002       ; Bconin
+X = device      ; 2 is the console device
+```
+
+`Bconin` returns the input character in the low byte of `A`.
 
 ```text
 COP #$0d
@@ -132,8 +148,6 @@ Y = character
 ```
 
 The call writes the low byte of `Y` to the console when `X == 2`.
-
-`Bcostat` is also implemented for the same registered console device:
 
 ```text
 COP #$0d

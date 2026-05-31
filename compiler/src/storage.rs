@@ -179,12 +179,13 @@ fn assign_routine(routine: &Routine, allocator: &mut DirectAllocator) -> Routine
 
     if matches!(routine.abi, Abi::Reentrant) {
         assign_locals(routine, allocator, &mut out);
+        assign_scratch_temps(routine, allocator, &mut out);
         assign_stack_params(routine, &mut out);
     } else {
         assign_params(routine, allocator, &mut out);
         assign_locals(routine, allocator, &mut out);
+        assign_scratch_temps(routine, allocator, &mut out);
     }
-    assign_scratch_temps(routine, allocator, &mut out);
 
     out
 }
@@ -282,6 +283,26 @@ fn assign_scratch_temps(
 ) {
     let mut lifetimes = temp_lifetimes(routine);
     lifetimes.sort_by_key(|temp| (temp.first_use, temp.last_use, temp.name.clone()));
+
+    if matches!(routine.abi, Abi::Reentrant) {
+        for temp in lifetimes {
+            let offset = out.stack_frame_bytes + 1;
+            out.bindings.insert(
+                BindingKey::Temp(temp.name.clone()),
+                Location::Stack {
+                    offset,
+                    size: temp.size,
+                },
+            );
+            out.stack_slots.push(StackSlot {
+                name: temp_symbol(&routine.name, &temp.name),
+                offset,
+                size: temp.size,
+            });
+            out.stack_frame_bytes += temp.size;
+        }
+        return;
+    }
 
     let mut active: Vec<ActiveTemp> = Vec::new();
     let mut free: Vec<FreeSlot> = Vec::new();

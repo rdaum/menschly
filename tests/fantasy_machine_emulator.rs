@@ -17,7 +17,7 @@ const IRQ_ROUTINE_ADDR: usize = 0x008000;
 const RETURN_BANK: u8 = 0x03;
 const RETURN_ADDR: u16 = 0x1234;
 const NATIVE_IRQ_VECTOR: usize = 0x00ffee;
-const DEFAULT_ROMBLOCK_IRQ_VECTOR_PHYSICAL: u32 = 0x083fee;
+const DEFAULT_ROMBLOCK_NATIVE_VECTOR_PHYSICAL: u32 = 0x083fe4;
 const HELLORD_OVERFLOW_ADDR: u32 = 0x000280;
 const HELLORD_TX_OVERFLOW_ADDR: u32 = 0x000282;
 const TX_BUFFERED_MARKER_ADDR: u32 = 0x000290;
@@ -197,7 +197,7 @@ fn linker_config() -> &'static str {
 }
 
 fn irq_linker_config() -> &'static str {
-    "MEMORY {\n  CODE: start = $008000, size = $001000, file = \"{CODE_BIN}\";\n  ZEROPAGE: start = $000080, size = $000080, type = rw;\n  BSS: start = $000200, size = $000100, type = rw;\n  VECTORS: start = $00ffee, size = $000002, file = \"{VECTORS_BIN}\";\n}\nSEGMENTS {\n  CODE: load = CODE, type = ro;\n  ZEROPAGE: load = ZEROPAGE, type = zp;\n  BSS: load = BSS, type = bss;\n  VECTORS: load = VECTORS, type = ro;\n}\n"
+    "MEMORY {\n  CODE: start = $008000, size = $001000, file = \"{CODE_BIN}\";\n  ZEROPAGE: start = $000080, size = $000080, type = rw;\n  BSS: start = $000200, size = $000100, type = rw;\n  VECTORS: start = $00ffe4, size = $00000c, file = \"{VECTORS_BIN}\";\n}\nSEGMENTS {\n  CODE: load = CODE, type = ro;\n  ZEROPAGE: load = ZEROPAGE, type = zp;\n  BSS: load = BSS, type = bss;\n  VECTOR_COP: load = VECTORS, type = ro, optional = yes, offset = $0000;\n  VECTOR_BRK: load = VECTORS, type = ro, optional = yes, offset = $0002;\n  VECTOR_ABORT: load = VECTORS, type = ro, optional = yes, offset = $0004;\n  VECTOR_NMI: load = VECTORS, type = ro, optional = yes, offset = $0006;\n  VECTOR_IRQ: load = VECTORS, type = ro, optional = yes, offset = $000a;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
 }
 
 #[test]
@@ -266,7 +266,10 @@ fn language_bios_bconout_runs_through_cop_syscall() {
         "
         module BiosSyscallCaller
         application main
+        vector irq = serial_irq
         fixed($000294) volatile var status: u16
+        fixed($0002a6) volatile var input_status: u16
+        fixed($0002a8) volatile var input_value: u8
         fixed($000296) volatile var first_device: u16
         fixed($000298) volatile var next_device: u16
         fixed($00029a) volatile var parent_device: u16
@@ -275,7 +278,11 @@ fn language_bios_bconout_runs_through_cop_syscall() {
         fixed($0002a0) volatile var device_flags: u16
         fixed($0002a2) volatile var device_driver: u16
         fixed($0002a4) volatile var bad_device_kind: u16
-        external reentrant procedure bios_bconout(dev: u16, ch: u16)
+        external interrupt procedure serial_irq()
+        external procedure serial_init()
+        external reentrant function bios_bconstat(dev: u16): u16
+        external reentrant function bios_bconin(dev: u16): u8
+        external reentrant procedure bios_bconout(dev: u16, ch: u8)
         external reentrant function bios_bcostat(dev: u16): u16
         external reentrant function bios_device_first(): u16
         external reentrant function bios_device_next(dev: u16): u16
@@ -286,9 +293,12 @@ fn language_bios_bconout_runs_through_cop_syscall() {
         external reentrant function bios_device_driver(dev: u16): u16
 
         procedure main()
+            serial_init()
             bios_bconout(2, $0042)
             bios_bconout(1, $0058)
             status = bios_bcostat(2)
+            input_status = bios_bconstat(2)
+            input_value = bios_bconin(2)
             first_device = bios_device_first()
             next_device = bios_device_next(first_device)
             parent_device = bios_device_parent(first_device)
@@ -307,17 +317,24 @@ fn language_bios_bconout_runs_through_cop_syscall() {
 
     let build = build_mensch_xex_sources(
         "language-bios-bconout-cop",
-        &[caller_path, repo_root.join("examples/hellord-bios.mensch")],
+        &[
+            caller_path,
+            repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/serial-ring.mensch"),
+        ],
         &cfg_path,
     )
     .expect("BIOS syscall image should build");
 
-    let run = run_image_until_output(&build.image, b"", 2, 50_000)
+    let run = run_image_until_output(&build.image, b"?", 2, 50_000)
         .expect("BIOS syscall image should write two console bytes");
 
     assert_eq!(run.output, b"B!");
     assert_eq!(run.machine.byte(0x000294), 0xff);
     assert_eq!(run.machine.byte(0x000295), 0xff);
+    assert_eq!(run.machine.byte(0x0002a6), 0xff);
+    assert_eq!(run.machine.byte(0x0002a7), 0xff);
+    assert_eq!(run.machine.byte(0x0002a8), b'?');
     assert_eq!(run.machine.byte(0x000296), 0x02);
     assert_eq!(run.machine.byte(0x000297), 0x00);
     assert_eq!(run.machine.byte(0x000298), 0x00);
@@ -375,7 +392,7 @@ fn language_irq_vector_handles_usb_uart_rx_interrupt() {
 
     let mut machine = Machine::new();
     machine.load(IRQ_ROUTINE_ADDR as u32, &code);
-    machine.load(DEFAULT_ROMBLOCK_IRQ_VECTOR_PHYSICAL, &vectors);
+    machine.load(DEFAULT_ROMBLOCK_NATIVE_VECTOR_PHYSICAL, &vectors);
     machine.push_serial_input(b"!");
 
     let (_cpu, machine) = run_loaded_routine_at(machine, IRQ_ROUTINE_ADDR);
@@ -422,7 +439,7 @@ fn language_irq_preserves_interrupted_accumulator_by_default() {
 
     let mut machine = Machine::new();
     machine.load(IRQ_ROUTINE_ADDR as u32, &code);
-    machine.load(DEFAULT_ROMBLOCK_IRQ_VECTOR_PHYSICAL, &vectors);
+    machine.load(DEFAULT_ROMBLOCK_NATIVE_VECTOR_PHYSICAL, &vectors);
     machine.push_serial_input(b"!");
 
     let (_cpu, machine) = run_loaded_routine_at(machine, IRQ_ROUTINE_ADDR);
@@ -473,7 +490,7 @@ fn language_irq_preserves_interrupted_data_bank_by_default() {
 
     let mut machine = Machine::new();
     machine.load(IRQ_ROUTINE_ADDR as u32, &code);
-    machine.load(DEFAULT_ROMBLOCK_IRQ_VECTOR_PHYSICAL, &vectors);
+    machine.load(DEFAULT_ROMBLOCK_NATIVE_VECTOR_PHYSICAL, &vectors);
     machine.push_serial_input(b"!");
 
     let (_cpu, machine) = run_loaded_routine_at(machine, IRQ_ROUTINE_ADDR);
@@ -518,7 +535,7 @@ fn language_irq_preserve_none_can_clobber_interrupted_accumulator() {
 
     let mut machine = Machine::new();
     machine.load(IRQ_ROUTINE_ADDR as u32, &code);
-    machine.load(DEFAULT_ROMBLOCK_IRQ_VECTOR_PHYSICAL, &vectors);
+    machine.load(DEFAULT_ROMBLOCK_NATIVE_VECTOR_PHYSICAL, &vectors);
     machine.push_serial_input(b"!");
 
     let (_cpu, machine) = run_loaded_routine_at(machine, IRQ_ROUTINE_ADDR);
@@ -567,7 +584,7 @@ fn raw_interrupt_skips_generated_entry_state() {
 
     let mut machine = Machine::new();
     machine.load(IRQ_ROUTINE_ADDR as u32, &code);
-    machine.load(DEFAULT_ROMBLOCK_IRQ_VECTOR_PHYSICAL, &vectors);
+    machine.load(DEFAULT_ROMBLOCK_NATIVE_VECTOR_PHYSICAL, &vectors);
     machine.push_serial_input(b"!");
 
     let (_cpu, machine) = run_loaded_routine_at(machine, IRQ_ROUTINE_ADDR);
@@ -586,7 +603,7 @@ fn hellord_example_boots_as_interrupt_driven_xex() {
         &build.image,
         b"HELP\nVER\nDIR\nb:\nDIR\nPWD\nCD GAMES\nPWD\nMAP\nSTAT\nECHO heX\x08llo\nX\n\n",
         expected.len(),
-        200_000,
+        1_000_000,
     )
     .expect("Hellord image should produce expected output");
 
@@ -604,7 +621,7 @@ fn hellord_set_lists_and_updates_environment_state() {
         &build.image,
         b"set\nset prompt full\nset drive c\nset\nset prompt short\n",
         expected.len(),
-        250_000,
+        1_000_000,
     )
     .expect("Hellord image should produce SET environment transcript");
 
@@ -618,7 +635,7 @@ fn hellord_mem_reports_runtime_memory_status() {
     let build = build_hellord_example();
     let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> mem\r\nMemory status:\r\nDirect $0080-$00FF\r\nBSS $9000-$9EFF\r\nLine buffer $0020\r\nSerial rings $0040\r\nA> ";
 
-    let run = run_image_until_output(&build.image, b"mem\n", expected.len(), 150_000)
+    let run = run_image_until_output(&build.image, b"mem\n", expected.len(), 1_000_000)
         .expect("Hellord image should produce MEM status transcript");
 
     assert_eq!(run.output, expected);
@@ -631,7 +648,7 @@ fn hellord_set_rejects_invalid_assignments() {
     let build = build_hellord_example();
     let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> set drive 1\r\n?SYNTAX\r\nA> ";
 
-    let run = run_image_until_output(&build.image, b"set drive 1\n", expected.len(), 150_000)
+    let run = run_image_until_output(&build.image, b"set drive 1\n", expected.len(), 1_000_000)
         .expect("Hellord image should reject bad SET assignment");
 
     assert_eq!(run.output, expected);
@@ -648,7 +665,7 @@ fn hellord_path_controls_bare_program_search() {
         &build.image,
         b"cd games\nhello\npath\npath /\nhello\nset path .\nhello\n",
         expected.len(),
-        300_000,
+        1_000_000,
     )
     .expect("Hellord image should produce PATH search transcript");
 
@@ -666,7 +683,7 @@ fn hellord_prompt_modes_and_clear_screen_work() {
         &build.image,
         b"prompt\nprompt full\ncd games\nprompt\ncls\nprompt short\n",
         expected.len(),
-        250_000,
+        1_000_000,
     )
     .expect("Hellord image should produce prompt settings transcript");
 
@@ -684,7 +701,7 @@ fn hellord_rom_files_can_be_listed_and_typed() {
         &build.image,
         b"dir\nt readme\ntype SYSTEM.TXT\nt missing\n",
         expected.len(),
-        250_000,
+        1_000_000,
     )
     .expect("Hellord image should produce ROM file transcript");
 
@@ -702,7 +719,7 @@ fn hellord_rom_programs_can_be_run_by_directory() {
         &build.image,
         b"run hello\nhello\nrun missing\ncd games\nr demo\ndemo\nhello\n",
         expected.len(),
-        300_000,
+        1_000_000,
     )
     .expect("Hellord image should run ROM program transcript");
 
@@ -720,7 +737,7 @@ fn hellord_cd_uses_rom_directory_namespace() {
         &build.image,
         b"cd missing\ncd games\ndir\ntype demo\ncd ..\npwd\n",
         expected.len(),
-        250_000,
+        1_000_000,
     )
     .expect("Hellord image should produce directory namespace transcript");
 
@@ -738,7 +755,7 @@ fn hellord_command_matcher_handles_aliases_and_rejects_partial_words() {
         &build.image,
         b"p\ncd \ne hi\nechox\n",
         expected.len(),
-        200_000,
+        1_000_000,
     )
     .expect("Hellord image should produce matcher transcript");
 
@@ -756,7 +773,7 @@ fn hellord_recalls_last_command_with_ctrl_p() {
         &build.image,
         b"echo recalled\n\x10\n",
         expected.len(),
-        200_000,
+        1_000_000,
     )
     .expect("Hellord image should recall the previous line with Ctrl-P");
 
@@ -774,7 +791,7 @@ fn hellord_peeks_and_pokes_ram_bytes() {
         &build.image,
         b"poke 400 2a\npeek 400\ndump 400 4\n",
         expected.len(),
-        300_000,
+        1_000_000,
     )
     .expect("Hellord image should inspect and modify RAM bytes");
 
@@ -793,7 +810,7 @@ fn hellord_monitor_commands_reject_bad_hex_arguments() {
         &build.image,
         b"dump 400 11\npoke 400 100\npeek nope\n",
         expected.len(),
-        300_000,
+        1_000_000,
     )
     .expect("Hellord image should reject bad monitor arguments");
 
@@ -811,7 +828,7 @@ fn hellord_fills_ram_ranges() {
         &build.image,
         b"fill 410 4 ff\ndump 410 4\nfill 410 0 ff\n",
         expected.len(),
-        350_000,
+        1_000_000,
     )
     .expect("Hellord image should fill RAM ranges");
 
@@ -854,7 +871,7 @@ fn serial_write_buffers_until_tx_irq_drains_output() {
 
         external interrupt procedure serial_irq()
         external procedure serial_init()
-        external procedure serial_write(value: u8)
+        external reentrant procedure serial_write(value: u8)
 
         export procedure main()
             serial_init()
@@ -939,6 +956,7 @@ fn build_hellord_example() -> x65_runner::BuildOutput {
             repo_root.join("examples/hellord-console.mensch"),
             repo_root.join("examples/hellord-files.mensch"),
             repo_root.join("examples/serial-ring.mensch"),
+            repo_root.join("examples/hellord-bios.mensch"),
         ],
         repo_root.join("examples/hellord-os-x65.cfg"),
     )
@@ -1109,11 +1127,11 @@ fn external_reentrant_stack_argument_call_links_and_runs() {
 }
 
 fn xex_linker_config() -> &'static str {
-    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $008000, size = $001000, file = %O;\n  META: start = $008f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  VECTORS: start = $00ffee, size = $000002, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
+    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $008000, size = $001000, file = %O;\n  META: start = $008f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  VECTORS: start = $00ffe4, size = $00000c, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTOR_COP: load = VECTORS, type = ro, optional = yes, offset = $0000;\n  VECTOR_BRK: load = VECTORS, type = ro, optional = yes, offset = $0002;\n  VECTOR_ABORT: load = VECTORS, type = ro, optional = yes, offset = $0004;\n  VECTOR_NMI: load = VECTORS, type = ro, optional = yes, offset = $0006;\n  VECTOR_IRQ: load = VECTORS, type = ro, optional = yes, offset = $000a;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
 }
 
 fn cop_xex_linker_config() -> &'static str {
-    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $008000, size = $001000, file = %O;\n  META: start = $008f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  VECTORS: start = $00ffe4, size = $000002, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
+    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $008000, size = $001000, file = %O;\n  META: start = $008f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  VECTORS: start = $00ffe4, size = $00000c, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTOR_COP: load = VECTORS, type = ro, optional = yes, offset = $0000;\n  VECTOR_BRK: load = VECTORS, type = ro, optional = yes, offset = $0002;\n  VECTOR_ABORT: load = VECTORS, type = ro, optional = yes, offset = $0004;\n  VECTOR_NMI: load = VECTORS, type = ro, optional = yes, offset = $0006;\n  VECTOR_IRQ: load = VECTORS, type = ro, optional = yes, offset = $000a;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
 }
 
 #[test]

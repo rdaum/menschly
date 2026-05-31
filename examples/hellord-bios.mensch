@@ -2,6 +2,12 @@ module HellordBios
 
 vector cop = bios_trap
 
+external reentrant procedure serial_write(value: u8)
+external function serial_has_data(): u8
+external function serial_read(): u8
+
+const BIOS_BCONSTAT = $0001
+const BIOS_BCONIN = $0002
 const BIOS_BCONOUT = $0003
 const BIOS_BCOSTAT = $0008
 const BIOS_DEV_FIRST = $0100
@@ -37,9 +43,40 @@ var serial_device: BiosDevice
 var bios_call: u16
 var bios_device: u16
 var bios_arg: u16
+var bios_arg_byte: u8
 var bios_status: u16
 
-export reentrant procedure bios_bconout(dev: u16, ch: u16)
+export reentrant function bios_bconstat(dev: u16): u16
+    var status: u16
+    asm "rep #$30"
+    asm ".a16"
+    asm ".i16"
+    asm "lda $05,s"
+    asm "tax"
+    asm "lda #$0001"
+    asm "cop $0d"
+    asm "sta $01,s"
+    return status
+end
+
+export reentrant function bios_bconin(dev: u16): u8
+    var status: u8
+    asm "rep #$30"
+    asm ".a16"
+    asm ".i16"
+    asm "lda $04,s"
+    asm "tax"
+    asm "lda #$0002"
+    asm "cop $0d"
+    asm "sep #$20"
+    asm ".a8"
+    asm "sta $01,s"
+    asm "rep #$20"
+    asm ".a16"
+    return status
+end
+
+export reentrant procedure bios_bconout(dev: u16, ch: u8)
     asm "rep #$30"
     asm ".a16"
     asm ".i16"
@@ -167,14 +204,14 @@ export procedure bios_init_registry()
     return
 end
 
-procedure bios_ensure_registry()
+reentrant procedure bios_ensure_registry()
     if registry_initialized == 0
         bios_init_registry()
     end
     return
 end
 
-function bios_find_device(): u16
+reentrant function bios_find_device(): u16
     bios_ensure_registry()
     if bios_first_device == bios_device
         if serial_device.id == bios_device
@@ -187,19 +224,74 @@ function bios_find_device(): u16
     end
 end
 
-function bios_dispatch_bconout(): u16
-    direct var driver: u16
+reentrant function bios_dispatch_bconstat(): u16
+    var driver: u16
+    if bios_find_device() != 0
+        if serial_device.kind == DEVICE_KIND_CHAR
+            driver = serial_device.driver
+            if driver == DEVICE_DRIVER_SERIAL
+                if serial_device.flags & DEVICE_FLAG_READ != 0
+                    if serial_has_data() != 0
+                        return $ffff
+                    else
+                        return 0
+                    end
+                else
+                    return 0
+                end
+            else
+                return 0
+            end
+        else
+            return 0
+        end
+    else
+        return 0
+    end
+end
+
+reentrant function bios_dispatch_bconin(): u16
+    var driver: u16
+    if bios_find_device() != 0
+        if serial_device.kind == DEVICE_KIND_CHAR
+            driver = serial_device.driver
+            if driver == DEVICE_DRIVER_SERIAL
+                if serial_device.flags & DEVICE_FLAG_READ != 0
+                    if serial_has_data() != 0
+                        bios_arg_byte = serial_read()
+                        bios_status = 0
+                        asm "sep #$20"
+                        asm ".a8"
+                        asm "lda bios_arg_byte"
+                        asm "sta bios_status"
+                        asm "rep #$20"
+                        asm ".a16"
+                        return bios_status
+                    else
+                        return 0
+                    end
+                else
+                    return 0
+                end
+            else
+                return 0
+            end
+        else
+            return 0
+        end
+    else
+        return 0
+    end
+end
+
+reentrant function bios_dispatch_bconout(): u16
+    var driver: u16
     if bios_find_device() != 0
         if serial_device.kind == DEVICE_KIND_CHAR
             driver = serial_device.driver
             if driver == DEVICE_DRIVER_SERIAL
                 if serial_device.flags & DEVICE_FLAG_WRITE != 0
-                    asm "sep #$20"
-                    asm ".a8"
-                    asm "lda bios_arg"
-                    asm "sta f:$009f57"
-                    asm "rep #$20"
-                    asm ".a16"
+                    serial_write(bios_arg_byte)
                     return 0
                 else
                     return $ffff
@@ -215,8 +307,8 @@ function bios_dispatch_bconout(): u16
     end
 end
 
-function bios_dispatch_bcostat(): u16
-    direct var driver: u16
+reentrant function bios_dispatch_bcostat(): u16
+    var driver: u16
     if bios_find_device() != 0
         if serial_device.kind == DEVICE_KIND_CHAR
             driver = serial_device.driver
@@ -237,7 +329,7 @@ function bios_dispatch_bcostat(): u16
     end
 end
 
-function bios_dispatch_device_next(): u16
+reentrant function bios_dispatch_device_next(): u16
     if bios_find_device() != 0
         return serial_device.next_sibling
     else
@@ -245,7 +337,7 @@ function bios_dispatch_device_next(): u16
     end
 end
 
-function bios_dispatch_device_parent(): u16
+reentrant function bios_dispatch_device_parent(): u16
     if bios_find_device() != 0
         return serial_device.parent
     else
@@ -253,7 +345,7 @@ function bios_dispatch_device_parent(): u16
     end
 end
 
-function bios_dispatch_device_child(): u16
+reentrant function bios_dispatch_device_child(): u16
     if bios_find_device() != 0
         return serial_device.first_child
     else
@@ -261,7 +353,7 @@ function bios_dispatch_device_child(): u16
     end
 end
 
-function bios_dispatch_device_kind(): u16
+reentrant function bios_dispatch_device_kind(): u16
     if bios_find_device() != 0
         return serial_device.kind
     else
@@ -269,7 +361,7 @@ function bios_dispatch_device_kind(): u16
     end
 end
 
-function bios_dispatch_device_flags(): u16
+reentrant function bios_dispatch_device_flags(): u16
     if bios_find_device() != 0
         return serial_device.flags
     else
@@ -277,7 +369,7 @@ function bios_dispatch_device_flags(): u16
     end
 end
 
-function bios_dispatch_device_driver(): u16
+reentrant function bios_dispatch_device_driver(): u16
     if bios_find_device() != 0
         return serial_device.driver
     else
@@ -292,7 +384,17 @@ interrupt(preserve = p, dbr) procedure bios_trap()
     asm "sta bios_call"
     asm "stx bios_device"
     asm "sty bios_arg"
-    if bios_call == BIOS_BCONOUT
+    asm "sep #$20"
+    asm ".a8"
+    asm "lda bios_arg"
+    asm "sta bios_arg_byte"
+    asm "rep #$20"
+    asm ".a16"
+    if bios_call == BIOS_BCONSTAT
+        bios_status = bios_dispatch_bconstat()
+    elsif bios_call == BIOS_BCONIN
+        bios_status = bios_dispatch_bconin()
+    elsif bios_call == BIOS_BCONOUT
         bios_status = bios_dispatch_bconout()
     elsif bios_call == BIOS_BCOSTAT
         bios_status = bios_dispatch_bcostat()

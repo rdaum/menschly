@@ -87,15 +87,16 @@ pub fn emit_module(module: &AsmModule) -> String {
     }
 
     if !module.vectors.is_empty() {
-        out.push_str(".segment \"VECTORS\"\n");
         for vector in &module.vectors {
+            out.push_str(".segment \"");
+            out.push_str(vector_segment(&vector.name));
+            out.push_str("\"\n");
             out.push_str("__vector_");
             out.push_str(&vector.name);
             out.push_str(": .addr ");
             out.push_str(&vector.routine);
-            out.push('\n');
+            out.push_str("\n\n");
         }
-        out.push('\n');
     }
 
     if has_module_metadata(module) {
@@ -112,6 +113,17 @@ pub fn emit_module(module: &AsmModule) -> String {
     }
 
     out
+}
+
+fn vector_segment(name: &str) -> &'static str {
+    match name {
+        "cop" => "VECTOR_COP",
+        "brk" => "VECTOR_BRK",
+        "abort" => "VECTOR_ABORT",
+        "nmi" => "VECTOR_NMI",
+        "irq" => "VECTOR_IRQ",
+        _ => "VECTORS",
+    }
 }
 
 fn has_module_metadata(module: &AsmModule) -> bool {

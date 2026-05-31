@@ -637,6 +637,37 @@ fn generated_frontend_reentrant_stack_function_call_runs() {
 }
 
 #[test]
+fn generated_frontend_reentrant_stack_temps_keep_parameter_offsets() {
+    let binary = assemble_source_fixture(
+        "frontend-reentrant-stack-temps-keep-parameter-offsets",
+        "
+        module ReentrantStackTempDemo
+        fixed($040016) volatile var byte_out: u8
+        fixed($040018) volatile var word_out: u16
+
+        export far procedure main()
+            write_value('K', 5)
+            return
+        end
+
+        reentrant procedure write_value(value: u8, add: u16)
+            var tmp: u16
+            tmp = add + 1 & 63
+            word_out = tmp
+            byte_out = value
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x040016), b'K');
+    assert_eq!(memory.byte(0x040018), 6);
+    assert_eq!(memory.byte(0x040019), 0);
+}
+
+#[test]
 fn generated_frontend_reentrant_stack_local_call_runs() {
     let binary = assemble_source_fixture(
         "frontend-reentrant-stack-local-call",
