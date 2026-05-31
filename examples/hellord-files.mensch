@@ -12,10 +12,17 @@ procedure files_write_entry(name: near ^u8, size: u16)
     return
 end
 
-export procedure files_write_dir()
+export procedure files_write_root_dir()
     files_write_entry("README.TXT", 49)
     files_write_entry("SYSTEM.TXT", 65)
-    console_write_text("2 file(s)\r\n")
+    console_write_text("GAMES      <DIR>\r\n")
+    console_write_text("2 file(s)  1 dir(s)\r\n")
+    return
+end
+
+export procedure files_write_games_dir()
+    files_write_entry("DEMO.TXT", 48)
+    console_write_text("1 file(s)  0 dir(s)\r\n")
     return
 end
 
@@ -29,7 +36,17 @@ export procedure files_type_system()
     return
 end
 
+export procedure files_type_demo()
+    console_write_text("No games yet, but the directory layer works.\r\n")
+    return
+end
+
 export procedure files_write_not_found()
     console_write_text("File not found\r\n")
+    return
+end
+
+export procedure files_write_path_not_found()
+    console_write_text("Path not found\r\n")
     return
 end

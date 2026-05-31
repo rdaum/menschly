@@ -11,10 +11,13 @@ external procedure console_write_version()
 external procedure console_prompt_drive(drive: u8)
 external procedure console_write_unknown()
 external procedure console_write_flag(name: u8, value: u8)
-external procedure files_write_dir()
+external procedure files_write_root_dir()
+external procedure files_write_games_dir()
 external procedure files_type_readme()
 external procedure files_type_system()
+external procedure files_type_demo()
 external procedure files_write_not_found()
+external procedure files_write_path_not_found()
 external function serial_rx_overflow(): u8
 external function serial_tx_overflow(): u8
 
@@ -33,6 +36,9 @@ const COMMAND_EMPTY = 255
 const FILE_UNKNOWN = 0
 const FILE_README = 1
 const FILE_SYSTEM = 2
+const FILE_DEMO = 3
+const DIR_ROOT = 0
+const DIR_GAMES = 1
 const LINE_LIMIT = 31
 const PATH_LIMIT = 15
 const BACKSPACE = $08
@@ -40,6 +46,7 @@ const DELETE = $7f
 const LOWERCASE_DELTA = 32
 
 var current_drive: u8
+var current_dir: u8
 var path_len: u16
 var line_len: u16
 var current_path: [16]u8
@@ -88,6 +95,18 @@ end
 procedure init_path()
     current_path[0] = '/'
     path_len = 1
+    current_dir = DIR_ROOT
+    return
+end
+
+procedure set_games_path()
+    current_path[0] = 'G'
+    current_path[1] = 'A'
+    current_path[2] = 'M'
+    current_path[3] = 'E'
+    current_path[4] = 'S'
+    path_len = 5
+    current_dir = DIR_GAMES
     return
 end
 
@@ -418,7 +437,11 @@ end
 procedure write_dir()
     console_write_text("Directory of ")
     write_path()
-    files_write_dir()
+    if current_dir == DIR_ROOT
+        files_write_root_dir()
+    else
+        files_write_games_dir()
+    end
     return
 end
 
@@ -445,14 +468,22 @@ end
 function type_file_code(): u8
     var start: u16
     start = argument_start("T", "TYPE")
-    if argument_word_matches(start, "README.TXT") != 0
-        return FILE_README
-    elsif argument_word_matches(start, "README") != 0
-        return FILE_README
-    elsif argument_word_matches(start, "SYSTEM.TXT") != 0
-        return FILE_SYSTEM
-    elsif argument_word_matches(start, "SYSTEM") != 0
-        return FILE_SYSTEM
+    if current_dir == DIR_ROOT
+        if argument_word_matches(start, "README.TXT") != 0
+            return FILE_README
+        elsif argument_word_matches(start, "README") != 0
+            return FILE_README
+        elsif argument_word_matches(start, "SYSTEM.TXT") != 0
+            return FILE_SYSTEM
+        elsif argument_word_matches(start, "SYSTEM") != 0
+            return FILE_SYSTEM
+        else
+            return FILE_UNKNOWN
+        end
+    elsif argument_word_matches(start, "DEMO.TXT") != 0
+        return FILE_DEMO
+    elsif argument_word_matches(start, "DEMO") != 0
+        return FILE_DEMO
     else
         return FILE_UNKNOWN
     end
@@ -465,6 +496,8 @@ procedure type_file()
         files_type_readme()
     elsif code == FILE_SYSTEM
         files_type_system()
+    elsif code == FILE_DEMO
+        files_type_demo()
     else
         files_write_not_found()
     end
@@ -472,23 +505,16 @@ procedure type_file()
 end
 
 procedure change_dir()
-    var src: u16
-    var dst: u16
     if line_len == 2
         init_path()
+    elsif argument_word_matches(3, "/") != 0
+        init_path()
+    elsif argument_word_matches(3, "..") != 0
+        init_path()
+    elsif argument_word_matches(3, "GAMES") != 0
+        set_games_path()
     else
-        src = 3
-        dst = 0
-        while src != line_len and dst < PATH_LIMIT
-            current_path[dst] = command_buffer[src]
-            src = src + 1
-            dst = dst + 1
-        end
-        if dst == 0
-            init_path()
-        else
-            path_len = dst
-        end
+        files_write_path_not_found()
     end
     return
 end
