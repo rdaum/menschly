@@ -110,6 +110,16 @@ export procedure console_write_help()
     serial_write('h')
     serial_write('o')
     console_newline()
+    serial_write('S')
+    serial_write(' ')
+    serial_write(' ')
+    serial_write('s')
+    serial_write('t')
+    serial_write('a')
+    serial_write('t')
+    serial_write('u')
+    serial_write('s')
+    console_newline()
     return
 end
 
@@ -163,6 +173,19 @@ export procedure console_write_unknown()
     serial_write('T')
     serial_write('A')
     serial_write('X')
+    console_newline()
+    return
+end
+
+export procedure console_write_flag(name: u8, value: u8)
+    serial_write(name)
+    serial_write(':')
+    serial_write(' ')
+    if value == 0
+        serial_write('0')
+    else
+        serial_write('1')
+    end
     console_newline()
     return
 end

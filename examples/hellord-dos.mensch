@@ -9,12 +9,16 @@ external procedure console_write_help()
 external procedure console_write_version()
 external procedure console_write_dir()
 external procedure console_write_unknown()
+external procedure console_write_flag(name: u8, value: u8)
+external function serial_rx_overflow(): u8
+external function serial_tx_overflow(): u8
 
 const COMMAND_UNKNOWN = 0
 const COMMAND_HELP = 1
 const COMMAND_VERSION = 2
 const COMMAND_DIR = 3
 const COMMAND_ECHO = 4
+const COMMAND_STATUS = 5
 const COMMAND_EMPTY = 255
 const LINE_LIMIT = 31
 const BACKSPACE = $08
@@ -46,10 +50,14 @@ function command_code(): u8
                 if is_dir() != 0
                     return COMMAND_DIR
                 else
-                    if is_echo() != 0
-                        return COMMAND_ECHO
+                    if is_status() != 0
+                        return COMMAND_STATUS
                     else
-                        return COMMAND_UNKNOWN
+                        if is_echo() != 0
+                            return COMMAND_ECHO
+                        else
+                            return COMMAND_UNKNOWN
+                        end
                     end
                 end
             end
@@ -161,6 +169,30 @@ function is_echo(): u8
     end
 end
 
+function is_status(): u8
+    if line_len == 1
+        return char_matches(0, 'S', 's')
+    else
+        if line_len == 4
+            if char_matches(0, 'S', 's') == 0
+                return 0
+            else
+                if char_matches(1, 'T', 't') == 0
+                    return 0
+                else
+                    if char_matches(2, 'A', 'a') == 0
+                        return 0
+                    else
+                        return char_matches(3, 'T', 't')
+                    end
+                end
+            end
+        else
+            return 0
+        end
+    end
+end
+
 function echo_start(): u16
     if line_len == 1
         return 1
@@ -238,15 +270,25 @@ procedure dispatch_line()
                 if code == COMMAND_DIR
                     console_write_dir()
                 else
-                    if code == COMMAND_ECHO
-                        echo_line()
+                    if code == COMMAND_STATUS
+                        write_status()
                     else
-                        console_write_unknown()
+                        if code == COMMAND_ECHO
+                            echo_line()
+                        else
+                            console_write_unknown()
+                        end
                     end
                 end
             end
         end
     end
+    return
+end
+
+procedure write_status()
+    console_write_flag('R', serial_rx_overflow())
+    console_write_flag('T', serial_tx_overflow())
     return
 end
 

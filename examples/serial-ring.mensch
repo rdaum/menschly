@@ -62,6 +62,14 @@ export function serial_read(): u8
     return value
 end
 
+export function serial_rx_overflow(): u8
+    return rx_overflow
+end
+
+export function serial_tx_overflow(): u8
+    return tx_overflow
+end
+
 export interrupt procedure serial_irq()
     if serial_status & RX_EMPTY == 0
         rx_next = rx_head + 1 & RING_MASK
