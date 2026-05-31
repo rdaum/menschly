@@ -1122,6 +1122,7 @@ fn apply_interrupt_preserve_name(
         "x" => preserve.x = true,
         "y" => preserve.y = true,
         "p" => preserve.p = true,
+        "dbr" => preserve.dbr = true,
         other => {
             return Err(FrontendError::Parse(format!(
                 "unknown interrupt preserve register {other}"
@@ -2331,12 +2332,14 @@ mod tests {
         assert!(asm.contains("\t.asciiz \"platform=c256\"\n"));
         assert!(asm.contains("\tnop\n"));
         assert!(asm.contains("\tphp\n"));
+        assert!(asm.contains("\tphb\n"));
         assert!(asm.contains("\tpha\n"));
         assert!(asm.contains("\tphx\n"));
         assert!(asm.contains("\tphy\n"));
         assert!(asm.contains("\tply\n"));
         assert!(asm.contains("\tplx\n"));
         assert!(asm.contains("\tpla\n"));
+        assert!(asm.contains("\tplb\n"));
         assert!(asm.contains("\tplp\n"));
         assert!(asm.contains("\trti\n"));
     }
@@ -2359,7 +2362,8 @@ mod tests {
                 a: true,
                 x: true,
                 y: false,
-                p: false
+                p: false,
+                dbr: false
             }
         );
 
@@ -2371,8 +2375,44 @@ mod tests {
         assert!(asm.contains("\tphx\n"));
         assert!(!asm.contains("\tphy\n"));
         assert!(!asm.contains("\tphp\n"));
+        assert!(!asm.contains("\tphb\n"));
         assert!(asm.contains("\tplx\n"));
         assert!(asm.contains("\tpla\n"));
+    }
+
+    #[test]
+    fn parses_interrupt_preserve_dbr_attribute() {
+        let source = "
+            module Kernel
+            vector irq = irq
+
+            interrupt(preserve = dbr) procedure irq()
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        assert_eq!(
+            module.routines[0].interrupt_preserve,
+            InterruptPreserve {
+                a: false,
+                x: false,
+                y: false,
+                p: false,
+                dbr: true
+            }
+        );
+
+        let (lowered, _assignment) =
+            crate::lower_65816::lower_module_with_storage(&module).unwrap();
+        let asm = crate::ca65::emit_module(&lowered);
+
+        assert!(asm.contains("\tphb\n"));
+        assert!(asm.contains("\tplb\n"));
+        assert!(!asm.contains("\tpha\n"));
+        assert!(!asm.contains("\tphx\n"));
+        assert!(!asm.contains("\tphy\n"));
+        assert!(!asm.contains("\tphp\n"));
     }
 
     #[test]
@@ -2400,6 +2440,7 @@ mod tests {
         assert!(!asm.contains("\tphx\n"));
         assert!(!asm.contains("\tphy\n"));
         assert!(!asm.contains("\tphp\n"));
+        assert!(!asm.contains("\tphb\n"));
         assert!(asm.contains("\trti\n"));
     }
 

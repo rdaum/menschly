@@ -59,11 +59,12 @@ $(frame_size + 3),s ...      parameters in declaration order
 
 ## Interrupts
 
-Generated interrupt handlers preserve `A`, `X`, `Y`, and `P` by default, force
-the generated handler body to the compiler's normal `A8`/`I16` entry mode, and
-return with `rti`. This makes `interrupt procedure` safe for ordinary generated
-foreground code: an interrupt may arrive while foreground code is carrying a
-function return value, call argument, or loop/index state in CPU registers.
+Generated interrupt handlers preserve `A`, `X`, `Y`, `P`, and `DBR` by default,
+force the generated handler body to the compiler's normal `A8`/`I16` entry mode,
+set `DBR` to the handler code bank, and return with `rti`. This makes
+`interrupt procedure` safe for ordinary generated foreground code: an interrupt
+may arrive while foreground code is carrying a function return value, call
+argument, loop/index state, or data-bank selection in CPU registers.
 
 Latency-sensitive handlers can override the generated save set:
 
@@ -72,9 +73,11 @@ interrupt(preserve = a, x) procedure scanline()
 interrupt(preserve = none) procedure hand_tuned_irq()
 ```
 
-The current preserve names are `a`, `x`, `y`, and `p`; `default` expands to the
-default save set. `preserve = none` is an expert mode for handlers whose
-clobber contract is managed outside the compiler-generated ABI.
+The current preserve names are `a`, `x`, `y`, `p`, and `dbr`; `default` expands
+to the default save set. `preserve = none` is an expert mode for handlers whose
+clobber contract is managed outside the compiler-generated save/restore ABI; the
+compiler still establishes its handler body entry mode before generated
+statements.
 
 Interrupt handlers may call parameterless routines, or parameterized
 `reentrant` routines that use stack arguments. The frontend rejects calls from

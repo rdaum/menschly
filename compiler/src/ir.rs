@@ -207,6 +207,7 @@ pub struct InterruptPreserve {
     pub x: bool,
     pub y: bool,
     pub p: bool,
+    pub dbr: bool,
 }
 
 impl InterruptPreserve {
@@ -215,6 +216,7 @@ impl InterruptPreserve {
         x: false,
         y: false,
         p: false,
+        dbr: false,
     };
 
     pub const DEFAULT: Self = Self {
@@ -222,6 +224,7 @@ impl InterruptPreserve {
         x: true,
         y: true,
         p: true,
+        dbr: true,
     };
 
     pub fn default_for_abi(abi: Abi) -> Self {
@@ -233,7 +236,7 @@ impl InterruptPreserve {
     }
 
     pub fn is_empty(self) -> bool {
-        !self.a && !self.x && !self.y && !self.p
+        !self.a && !self.x && !self.y && !self.p && !self.dbr
     }
 }
 

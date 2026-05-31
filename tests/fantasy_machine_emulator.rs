@@ -349,6 +349,102 @@ fn language_irq_preserves_interrupted_accumulator_by_default() {
 }
 
 #[test]
+fn language_irq_preserves_interrupted_data_bank_by_default() {
+    let (code, vectors) = assemble_source_with_vectors_fixture(
+        "language-uart-irq-preserves-dbr",
+        &format!(
+            "
+            module UartIrqPreserveDbrDemo
+            vector irq = irq
+            fixed(${uart_ctrl:06x}) volatile var uart_ctrl: u8
+            fixed(${serial_data:06x}) volatile var serial_data: u8
+            fixed($000294) volatile var seen: u8
+
+            export far procedure main()
+                asm \"sei\"
+                uart_ctrl = ${rx_irq:02x}
+                asm \"sep #$20\"
+                asm \"lda #$01\"
+                asm \"pha\"
+                asm \"plb\"
+                asm \"lda #$7e\"
+                asm \"cli\"
+                asm \"nop\"
+                asm \"sta $9000\"
+                return
+            end
+
+            interrupt procedure irq()
+                seen = serial_data
+                asm \"lda #$00\"
+                asm \"pha\"
+                asm \"plb\"
+                return
+            end
+            ",
+            uart_ctrl = USB_UART_CTRL,
+            serial_data = USB_UART_DATA,
+            rx_irq = USB_UART_CTRL_IRQ_RX_NOT_EMPTY,
+        ),
+    );
+
+    let mut machine = Machine::new();
+    machine.load(IRQ_ROUTINE_ADDR as u32, &code);
+    machine.load(DEFAULT_ROMBLOCK_IRQ_VECTOR_PHYSICAL, &vectors);
+    machine.push_serial_input(b"!");
+
+    let (_cpu, machine) = run_loaded_routine_at(machine, IRQ_ROUTINE_ADDR);
+
+    assert_eq!(machine.byte(0x000294), b'!');
+    assert_eq!(machine.byte(0x019000), 0x7e);
+    assert_ne!(machine.byte(0x009000), 0x7e);
+}
+
+#[test]
+fn language_irq_preserve_none_can_clobber_interrupted_accumulator() {
+    let (code, vectors) = assemble_source_with_vectors_fixture(
+        "language-uart-irq-preserve-none-clobbers-a",
+        &format!(
+            "
+            module UartIrqPreserveNoneDemo
+            vector irq = irq
+            fixed(${uart_ctrl:06x}) volatile var uart_ctrl: u8
+            fixed(${serial_data:06x}) volatile var serial_data: u8
+            fixed($000296) volatile var seen: u8
+
+            export far procedure main()
+                asm \"sei\"
+                uart_ctrl = ${rx_irq:02x}
+                asm \"lda #$5a\"
+                asm \"cli\"
+                asm \"nop\"
+                asm \"sta ${serial_data:06x}\"
+                return
+            end
+
+            interrupt(preserve = none) procedure irq()
+                seen = serial_data
+                return
+            end
+            ",
+            uart_ctrl = USB_UART_CTRL,
+            serial_data = USB_UART_DATA,
+            rx_irq = USB_UART_CTRL_IRQ_RX_NOT_EMPTY,
+        ),
+    );
+
+    let mut machine = Machine::new();
+    machine.load(IRQ_ROUTINE_ADDR as u32, &code);
+    machine.load(DEFAULT_ROMBLOCK_IRQ_VECTOR_PHYSICAL, &vectors);
+    machine.push_serial_input(b"!");
+
+    let (_cpu, machine) = run_loaded_routine_at(machine, IRQ_ROUTINE_ADDR);
+
+    assert_eq!(machine.byte(0x000296), b'!');
+    assert_eq!(machine.serial_output(), b"!");
+}
+
+#[test]
 fn hellord_example_boots_as_interrupt_driven_xex() {
     let build = build_hellord_example();
     let expected = b"Hellord!\r\nabc123\n";

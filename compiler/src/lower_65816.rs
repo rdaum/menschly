@@ -164,6 +164,8 @@ fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
 
     emit_interrupt_prologue(&mut out.insts, routine.interrupt_preserve);
     if matches!(routine.abi, Abi::Interrupt) {
+        out.insts.push(AsmInst::Phk);
+        out.insts.push(AsmInst::Plb);
         out.insts.push(AsmInst::Mode(Mode::Acc8Index16));
     }
     emit_stack_frame_adjust(
@@ -375,6 +377,9 @@ fn emit_interrupt_prologue(out: &mut Vec<AsmInst>, preserve: InterruptPreserve) 
     if preserve.p {
         out.push(AsmInst::Php);
     }
+    if preserve.dbr {
+        out.push(AsmInst::Phb);
+    }
     if preserve.a || preserve.x || preserve.y {
         out.push(AsmInst::Mode(Mode::Acc16Index16));
     }
@@ -404,6 +409,9 @@ fn emit_interrupt_epilogue(out: &mut Vec<AsmInst>, preserve: InterruptPreserve) 
     }
     if preserve.a {
         out.push(AsmInst::Pla);
+    }
+    if preserve.dbr {
+        out.push(AsmInst::Plb);
     }
     if preserve.p {
         out.push(AsmInst::Plp);
