@@ -211,6 +211,12 @@ fn peephole_at(insts: &[AsmInst]) -> Option<(Vec<AsmInst>, usize)> {
         }
     }
 
+    if let [AsmInst::Lda(_), AsmInst::Sta(store), AsmInst::Lda(reload), ..] = insts {
+        if store == reload && accumulator_cached_operand(store) {
+            return Some((vec![insts[0].clone(), insts[1].clone()], 3));
+        }
+    }
+
     None
 }
 
@@ -252,6 +258,13 @@ fn inc_dec_operand(operand: &Operand) -> bool {
             | Operand::AbsoluteIndexedX(Symbol::Address(0..=0xffff))
             | Operand::Direct(_)
             | Operand::DirectIndexedX(_)
+    )
+}
+
+fn accumulator_cached_operand(operand: &Operand) -> bool {
+    matches!(
+        operand,
+        Operand::Direct(_) | Operand::DirectIndexedX(_) | Operand::StackRelative(_)
     )
 }
 
@@ -398,6 +411,47 @@ mod tests {
             vec![
                 AsmInst::Mode(Mode::Acc8Index16),
                 AsmInst::Dec(Operand::Direct(Symbol::Named("counter".to_owned()))),
+            ]
+        );
+    }
+
+    #[test]
+    fn removes_redundant_direct_reload_after_store() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc16Index16),
+            AsmInst::Lda(Operand::Immediate(Immediate::Word(0x1234))),
+            AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("slot".to_owned()))),
+            AsmInst::Adc(Operand::Immediate(Immediate::Word(1))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc16Index16),
+                AsmInst::Lda(Operand::Immediate(Immediate::Word(0x1234))),
+                AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
+                AsmInst::Adc(Operand::Immediate(Immediate::Word(1))),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_absolute_named_reload_after_store() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Lda(Operand::Immediate(Immediate::Byte(0x41))),
+            AsmInst::Sta(Operand::Absolute(Symbol::Named("maybe_volatile".to_owned()))),
+            AsmInst::Lda(Operand::Absolute(Symbol::Named("maybe_volatile".to_owned()))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Lda(Operand::Immediate(Immediate::Byte(0x41))),
+                AsmInst::Sta(Operand::Absolute(Symbol::Named("maybe_volatile".to_owned()))),
+                AsmInst::Lda(Operand::Absolute(Symbol::Named("maybe_volatile".to_owned()))),
             ]
         );
     }
