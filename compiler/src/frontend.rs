@@ -130,6 +130,10 @@ pub enum Stmt {
         cond: Cond,
         body: Vec<Stmt>,
     },
+    Repeat {
+        body: Vec<Stmt>,
+        until: Cond,
+    },
     Return(Option<Expr>),
     InlineAsm(String),
 }
@@ -940,6 +944,11 @@ impl Parser {
             let body = self.parse_block()?;
             return Ok(Stmt::While { cond, body });
         }
+        if self.take_keyword("repeat") {
+            let (body, _terminator) = self.parse_block_until(&["until"])?;
+            let until = self.parse_cond()?;
+            return Ok(Stmt::Repeat { body, until });
+        }
         if self.take_keyword("return") {
             let value = if self.next_is_block_end() || self.at_eof() {
                 None
@@ -1709,6 +1718,15 @@ impl<'a> RoutineLowerer<'a> {
                 }
                 self.body.push(IrInst::Branch { target: start });
                 self.body.push(IrInst::Label(done));
+                Ok(())
+            }
+            Stmt::Repeat { body, until } => {
+                let start = self.parent.label("repeat_start");
+                self.body.push(IrInst::Label(start.clone()));
+                for stmt in body {
+                    self.lower_stmt(stmt)?;
+                }
+                self.lower_branch_if_false(until, start)?;
                 Ok(())
             }
             Stmt::Return(value) => self.lower_return(value.as_ref()),
@@ -2572,6 +2590,31 @@ mod tests {
                 .count()
                 >= 2
         );
+    }
+
+    #[test]
+    fn compiles_repeat_until_loop() {
+        let source = "
+            module Loops
+            export procedure main()
+                var x: u8
+                repeat
+                    x = x + 1
+                until x >= 3
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        let body = &module.routines[0].body;
+
+        assert!(body.iter().any(|inst| matches!(
+            inst,
+            IrInst::Label(label) if label.0.starts_with("__repeat_start_")
+        )));
+        assert!(body
+            .iter()
+            .any(|inst| matches!(inst, IrInst::BranchIfCarryClear { .. })));
     }
 
     #[test]

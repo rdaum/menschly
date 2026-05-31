@@ -196,7 +196,7 @@ procedure read_line()
     var done: u8
     line_len = 0
     done = 0
-    while done == 0
+    repeat
         ch = console_read()
         if ch == '\r'
             console_newline()
@@ -221,7 +221,7 @@ procedure read_line()
                 end
             end
         end
-    end
+    until done != 0
     return
 end
 
