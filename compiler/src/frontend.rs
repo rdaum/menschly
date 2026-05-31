@@ -999,7 +999,9 @@ impl Parser {
             self.expect(TokenKind::Colon)?;
             let ty = self.parse_type()?;
             if fields.iter().any(|field: &Field| field.name == name) {
-                return Err(FrontendError::Parse(format!("duplicate record field {name}")));
+                return Err(FrontendError::Parse(format!(
+                    "duplicate record field {name}"
+                )));
             }
             fields.push(Field {
                 name,
@@ -2035,11 +2037,26 @@ impl<'a> RoutineLowerer<'a> {
                 let result = sig.result_type(name)?;
                 ensure_assignable(expected, &result)?;
                 self.lower_call_args(name, args, &sig.params)?;
+                let capture_before_cleanup = matches!(sig.abi, Abi::Reentrant)
+                    && !sig.params.is_empty()
+                    && matches!(dst, Value::Accumulator);
+                let call_dst = if capture_before_cleanup {
+                    self.parent.temp()
+                } else {
+                    dst.clone()
+                };
                 self.body.push(IrInst::CallFunction {
                     name: name.clone(),
-                    dst,
+                    dst: call_dst.clone(),
                 });
                 self.cleanup_call_args(name, &sig.params)?;
+                if capture_before_cleanup {
+                    self.body.push(IrInst::Move {
+                        width: width_for_type(&result)?,
+                        dst,
+                        src: call_dst,
+                    });
+                }
                 Ok(())
             }
             Expr::ResultOk(value) => {
@@ -2353,14 +2370,6 @@ impl<'a> RoutineLowerer<'a> {
             return Err(FrontendError::Type(format!(
                 "interrupt routine {} cannot call parameterized routine {name}; direct-page parameters are not interrupt-safe",
                 self.routine.name
-            )));
-        }
-        if matches!(sig.abi, Abi::Reentrant)
-            && !sig.params.is_empty()
-            && matches!(sig.kind, RoutineDeclKind::Function { .. })
-        {
-            return Err(FrontendError::Type(format!(
-                "reentrant function {name} with parameters is not supported yet"
             )));
         }
         for (arg, param_ty) in args.iter().zip(&sig.params) {

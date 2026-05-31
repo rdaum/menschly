@@ -266,10 +266,15 @@ fn language_bios_bconout_runs_through_cop_syscall() {
         "
         module BiosSyscallCaller
         application main
+        fixed($000294) volatile var status: u16
         external reentrant procedure bios_bconout(dev: u16, ch: u16)
+        external reentrant function bios_bcostat(dev: u16): u16
 
         procedure main()
             bios_bconout(2, $0042)
+            bios_bconout(1, $0058)
+            status = bios_bcostat(2)
+            bios_bconout(2, $0021)
             return
         end
         ",
@@ -284,10 +289,12 @@ fn language_bios_bconout_runs_through_cop_syscall() {
     )
     .expect("BIOS syscall image should build");
 
-    let run = run_image_until_output(&build.image, b"", 1, 50_000)
-        .expect("BIOS syscall image should write one console byte");
+    let run = run_image_until_output(&build.image, b"", 2, 50_000)
+        .expect("BIOS syscall image should write two console bytes");
 
-    assert_eq!(run.output, b"B");
+    assert_eq!(run.output, b"B!");
+    assert_eq!(run.machine.byte(0x000294), 0xff);
+    assert_eq!(run.machine.byte(0x000295), 0xff);
 }
 
 #[test]

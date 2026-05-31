@@ -132,3 +132,16 @@ Y = character
 ```
 
 The call writes the low byte of `Y` to the console when `X == 2`.
+
+`Bcostat` is also implemented for the same registered console device:
+
+```text
+COP #$0d
+A = $0008       ; Bcostat
+X = device      ; 2 is the console device
+```
+
+It returns `$ffff` in `A` when the device can accept output and `0` otherwise.
+The BIOS implementation routes these calls through a small typed device
+registry. The initial registry has one character device, TOS `CON` device `2`,
+backed by the x65-alike USB UART.

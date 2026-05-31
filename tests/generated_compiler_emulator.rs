@@ -605,6 +605,38 @@ fn generated_frontend_reentrant_stack_word_parameter_call_runs() {
 }
 
 #[test]
+fn generated_frontend_reentrant_stack_function_call_runs() {
+    let binary = assemble_source_fixture(
+        "frontend-reentrant-stack-function-call",
+        "
+        module ReentrantStackFunctionDemo
+        fixed($040012) volatile var byte_out: u8
+        fixed($040014) volatile var word_out: u16
+
+        export far procedure main()
+            word_out = add(2, $1234)
+            if add(1, $1234) == $1235
+                byte_out = 'Y'
+            else
+                byte_out = 'N'
+            end
+            return
+        end
+
+        reentrant function add(a: u16, b: u16): u16
+            return b + a
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x040012), b'Y');
+    assert_eq!(memory.byte(0x040014), 0x36);
+    assert_eq!(memory.byte(0x040015), 0x12);
+}
+
+#[test]
 fn generated_frontend_reentrant_stack_local_call_runs() {
     let binary = assemble_source_fixture(
         "frontend-reentrant-stack-local-call",

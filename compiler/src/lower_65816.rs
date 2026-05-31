@@ -368,10 +368,22 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
         }
         IrInst::ReturnValue(value) => {
             if let RoutineKind::Function { result } = &routine.kind {
-                set_mode_for_width(out, width_for_type(result)?);
-            }
-            if !matches!(value, Value::Accumulator) {
-                load_value_to_a(out, value)?;
+                let width = width_for_type(result)?;
+                set_mode_for_width(out, width);
+                if !matches!(value, Value::Accumulator) {
+                    load_value_to_a(out, value)?;
+                }
+                if routine.stack_frame_bytes != 0 && matches!(width, Width::Byte | Width::Word) {
+                    out.push(AsmInst::Tax);
+                    emit_stack_frame_adjust(out, routine.stack_frame_bytes, StackFrameOp::Release);
+                    set_mode_for_width(out, width);
+                    out.push(AsmInst::Txa);
+                    if !routine.interrupt_raw {
+                        emit_interrupt_epilogue(out, routine.interrupt_preserve);
+                    }
+                    out.push(return_inst(routine));
+                    return Ok(());
+                }
             }
             emit_return_sequence(routine, out);
         }
