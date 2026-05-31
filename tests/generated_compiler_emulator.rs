@@ -361,6 +361,34 @@ fn generated_frontend_relational_conditions_run() {
 }
 
 #[test]
+fn generated_indexed_assignment_from_indexed_value_runs() {
+    let binary = assemble_source_fixture(
+        "frontend-indexed-assignment-from-indexed-value",
+        "
+        module IndexedAssignmentDemo
+        fixed($04000a) volatile var byte_out: u8
+        var source: [4]u8
+        var target: [4]u8
+
+        export far procedure main()
+            var src: u16
+            var dst: u16
+            src = 2
+            dst = 1
+            source[src] = 'Z'
+            target[dst] = source[src]
+            byte_out = target[dst]
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x04000a), b'Z');
+}
+
+#[test]
 fn generated_frontend_parameter_call_runs() {
     let binary = assemble_source_fixture(
         "frontend-parameter-call",

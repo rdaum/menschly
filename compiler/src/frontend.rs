@@ -1750,12 +1750,14 @@ impl<'a> RoutineLowerer<'a> {
                 Ok(())
             }
             Expr::Index(base, index) => {
+                let target = Expr::Index(base.clone(), index.clone());
+                let element = self.infer_expr(&target)?;
+                let value = self.expr_value(value, &element)?;
                 let (addr, element) = self.address_for_index(base, index)?;
-                self.lower_expr_to(value, &element, Value::Accumulator)?;
                 self.body.push(IrInst::Store {
                     width: width_for_type(&element)?,
                     addr,
-                    src: Value::Accumulator,
+                    src: value,
                 });
                 Ok(())
             }
