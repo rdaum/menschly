@@ -2,12 +2,12 @@ module HellordDos
 
 external procedure console_write(value: u8)
 external procedure console_newline()
-external procedure console_prompt()
 external function console_read(): u8
 external procedure console_write_greeting()
 external procedure console_write_help()
 external procedure console_write_version()
-external procedure console_write_dir()
+external procedure console_prompt_drive(drive: u8)
+external procedure console_write_drive_missing(drive: u8)
 external procedure console_write_unknown()
 external procedure console_write_flag(name: u8, value: u8)
 external function serial_rx_overflow(): u8
@@ -19,21 +19,25 @@ const COMMAND_VERSION = 2
 const COMMAND_DIR = 3
 const COMMAND_ECHO = 4
 const COMMAND_STATUS = 5
+const COMMAND_DRIVE = 6
 const COMMAND_EMPTY = 255
 const LINE_LIMIT = 31
 const BACKSPACE = $08
 const DELETE = $7f
+const LOWERCASE_DELTA = 32
 
+var current_drive: u8
 var line_len: u16
 var command_buffer: [32]u8
 
 export procedure dos_boot()
+    current_drive = 'A'
     console_write_greeting()
-    console_prompt()
+    prompt()
     while 1 != 0
         read_line()
         dispatch_line()
-        console_prompt()
+        prompt()
     end
 end
 
@@ -50,8 +54,36 @@ function command_code(): u8
         return COMMAND_STATUS
     elsif is_echo() != 0
         return COMMAND_ECHO
+    elsif is_drive_select() != 0
+        return COMMAND_DRIVE
     else
         return COMMAND_UNKNOWN
+    end
+end
+
+function normalized_drive(value: u8): u8
+    if value >= 'a' and value <= 'z'
+        return value - LOWERCASE_DELTA
+    else
+        return value
+    end
+end
+
+function is_drive_letter(value: u8): u8
+    var drive: u8
+    drive = normalized_drive(value)
+    if drive >= 'A' and drive <= 'Z'
+        return 1
+    else
+        return 0
+    end
+end
+
+function is_drive_select(): u8
+    if line_len == 2 and is_drive_letter(command_buffer[0]) != 0 and command_buffer[1] == ':'
+        return 1
+    else
+        return 0
     end
 end
 
@@ -214,14 +246,26 @@ procedure dispatch_line()
     elsif code == COMMAND_VERSION
         console_write_version()
     elsif code == COMMAND_DIR
-        console_write_dir()
+        console_write_drive_missing(current_drive)
     elsif code == COMMAND_STATUS
         write_status()
     elsif code == COMMAND_ECHO
         echo_line()
+    elsif code == COMMAND_DRIVE
+        select_drive()
     else
         console_write_unknown()
     end
+    return
+end
+
+procedure prompt()
+    console_prompt_drive(current_drive)
+    return
+end
+
+procedure select_drive()
+    current_drive = normalized_drive(command_buffer[0])
     return
 end
 

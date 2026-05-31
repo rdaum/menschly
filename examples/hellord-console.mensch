@@ -14,8 +14,9 @@ export procedure console_newline()
     return
 end
 
-export procedure console_prompt()
-    console_write_text("A> ")
+export procedure console_prompt_drive(drive: u8)
+    serial_write(drive)
+    console_write_text("> ")
     return
 end
 
@@ -42,7 +43,7 @@ export procedure console_write_greeting()
 end
 
 export procedure console_write_help()
-    console_write_text("Commands:\r\nH  help\r\nV  version\r\nD  dir\r\nE  echo\r\nS  status\r\n")
+    console_write_text("Commands:\r\nH  help\r\nV  version\r\nD  dir\r\nE  echo\r\nS  status\r\nA:-Z: drive\r\n")
     return
 end
 
@@ -53,6 +54,13 @@ end
 
 export procedure console_write_dir()
     console_write_text("No drives mounted\r\n")
+    return
+end
+
+export procedure console_write_drive_missing(drive: u8)
+    console_write_text("Drive ")
+    serial_write(drive)
+    console_write_text(": not mounted\r\n")
     return
 end
 
