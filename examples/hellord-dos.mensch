@@ -78,14 +78,33 @@ procedure read_line()
                 console_newline()
                 done = 1
             else
-                if line_len == 31
+                if ch == $08
+                    erase_char()
                 else
-                    command_buffer[line_len] = ch
-                    line_len = line_len + 1
-                    console_write(ch)
+                    if ch == $7f
+                        erase_char()
+                    else
+                        if line_len == 31
+                        else
+                            command_buffer[line_len] = ch
+                            line_len = line_len + 1
+                            console_write(ch)
+                        end
+                    end
                 end
             end
         end
+    end
+    return
+end
+
+procedure erase_char()
+    if line_len == 0
+    else
+        line_len = line_len - 1
+        console_write($08)
+        console_write(' ')
+        console_write($08)
     end
     return
 end

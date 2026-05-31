@@ -387,6 +387,12 @@ pub enum IrInst {
         lhs: Value,
         rhs: Value,
     },
+    Sub {
+        width: Width,
+        dst: Value,
+        lhs: Value,
+        rhs: Value,
+    },
     BitAnd {
         width: Width,
         dst: Value,

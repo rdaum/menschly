@@ -147,6 +147,7 @@ pub enum Expr {
     ResultOk(Box<Expr>),
     ResultErr(Box<Expr>),
     Add(Box<Expr>, Box<Expr>),
+    Sub(Box<Expr>, Box<Expr>),
     BitAnd(Box<Expr>, Box<Expr>),
     Deref(Box<Expr>),
     Index(Box<Expr>, Box<Expr>),
@@ -190,6 +191,7 @@ enum TokenKind {
     Comma,
     Caret,
     Plus,
+    Minus,
     Amp,
     Equal,
     EqualEqual,
@@ -228,6 +230,7 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             ',' => out.push(token(TokenKind::Comma, offset)),
             '^' => out.push(token(TokenKind::Caret, offset)),
             '+' => out.push(token(TokenKind::Plus, offset)),
+            '-' => out.push(token(TokenKind::Minus, offset)),
             '&' => out.push(token(TokenKind::Amp, offset)),
             '=' => {
                 if matches!(chars.peek(), Some((_, '='))) {
@@ -967,9 +970,16 @@ impl Parser {
 
     fn parse_add(&mut self) -> Result<Expr, FrontendError> {
         let mut expr = self.parse_postfix()?;
-        while self.take(TokenKind::Plus) {
-            let rhs = self.parse_postfix()?;
-            expr = Expr::Add(Box::new(expr), Box::new(rhs));
+        loop {
+            if self.take(TokenKind::Plus) {
+                let rhs = self.parse_postfix()?;
+                expr = Expr::Add(Box::new(expr), Box::new(rhs));
+            } else if self.take(TokenKind::Minus) {
+                let rhs = self.parse_postfix()?;
+                expr = Expr::Sub(Box::new(expr), Box::new(rhs));
+            } else {
+                break;
+            }
         }
         Ok(expr)
     }
@@ -1731,6 +1741,21 @@ impl<'a> RoutineLowerer<'a> {
                 });
                 Ok(())
             }
+            Expr::Sub(lhs, rhs) => {
+                let lhs_ty = self.infer_expr(lhs)?;
+                let rhs_ty = self.infer_expr(rhs)?;
+                let width = compatible_expr_width(&lhs_ty, &rhs_ty, rhs)?;
+                ensure_assignable(expected, &lhs_ty)?;
+                self.lower_expr_to(lhs, &lhs_ty, Value::Accumulator)?;
+                let rhs = self.expr_value(rhs, &lhs_ty)?;
+                self.body.push(IrInst::Sub {
+                    width,
+                    dst,
+                    lhs: Value::Accumulator,
+                    rhs,
+                });
+                Ok(())
+            }
             Expr::BitAnd(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
@@ -1865,7 +1890,7 @@ impl<'a> RoutineLowerer<'a> {
                 ok: Box::new(Type::U8),
                 err: Box::new(self.infer_expr(value)?),
             }),
-            Expr::Add(lhs, rhs) => {
+            Expr::Add(lhs, rhs) | Expr::Sub(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
                 compatible_expr_width(&lhs_ty, &rhs_ty, rhs)?;
@@ -2260,6 +2285,7 @@ mod tests {
                 direct var x: u8
                 p = $1300
                 x = 1
+                x = x - 1
                 while x != 4
                     x = x + 1
                 end
@@ -2279,6 +2305,14 @@ mod tests {
                 addr: Address::NearPtr(Value::Local(name)),
                 ..
             } if name == "p"
+        )));
+        assert!(main.body.iter().any(|inst| matches!(
+            inst,
+            IrInst::Sub {
+                dst: Value::Local(name),
+                rhs: Value::Const(Const::U8(1)),
+                ..
+            } if name == "x"
         )));
     }
 

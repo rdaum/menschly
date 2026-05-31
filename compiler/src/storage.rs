@@ -409,6 +409,17 @@ fn rewrite_inst(inst: &IrInst, layout: &RoutineStorage) -> IrInst {
             lhs: rewrite_value(lhs, layout),
             rhs: rewrite_value(rhs, layout),
         },
+        IrInst::Sub {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => IrInst::Sub {
+            width: *width,
+            dst: rewrite_value(dst, layout),
+            lhs: rewrite_value(lhs, layout),
+            rhs: rewrite_value(rhs, layout),
+        },
         IrInst::BitAnd {
             width,
             dst,
@@ -525,6 +536,12 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
             collect_temp_address(addr, &mut out);
         }
         IrInst::Add {
+            width,
+            dst,
+            lhs,
+            rhs,
+        }
+        | IrInst::Sub {
             width,
             dst,
             lhs,

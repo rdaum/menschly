@@ -497,11 +497,11 @@ fn raw_interrupt_skips_generated_entry_state() {
 #[test]
 fn hellord_example_boots_as_interrupt_driven_xex() {
     let build = build_hellord_example();
-    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> H\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nE  echo\r\nA> V\r\nHellord DOS 0.1\r\nA> D\r\nNo drives mounted\r\nA> E hello\r\n hello\r\nA> X\r\n?SYNTAX\r\nA> \r\nA> ";
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> H\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nE  echo\r\nA> V\r\nHellord DOS 0.1\r\nA> D\r\nNo drives mounted\r\nA> E heX\x08 \x08llo\r\n hello\r\nA> X\r\n?SYNTAX\r\nA> \r\nA> ";
 
     let run = run_image_until_output(
         &build.image,
-        b"H\nV\nD\nE hello\nX\n\n",
+        b"H\nV\nD\nE heX\x08llo\nX\n\n",
         expected.len(),
         200_000,
     )
