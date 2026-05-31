@@ -595,13 +595,13 @@ fn hellord_rom_files_can_be_listed_and_typed() {
 #[test]
 fn hellord_rom_programs_can_be_run_by_directory() {
     let build = build_hellord_example();
-    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> run hello\r\nHELLO.PRG says: Hello from ROM.\r\nA> run missing\r\nProgram not found\r\nA> cd games\r\nA> r demo\r\nDEMO.PRG says: sprites someday.\r\nA> r hello\r\nProgram not found\r\nA> ";
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> run hello\r\nHELLO.PRG says: Hello from ROM.\r\nA> hello\r\nHELLO.PRG says: Hello from ROM.\r\nA> run missing\r\nProgram not found\r\nA> cd games\r\nA> r demo\r\nDEMO.PRG says: sprites someday.\r\nA> demo\r\nDEMO.PRG says: sprites someday.\r\nA> hello\r\n?SYNTAX\r\nA> ";
 
     let run = run_image_until_output(
         &build.image,
-        b"run hello\nrun missing\ncd games\nr demo\nr hello\n",
+        b"run hello\nhello\nrun missing\ncd games\nr demo\ndemo\nhello\n",
         expected.len(),
-        250_000,
+        300_000,
     )
     .expect("Hellord image should run ROM program transcript");
 

@@ -41,6 +41,7 @@ const COMMAND_PROMPT = 12
 const COMMAND_SET = 13
 const COMMAND_RUN = 14
 const COMMAND_MEM = 15
+const COMMAND_PROGRAM = 16
 const COMMAND_EMPTY = 255
 const FILE_UNKNOWN = 0
 const FILE_README = 1
@@ -104,6 +105,8 @@ function command_code(): u8
         return COMMAND_SET
     elsif is_run() != 0
         return COMMAND_RUN
+    elsif bare_program_code() != 0
+        return COMMAND_PROGRAM
     elsif is_type() != 0
         return COMMAND_TYPE
     elsif is_cd() != 0
@@ -503,6 +506,8 @@ procedure dispatch_line()
         configure_set()
     elsif code == COMMAND_RUN
         run_program()
+    elsif code == COMMAND_PROGRAM
+        run_bare_program()
     elsif code == COMMAND_TYPE
         type_file()
     elsif code == COMMAND_CD
@@ -702,6 +707,14 @@ end
 function run_program_code(): u8
     var start: u16
     start = argument_start("R", "RUN")
+    return program_code_at(start)
+end
+
+function bare_program_code(): u8
+    return program_code_at(0)
+end
+
+function program_code_at(start: u16): u8
     if current_dir == DIR_ROOT
         if argument_word_matches(start, "HELLO.PRG") != 0
             return PROGRAM_HELLO
@@ -719,9 +732,7 @@ function run_program_code(): u8
     end
 end
 
-procedure run_program()
-    direct var code: u8
-    code = run_program_code()
+procedure run_program_code_value(code: u8)
     if code == PROGRAM_HELLO
         files_run_hello()
     elsif code == PROGRAM_DEMO
@@ -729,6 +740,20 @@ procedure run_program()
     else
         files_write_program_not_found()
     end
+    return
+end
+
+procedure run_program()
+    direct var code: u8
+    code = run_program_code()
+    run_program_code_value(code)
+    return
+end
+
+procedure run_bare_program()
+    direct var code: u8
+    code = bare_program_code()
+    run_program_code_value(code)
     return
 end
 
