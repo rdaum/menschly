@@ -362,6 +362,7 @@ fn read_string(
                     't' => out.push('\t'),
                     '"' => out.push('"'),
                     '\\' => out.push('\\'),
+                    'x' => out.push(read_ascii_hex_escape(chars, offset)? as char),
                     other => {
                         return Err(FrontendError::Lex(format!(
                             "unsupported escape \\{other} at {offset}"
@@ -405,6 +406,7 @@ fn read_char_literal(
                 '\'' => b'\'',
                 '\\' => b'\\',
                 '0' => 0,
+                'x' => read_ascii_hex_escape(chars, offset)?,
                 other => {
                     return Err(FrontendError::Lex(format!(
                         "unsupported escape \\{other} at {offset}"
@@ -425,6 +427,39 @@ fn read_char_literal(
             "unterminated character literal at {offset}"
         ))),
     }
+}
+
+fn read_ascii_hex_escape(
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    offset: usize,
+) -> Result<u8, FrontendError> {
+    let Some((_, hi)) = chars.next() else {
+        return Err(FrontendError::Lex(format!(
+            "unterminated hex escape at {offset}"
+        )));
+    };
+    let Some((_, lo)) = chars.next() else {
+        return Err(FrontendError::Lex(format!(
+            "unterminated hex escape at {offset}"
+        )));
+    };
+    let Some(hi) = hi.to_digit(16) else {
+        return Err(FrontendError::Lex(format!(
+            "invalid hex escape at {offset}"
+        )));
+    };
+    let Some(lo) = lo.to_digit(16) else {
+        return Err(FrontendError::Lex(format!(
+            "invalid hex escape at {offset}"
+        )));
+    };
+    let value = ((hi << 4) | lo) as u8;
+    if value > 0x7f {
+        return Err(FrontendError::Lex(format!(
+            "non-ASCII hex escape at {offset}"
+        )));
+    }
+    Ok(value)
 }
 
 fn read_number(
@@ -2667,6 +2702,7 @@ mod tests {
                 direct var letter: u8
                 letter = 'H' & $ff
                 letter = '\\n'
+                letter = '\\x1b'
                 return
             end
         ";
@@ -2683,6 +2719,10 @@ mod tests {
         assert!(body.contains(&IrInst::LoadConst {
             dst: Value::Local("letter".to_owned()),
             value: Const::U8(b'\n'),
+        }));
+        assert!(body.contains(&IrInst::LoadConst {
+            dst: Value::Local("letter".to_owned()),
+            value: Const::U8(0x1b),
         }));
     }
 
@@ -3036,20 +3076,20 @@ mod tests {
             external procedure write_text(text: near ^u8)
 
             procedure main()
-                write_text(\"OK\\r\\n\")
+                write_text(\"OK\\r\\n\\x1b\")
                 return
             end
         ";
 
         let module = compile_source(source).unwrap();
-        assert_eq!(module.static_data[0].bytes, b"OK\r\n\0");
+        assert_eq!(module.static_data[0].bytes, b"OK\r\n\x1b\0");
 
         let (lowered, _assignment) =
             crate::lower_65816::lower_module_with_storage(&module).unwrap();
         let asm = crate::ca65::emit_module(&lowered);
 
         assert!(asm.contains("__str_0:\n"));
-        assert!(asm.contains("\t.byte $4f, $4b, $0d, $0a, $00\n"));
+        assert!(asm.contains("\t.byte $4f, $4b, $0d, $0a, $1b, $00\n"));
         assert!(asm.contains("\tlda #__str_0\n"));
         assert!(asm.contains("\tsta __dp_write_text_param_text\n"));
     }

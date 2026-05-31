@@ -103,10 +103,7 @@ export procedure console_write_version()
 end
 
 export procedure console_clear()
-    serial_write(27)
-    console_write_text("[2J")
-    serial_write(27)
-    console_write_text("[H")
+    console_write_text("\x1b[2J\x1b[H")
     return
 end
 
