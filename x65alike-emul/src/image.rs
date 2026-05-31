@@ -30,6 +30,7 @@ pub struct CpuStart {
 pub struct LoadedRange {
     pub address: u32,
     pub bytes: Vec<u8>,
+    pub cpu_visible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,7 @@ pub fn load_image(
             ranges: vec![LoadedRange {
                 address: raw_load_addr,
                 bytes: bytes.to_vec(),
+                cpu_visible: false,
             }],
             entry: Some(CpuStart {
                 pbr: (raw_load_addr >> 16) as u8,
@@ -111,6 +113,7 @@ fn parse_atari_xex(bytes: &[u8]) -> Result<LoadedImage, String> {
         ranges.push(LoadedRange {
             address: u32::from(start),
             bytes: data,
+            cpu_visible: true,
         });
         pos = block_end;
     }
@@ -171,10 +174,12 @@ mod tests {
                 LoadedRange {
                     address: 0x8000,
                     bytes: vec![0xa9, 0x21, 0xdb],
+                    cpu_visible: true,
                 },
                 LoadedRange {
                     address: 0x02e0,
                     bytes: vec![0x00, 0x80],
+                    cpu_visible: true,
                 },
             ]
         );

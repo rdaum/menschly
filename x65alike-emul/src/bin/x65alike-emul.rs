@@ -46,7 +46,11 @@ fn run() -> Result<(), String> {
 
     let mut machine = Machine::new();
     for range in &image.ranges {
-        machine.load(range.address, &range.bytes);
+        if range.cpu_visible {
+            machine.load_cpu_visible(range.address, &range.bytes);
+        } else {
+            machine.load(range.address, &range.bytes);
+        }
     }
     machine.push_serial_input(&serial_input);
 

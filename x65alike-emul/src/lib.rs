@@ -86,6 +86,12 @@ impl Machine {
         self.sram[start..end].copy_from_slice(bytes);
     }
 
+    pub fn load_cpu_visible(&mut self, address: u32, bytes: &[u8]) {
+        for (offset, byte) in bytes.iter().copied().enumerate() {
+            self.write(address.wrapping_add(offset as u32), byte);
+        }
+    }
+
     pub fn read(&mut self, address: u32) -> u8 {
         let address = address & 0x00ff_ffff;
         match self.decode(address) {
@@ -316,6 +322,18 @@ mod tests {
         machine.write(ROMBLOCK_FRAME_START, 0x66);
 
         assert_eq!(machine.byte(0x084000), 0x66);
+    }
+
+    #[test]
+    fn cpu_visible_load_honors_romblock_mapping() {
+        let mut machine = Machine::new();
+
+        machine.load_cpu_visible(0x00ffee, &[0x34, 0x12]);
+
+        assert_eq!(machine.byte(0x00ffee), 0);
+        assert_eq!(machine.byte(0x083fee), 0x34);
+        assert_eq!(machine.read(0x00ffee), 0x34);
+        assert_eq!(machine.read(0x00ffef), 0x12);
     }
 
     #[test]
