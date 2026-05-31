@@ -10,6 +10,16 @@ external procedure console_write_version()
 external procedure console_write_dir()
 external procedure console_write_unknown()
 
+const COMMAND_UNKNOWN = 0
+const COMMAND_HELP = 1
+const COMMAND_VERSION = 2
+const COMMAND_DIR = 3
+const COMMAND_ECHO = 4
+const COMMAND_EMPTY = 255
+const LINE_LIMIT = 31
+const BACKSPACE = $08
+const DELETE = $7f
+
 var line_len: u16
 var command_buffer: [32]u8
 
@@ -25,33 +35,33 @@ end
 
 function command_code(): u8
     if line_len == 0
-        return 255
+        return COMMAND_EMPTY
     else
         if command_buffer[0] == 'H'
-            return 1
+            return COMMAND_HELP
         else
             if command_buffer[0] == 'h'
-                return 1
+                return COMMAND_HELP
             else
                 if command_buffer[0] == 'V'
-                    return 2
+                    return COMMAND_VERSION
                 else
                     if command_buffer[0] == 'v'
-                        return 2
+                        return COMMAND_VERSION
                     else
                         if command_buffer[0] == 'D'
-                            return 3
+                            return COMMAND_DIR
                         else
                             if command_buffer[0] == 'd'
-                                return 3
+                                return COMMAND_DIR
                             else
                                 if command_buffer[0] == 'E'
-                                    return 4
+                                    return COMMAND_ECHO
                                 else
                                     if command_buffer[0] == 'e'
-                                        return 4
+                                        return COMMAND_ECHO
                                     else
-                                        return 0
+                                        return COMMAND_UNKNOWN
                                     end
                                 end
                             end
@@ -78,13 +88,13 @@ procedure read_line()
                 console_newline()
                 done = 1
             else
-                if ch == $08
+                if ch == BACKSPACE
                     erase_char()
                 else
-                    if ch == $7f
+                    if ch == DELETE
                         erase_char()
                     else
-                        if line_len == 31
+                        if line_len == LINE_LIMIT
                         else
                             command_buffer[line_len] = ch
                             line_len = line_len + 1
@@ -102,9 +112,9 @@ procedure erase_char()
     if line_len == 0
     else
         line_len = line_len - 1
-        console_write($08)
+        console_write(BACKSPACE)
         console_write(' ')
-        console_write($08)
+        console_write(BACKSPACE)
     end
     return
 end
@@ -112,19 +122,19 @@ end
 procedure dispatch_line()
     direct var code: u8
     code = command_code()
-    if code == 255
+    if code == COMMAND_EMPTY
         return
     else
-        if code == 1
+        if code == COMMAND_HELP
             console_write_help()
         else
-            if code == 2
+            if code == COMMAND_VERSION
                 console_write_version()
             else
-                if code == 3
+                if code == COMMAND_DIR
                     console_write_dir()
                 else
-                    if code == 4
+                    if code == COMMAND_ECHO
                         echo_line()
                     else
                         console_write_unknown()

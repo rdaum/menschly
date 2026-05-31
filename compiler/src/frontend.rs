@@ -21,6 +21,7 @@ pub struct SourceModule {
     pub imports: Vec<ImportDecl>,
     pub libraries: Vec<LibraryDecl>,
     pub entry: Option<EntryDecl>,
+    pub consts: Vec<ConstDecl>,
     pub globals: Vec<GlobalDecl>,
     pub vectors: Vec<VectorDecl>,
     pub metadata: Vec<MetadataDecl>,
@@ -43,6 +44,13 @@ pub struct LibraryDecl {
 pub struct EntryDecl {
     pub kind: EntryKind,
     pub routine: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstDecl {
+    pub name: String,
+    pub value: u32,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -464,6 +472,7 @@ impl Parser {
         let mut imports = Vec::new();
         let mut libraries = Vec::new();
         let mut entry = None;
+        let mut consts = Vec::new();
         let mut globals = Vec::new();
         let mut vectors = Vec::new();
         let mut metadata = Vec::new();
@@ -489,6 +498,8 @@ impl Parser {
                 metadata.push(self.parse_metadata_decl()?);
             } else if self.take_keyword("vector") {
                 vectors.push(self.parse_vector_decl()?);
+            } else if self.take_keyword("const") {
+                consts.push(self.parse_const_decl()?);
             } else if self.take_keyword("external") {
                 externals.push(self.parse_external_decl()?);
             } else if self.starts_global_decl() {
@@ -503,6 +514,7 @@ impl Parser {
             imports,
             libraries,
             entry,
+            consts,
             globals,
             vectors,
             metadata,
@@ -545,6 +557,19 @@ impl Parser {
         self.expect(TokenKind::Equal)?;
         let routine = self.expect_ident()?;
         Ok(VectorDecl { name, routine })
+    }
+
+    fn parse_const_decl(&mut self) -> Result<ConstDecl, FrontendError> {
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::Equal)?;
+        let value = self
+            .take_number()
+            .ok_or_else(|| self.parse_error("expected constant value"))?;
+        Ok(ConstDecl {
+            name,
+            value,
+            ty: const_type(value),
+        })
     }
 
     fn parse_external_decl(&mut self) -> Result<ExternalDecl, FrontendError> {
@@ -1307,6 +1332,7 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
         module.routines.push(lowerer.lower_routine(
             routine,
             &source.globals,
+            &source.consts,
             source.entry.as_ref(),
         )?);
     }
@@ -1372,6 +1398,7 @@ impl Lowerer {
         &mut self,
         source: &RoutineDecl,
         globals: &[GlobalDecl],
+        consts: &[ConstDecl],
         entry: Option<&EntryDecl>,
     ) -> Result<Routine, FrontendError> {
         let kind = match &source.kind {
@@ -1415,7 +1442,7 @@ impl Lowerer {
             body: Vec::new(),
         };
 
-        let mut lowerer = RoutineLowerer::new(self, source, globals)?;
+        let mut lowerer = RoutineLowerer::new(self, source, globals, consts)?;
         if let Some(param) = source
             .params
             .iter()
@@ -1483,8 +1510,19 @@ impl<'a> RoutineLowerer<'a> {
         parent: &'a mut Lowerer,
         routine: &'a RoutineDecl,
         globals: &[GlobalDecl],
+        consts: &[ConstDecl],
     ) -> Result<Self, FrontendError> {
         let mut bindings = BTreeMap::new();
+        for const_decl in consts {
+            insert_binding(
+                &mut bindings,
+                &const_decl.name,
+                Binding {
+                    ty: const_decl.ty.clone(),
+                    value: Value::Const(const_for_type(const_decl.value, &const_decl.ty)?),
+                },
+            )?;
+        }
         for global in globals {
             insert_binding(
                 &mut bindings,
@@ -1646,7 +1684,7 @@ impl<'a> RoutineLowerer<'a> {
     ) -> Result<(), FrontendError> {
         let lhs_ty = self.infer_expr(&cond.lhs)?;
         let rhs_ty = self.infer_expr(&cond.rhs)?;
-        let width = compatible_expr_width(&lhs_ty, &rhs_ty, &cond.rhs)?;
+        let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(&cond.rhs)?)?;
         self.lower_expr_to(&cond.lhs, &lhs_ty, Value::Accumulator)?;
         let rhs = self.expr_value(&cond.rhs, &lhs_ty)?;
         self.body.push(IrInst::Compare {
@@ -1681,6 +1719,13 @@ impl<'a> RoutineLowerer<'a> {
             }
             Expr::Name(name) => {
                 let binding = self.binding(name)?.clone();
+                if let Value::Const(value) = binding.value {
+                    self.body.push(IrInst::LoadConst {
+                        dst,
+                        value: coerce_const(value, expected)?,
+                    });
+                    return Ok(());
+                }
                 ensure_assignable(expected, &binding.ty)?;
                 self.body.push(IrInst::Move {
                     dst,
@@ -1729,7 +1774,7 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Add(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
-                let width = compatible_expr_width(&lhs_ty, &rhs_ty, rhs)?;
+                let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
                 ensure_assignable(expected, &lhs_ty)?;
                 self.lower_expr_to(lhs, &lhs_ty, Value::Accumulator)?;
                 let rhs = self.expr_value(rhs, &lhs_ty)?;
@@ -1744,7 +1789,7 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Sub(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
-                let width = compatible_expr_width(&lhs_ty, &rhs_ty, rhs)?;
+                let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
                 ensure_assignable(expected, &lhs_ty)?;
                 self.lower_expr_to(lhs, &lhs_ty, Value::Accumulator)?;
                 let rhs = self.expr_value(rhs, &lhs_ty)?;
@@ -1759,7 +1804,7 @@ impl<'a> RoutineLowerer<'a> {
             Expr::BitAnd(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
-                let width = compatible_expr_width(&lhs_ty, &rhs_ty, rhs)?;
+                let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
                 ensure_assignable(expected, &lhs_ty)?;
                 self.lower_expr_to(lhs, &lhs_ty, Value::Accumulator)?;
                 let rhs = self.expr_value(rhs, &lhs_ty)?;
@@ -1799,6 +1844,9 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Number(value) => Ok(Value::Const(const_for_type(*value, expected)?)),
             Expr::Name(name) => {
                 let binding = self.binding(name)?;
+                if let Value::Const(value) = binding.value {
+                    return Ok(Value::Const(coerce_const(value, expected)?));
+                }
                 ensure_assignable(expected, &binding.ty)?;
                 Ok(binding.value.clone())
             }
@@ -1893,13 +1941,13 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Add(lhs, rhs) | Expr::Sub(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
-                compatible_expr_width(&lhs_ty, &rhs_ty, rhs)?;
+                compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
                 Ok(lhs_ty)
             }
             Expr::BitAnd(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
-                compatible_expr_width(&lhs_ty, &rhs_ty, rhs)?;
+                compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
                 Ok(lhs_ty)
             }
             Expr::Deref(ptr) => {
@@ -1971,7 +2019,11 @@ impl<'a> RoutineLowerer<'a> {
         }
         for (arg, param_ty) in args.iter().zip(&sig.params) {
             let arg_ty = self.infer_expr(arg)?;
-            ensure_assignable(&param_ty.ty, &arg_ty)?;
+            if self.is_const_expr(arg)? && integer_width(&param_ty.ty).is_some() {
+                const_for_type(self.const_expr_value(arg)?, &param_ty.ty)?;
+            } else {
+                ensure_assignable(&param_ty.ty, &arg_ty)?;
+            }
         }
 
         match (&sig.kind, statement) {
@@ -2068,6 +2120,30 @@ impl<'a> RoutineLowerer<'a> {
             .get(name)
             .ok_or_else(|| FrontendError::Type(format!("unknown variable {name}")))
     }
+
+    fn is_const_expr(&self, expr: &Expr) -> Result<bool, FrontendError> {
+        match expr {
+            Expr::Number(_) => Ok(true),
+            Expr::Name(name) => Ok(matches!(self.binding(name)?.value, Value::Const(_))),
+            _ => Ok(false),
+        }
+    }
+
+    fn const_expr_value(&self, expr: &Expr) -> Result<u32, FrontendError> {
+        match expr {
+            Expr::Number(value) => Ok(*value),
+            Expr::Name(name) => {
+                let binding = self.binding(name)?;
+                match binding.value {
+                    Value::Const(value) => const_to_u32(value),
+                    _ => Err(FrontendError::Type(format!("{name} is not a constant"))),
+                }
+            }
+            _ => Err(FrontendError::Type(
+                "expected constant expression".to_owned(),
+            )),
+        }
+    }
 }
 
 impl RoutineSig {
@@ -2126,10 +2202,12 @@ fn result_constructor_matches(expected: &Type, actual: &Type) -> bool {
     }
 }
 
-fn compatible_expr_width(lhs: &Type, rhs: &Type, rhs_expr: &Expr) -> Result<Width, FrontendError> {
-    if integer_width(lhs) == integer_width(rhs)
-        || (matches!(rhs_expr, Expr::Number(_)) && integer_width(lhs).is_some())
-    {
+fn compatible_expr_width(
+    lhs: &Type,
+    rhs: &Type,
+    rhs_is_const: bool,
+) -> Result<Width, FrontendError> {
+    if integer_width(lhs) == integer_width(rhs) || (rhs_is_const && integer_width(lhs).is_some()) {
         width_for_type(lhs)
     } else {
         Err(FrontendError::Type(format!(
@@ -2167,6 +2245,16 @@ fn width_for_type(ty: &Type) -> Result<Width, FrontendError> {
     }
 }
 
+fn const_type(value: u32) -> Type {
+    if value <= 0xff {
+        Type::U8
+    } else if value <= 0xffff {
+        Type::U16
+    } else {
+        Type::U24
+    }
+}
+
 fn const_for_type(value: u32, ty: &Type) -> Result<Const, FrontendError> {
     match width_for_type(ty)? {
         Width::Byte if value <= 0xff => Ok(Const::U8(value as u8)),
@@ -2176,6 +2264,18 @@ fn const_for_type(value: u32, ty: &Type) -> Result<Const, FrontendError> {
             "constant ${value:x} does not fit in {ty:?}"
         ))),
     }
+}
+
+fn coerce_const(value: Const, ty: &Type) -> Result<Const, FrontendError> {
+    const_for_type(const_to_u32(value)?, ty)
+}
+
+fn const_to_u32(value: Const) -> Result<u32, FrontendError> {
+    Ok(match value {
+        Const::U8(value) => u32::from(value),
+        Const::U16(value) => u32::from(value),
+        Const::U24(value) => value,
+    })
 }
 
 #[cfg(test)]
@@ -2280,12 +2380,14 @@ mod tests {
     fn compiles_minimal_source_to_ir() {
         let source = "
             module Demo
+            const START = $1300
+            const ONE = 1
             export procedure main()
                 direct var p: near ^u8
                 direct var x: u8
-                p = $1300
-                x = 1
-                x = x - 1
+                p = START
+                x = ONE
+                x = x - ONE
                 while x != 4
                     x = x + 1
                 end
@@ -2297,6 +2399,7 @@ mod tests {
         let module = compile_source(source).unwrap();
         let main = &module.routines[0];
 
+        assert_eq!(parse_source(source).unwrap().consts.len(), 2);
         assert!(main.export);
         assert!(matches!(main.abi, Abi::Internal));
         assert!(main.body.iter().any(|inst| matches!(
