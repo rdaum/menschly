@@ -338,6 +338,59 @@ fn build_hellord_example() -> x65_runner::BuildOutput {
 }
 
 #[test]
+fn non_exported_routine_is_not_callable_across_modules() {
+    let dir = temp_dir("private-cross-module-link");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let callee_path = dir.join("callee.mensch");
+    let cfg_path = dir.join("image.cfg");
+
+    fs::write(
+        &caller_path,
+        "
+        module Caller
+        application main
+        external procedure private_helper()
+
+        procedure main()
+            private_helper()
+            return
+        end
+        ",
+    )
+    .expect("caller source should be written");
+    fs::write(
+        &callee_path,
+        "
+        module Callee
+        procedure private_helper()
+            return
+        end
+        ",
+    )
+    .expect("callee source should be written");
+    fs::write(&cfg_path, xex_linker_config()).expect("linker config should be written");
+
+    let error = match build_mensch_xex_sources(
+        "private-cross-module-link",
+        &[caller_path, callee_path],
+        &cfg_path,
+    ) {
+        Ok(_) => panic!("linking a non-exported cross-module routine should fail"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error.contains("private_helper"),
+        "linker error should name unresolved private helper: {error}"
+    );
+}
+
+fn xex_linker_config() -> &'static str {
+    "MEMORY {\n  CODE: start = $008000, size = $003000, file = %O;\n  ZEROPAGE: start = $000080, size = $000080, type = rw;\n  BSS: start = $000200, size = $001000, type = rw;\n  META: start = $00a000, size = $001000, file = %O;\n  VECTORS: start = $00ffee, size = $000002, file = %O;\n}\nSEGMENTS {\n  CODE: load = CODE, type = ro;\n  ZEROPAGE: load = ZEROPAGE, type = zp;\n  BSS: load = BSS, type = bss;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
+}
+
+#[test]
 fn bank_registers_and_frames_match_x65_shape() {
     let mut machine = Machine::new();
 
