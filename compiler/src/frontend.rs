@@ -135,7 +135,14 @@ pub enum Stmt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Cond {
+pub enum Cond {
+    Compare(CondCompare),
+    And(Box<Cond>, Box<Cond>),
+    Or(Box<Cond>, Box<Cond>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CondCompare {
     pub lhs: Expr,
     pub op: CondOp,
     pub rhs: Expr,
@@ -974,6 +981,28 @@ impl Parser {
     }
 
     fn parse_cond(&mut self) -> Result<Cond, FrontendError> {
+        self.parse_cond_or()
+    }
+
+    fn parse_cond_or(&mut self) -> Result<Cond, FrontendError> {
+        let mut cond = self.parse_cond_and()?;
+        while self.take_keyword("or") {
+            let rhs = self.parse_cond_and()?;
+            cond = Cond::Or(Box::new(cond), Box::new(rhs));
+        }
+        Ok(cond)
+    }
+
+    fn parse_cond_and(&mut self) -> Result<Cond, FrontendError> {
+        let mut cond = self.parse_cond_compare()?;
+        while self.take_keyword("and") {
+            let rhs = self.parse_cond_compare()?;
+            cond = Cond::And(Box::new(cond), Box::new(rhs));
+        }
+        Ok(cond)
+    }
+
+    fn parse_cond_compare(&mut self) -> Result<Cond, FrontendError> {
         let lhs = self.parse_expr()?;
         let op = if self.take(TokenKind::EqualEqual) {
             CondOp::Eq
@@ -983,7 +1012,7 @@ impl Parser {
             return Err(self.parse_error("expected == or !="));
         };
         let rhs = self.parse_expr()?;
-        Ok(Cond { lhs, op, rhs })
+        Ok(Cond::Compare(CondCompare { lhs, op, rhs }))
     }
 
     fn parse_expr(&mut self) -> Result<Expr, FrontendError> {
@@ -1710,6 +1739,49 @@ impl<'a> RoutineLowerer<'a> {
         cond: &Cond,
         false_target: Label,
     ) -> Result<(), FrontendError> {
+        match cond {
+            Cond::Compare(compare) => self.lower_compare_branch(compare, false_target, false),
+            Cond::And(lhs, rhs) => {
+                self.lower_branch_if_false(lhs, false_target.clone())?;
+                self.lower_branch_if_false(rhs, false_target)
+            }
+            Cond::Or(lhs, rhs) => {
+                let true_target = self.parent.label("cond_true");
+                self.lower_branch_if_true(lhs, true_target.clone())?;
+                self.lower_branch_if_false(rhs, false_target)?;
+                self.body.push(IrInst::Label(true_target));
+                Ok(())
+            }
+        }
+    }
+
+    fn lower_branch_if_true(
+        &mut self,
+        cond: &Cond,
+        true_target: Label,
+    ) -> Result<(), FrontendError> {
+        match cond {
+            Cond::Compare(compare) => self.lower_compare_branch(compare, true_target, true),
+            Cond::And(lhs, rhs) => {
+                let false_target = self.parent.label("cond_false");
+                self.lower_branch_if_false(lhs, false_target.clone())?;
+                self.lower_branch_if_true(rhs, true_target)?;
+                self.body.push(IrInst::Label(false_target));
+                Ok(())
+            }
+            Cond::Or(lhs, rhs) => {
+                self.lower_branch_if_true(lhs, true_target.clone())?;
+                self.lower_branch_if_true(rhs, true_target)
+            }
+        }
+    }
+
+    fn lower_compare_branch(
+        &mut self,
+        cond: &CondCompare,
+        target: Label,
+        branch_when_true: bool,
+    ) -> Result<(), FrontendError> {
         let lhs_ty = self.infer_expr(&cond.lhs)?;
         let rhs_ty = self.infer_expr(&cond.rhs)?;
         let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(&cond.rhs)?)?;
@@ -1721,13 +1793,9 @@ impl<'a> RoutineLowerer<'a> {
         };
         let rhs = self.expr_value(&cond.rhs, &lhs_ty)?;
         self.body.push(IrInst::Compare { width, lhs, rhs });
-        self.body.push(match cond.op {
-            CondOp::Eq => IrInst::BranchIfNotEqual {
-                target: false_target,
-            },
-            CondOp::Ne => IrInst::BranchIfEqual {
-                target: false_target,
-            },
+        self.body.push(match (cond.op, branch_when_true) {
+            (CondOp::Eq, true) | (CondOp::Ne, false) => IrInst::BranchIfEqual { target },
+            (CondOp::Ne, true) | (CondOp::Eq, false) => IrInst::BranchIfNotEqual { target },
         });
         Ok(())
     }
@@ -2403,6 +2471,41 @@ mod tests {
             inst,
             IrInst::Label(label) if label.0.starts_with("__if_else_")
         )));
+    }
+
+    #[test]
+    fn compiles_and_or_conditions_with_short_circuit_branches() {
+        let source = "
+            module Conditions
+            export procedure main()
+                var a: u8
+                var b: u8
+                var out: u8
+                if a == 1 and b != 2 or out == 3
+                    out = 1
+                else
+                    out = 0
+                end
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        let body = &module.routines[0].body;
+
+        assert!(body.iter().any(|inst| matches!(
+            inst,
+            IrInst::Label(label) if label.0.starts_with("__cond_true_")
+        )));
+        assert!(
+            body.iter()
+                .filter(|inst| matches!(
+                    inst,
+                    IrInst::BranchIfEqual { .. } | IrInst::BranchIfNotEqual { .. }
+                ))
+                .count()
+                >= 3
+        );
     }
 
     #[test]
