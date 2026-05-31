@@ -5,6 +5,7 @@ external procedure console_newline()
 external function console_read(): u8
 external procedure console_write_text(text: near ^u8)
 external procedure console_write_hex16(value: u16)
+external procedure console_clear()
 external procedure console_write_greeting()
 external procedure console_write_help()
 external procedure console_write_version()
@@ -32,6 +33,8 @@ const COMMAND_PWD = 7
 const COMMAND_CD = 8
 const COMMAND_MAP = 9
 const COMMAND_TYPE = 10
+const COMMAND_CLS = 11
+const COMMAND_PROMPT = 12
 const COMMAND_EMPTY = 255
 const FILE_UNKNOWN = 0
 const FILE_README = 1
@@ -39,6 +42,8 @@ const FILE_SYSTEM = 2
 const FILE_DEMO = 3
 const DIR_ROOT = 0
 const DIR_GAMES = 1
+const PROMPT_SHORT = 0
+const PROMPT_FULL = 1
 const LINE_LIMIT = 31
 const PATH_LIMIT = 15
 const BACKSPACE = $08
@@ -47,6 +52,7 @@ const LOWERCASE_DELTA = 32
 
 var current_drive: u8
 var current_dir: u8
+var prompt_mode: u8
 var path_len: u16
 var line_len: u16
 var current_path: [16]u8
@@ -54,6 +60,7 @@ var command_buffer: [32]u8
 
 export procedure dos_boot()
     current_drive = 'A'
+    prompt_mode = PROMPT_SHORT
     init_path()
     console_write_greeting()
     prompt()
@@ -79,6 +86,10 @@ function command_code(): u8
         return COMMAND_PWD
     elsif is_map() != 0
         return COMMAND_MAP
+    elsif is_cls() != 0
+        return COMMAND_CLS
+    elsif is_prompt() != 0
+        return COMMAND_PROMPT
     elsif is_type() != 0
         return COMMAND_TYPE
     elsif is_cd() != 0
@@ -303,6 +314,26 @@ function is_map(): u8
     end
 end
 
+function is_cls(): u8
+    if command_word_matches("C") != 0
+        return 1
+    elsif command_word_matches("CLS") != 0
+        return 1
+    else
+        return 0
+    end
+end
+
+function is_prompt(): u8
+    if command_word_matches("PROMPT") != 0
+        return 1
+    elsif command_argument_matches("PROMPT") != 0
+        return 1
+    else
+        return 0
+    end
+end
+
 function is_type(): u8
     if command_argument_matches("T") != 0
         return 1
@@ -397,6 +428,10 @@ procedure dispatch_line()
         write_path()
     elsif code == COMMAND_MAP
         write_memory_map()
+    elsif code == COMMAND_CLS
+        console_clear()
+    elsif code == COMMAND_PROMPT
+        configure_prompt()
     elsif code == COMMAND_TYPE
         type_file()
     elsif code == COMMAND_CD
@@ -412,7 +447,12 @@ procedure dispatch_line()
 end
 
 procedure prompt()
-    console_prompt_drive(current_drive)
+    if prompt_mode == PROMPT_SHORT
+        console_prompt_drive(current_drive)
+    else
+        write_path_prefix()
+        console_write_text("> ")
+    end
     return
 end
 
@@ -422,6 +462,12 @@ procedure select_drive()
 end
 
 procedure write_path()
+    write_path_prefix()
+    console_newline()
+    return
+end
+
+procedure write_path_prefix()
     var index: u16
     console_write(current_drive)
     console_write(':')
@@ -430,7 +476,6 @@ procedure write_path()
         console_write(current_path[index])
         index = index + 1
     end
-    console_newline()
     return
 end
 
@@ -462,6 +507,29 @@ procedure write_memory_map()
     write_memory_range("RAM", $0000, $8fff)
     write_memory_range("I/O", $9f00, $9fff)
     write_memory_range("ROM", $c000, $ffff)
+    return
+end
+
+procedure write_prompt_mode()
+    console_write_text("Prompt: ")
+    if prompt_mode == PROMPT_SHORT
+        console_write_text("SHORT\r\n")
+    else
+        console_write_text("FULL\r\n")
+    end
+    return
+end
+
+procedure configure_prompt()
+    if command_word_matches("PROMPT") != 0
+        write_prompt_mode()
+    elsif argument_word_matches(7, "SHORT") != 0
+        prompt_mode = PROMPT_SHORT
+    elsif argument_word_matches(7, "FULL") != 0
+        prompt_mode = PROMPT_FULL
+    else
+        console_write_unknown()
+    end
     return
 end
 

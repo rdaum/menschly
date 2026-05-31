@@ -497,7 +497,7 @@ fn raw_interrupt_skips_generated_entry_state() {
 #[test]
 fn hellord_example_boots_as_interrupt_driven_xex() {
     let build = build_hellord_example();
-    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> HELP\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nT  type\r\nE  echo\r\nS  status\r\nP  pwd\r\nM  map\r\nCD path\r\nA:-Z: drive\r\nA> VER\r\nHellord DOS 0.1\r\nA> DIR\r\nDirectory of A:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\nGAMES      <DIR>\r\n2 file(s)  1 dir(s)\r\nA> b:\r\nB> DIR\r\nDirectory of B:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\nGAMES      <DIR>\r\n2 file(s)  1 dir(s)\r\nB> PWD\r\nB:/\r\nB> CD GAMES\r\nB> PWD\r\nB:GAMES\r\nB> MAP\r\nMemory map:\r\nRAM $0000-$8FFF\r\nI/O $9F00-$9FFF\r\nROM $C000-$FFFF\r\nB> STAT\r\nR: 0\r\nT: 0\r\nB> ECHO heX\x08 \x08llo\r\nhello\r\nB> X\r\n?SYNTAX\r\nB> \r\nB> ";
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> HELP\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nT  type\r\nE  echo\r\nS  status\r\nP  pwd\r\nM  map\r\nC  cls\r\nPROMPT mode\r\nCD path\r\nA:-Z: drive\r\nA> VER\r\nHellord DOS 0.1\r\nA> DIR\r\nDirectory of A:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\nGAMES      <DIR>\r\n2 file(s)  1 dir(s)\r\nA> b:\r\nB> DIR\r\nDirectory of B:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\nGAMES      <DIR>\r\n2 file(s)  1 dir(s)\r\nB> PWD\r\nB:/\r\nB> CD GAMES\r\nB> PWD\r\nB:GAMES\r\nB> MAP\r\nMemory map:\r\nRAM $0000-$8FFF\r\nI/O $9F00-$9FFF\r\nROM $C000-$FFFF\r\nB> STAT\r\nR: 0\r\nT: 0\r\nB> ECHO heX\x08 \x08llo\r\nhello\r\nB> X\r\n?SYNTAX\r\nB> \r\nB> ";
 
     let run = run_image_until_output(
         &build.image,
@@ -506,6 +506,24 @@ fn hellord_example_boots_as_interrupt_driven_xex() {
         200_000,
     )
     .expect("Hellord image should produce expected output");
+
+    assert_eq!(run.output, expected);
+    assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
+    assert_eq!(run.machine.byte(HELLORD_TX_OVERFLOW_ADDR), 0);
+}
+
+#[test]
+fn hellord_prompt_modes_and_clear_screen_work() {
+    let build = build_hellord_example();
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> prompt\r\nPrompt: SHORT\r\nA> prompt full\r\nA:/> cd games\r\nA:GAMES> prompt\r\nPrompt: FULL\r\nA:GAMES> cls\r\n\x1b[2J\x1b[HA:GAMES> prompt short\r\nA> ";
+
+    let run = run_image_until_output(
+        &build.image,
+        b"prompt\nprompt full\ncd games\nprompt\ncls\nprompt short\n",
+        expected.len(),
+        250_000,
+    )
+    .expect("Hellord image should produce prompt settings transcript");
 
     assert_eq!(run.output, expected);
     assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
