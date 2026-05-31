@@ -145,3 +145,21 @@ It returns `$ffff` in `A` when the device can accept output and `0` otherwise.
 The BIOS implementation routes these calls through a small typed device
 registry. The initial registry has one character device, TOS `CON` device `2`,
 backed by the x65-alike USB UART.
+
+Hellord also reserves a small private BIOS range for walking that device
+registry:
+
+```text
+A = $0100       ; first registered device, returns a device id or 0
+A = $0101       ; next sibling/list entry, X = device, returns device id or 0
+A = $0102       ; parent device, X = device, returns device id or 0
+A = $0103       ; first child device, X = device, returns device id or 0
+A = $0104       ; device kind, X = device, returns kind or 0
+A = $0105       ; device flags, X = device, returns flags or 0
+A = $0106       ; device driver, X = device, returns driver id or 0
+```
+
+The initial device tree has a single root/list node: device `2`, kind
+`$0001` for character I/O, flags `$0003` for readable and writable, and driver
+`$0001` for the x65-alike serial UART. Parent, first child, and next sibling
+are all `0` until more devices are registered.

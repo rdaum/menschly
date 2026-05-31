@@ -267,13 +267,36 @@ fn language_bios_bconout_runs_through_cop_syscall() {
         module BiosSyscallCaller
         application main
         fixed($000294) volatile var status: u16
+        fixed($000296) volatile var first_device: u16
+        fixed($000298) volatile var next_device: u16
+        fixed($00029a) volatile var parent_device: u16
+        fixed($00029c) volatile var child_device: u16
+        fixed($00029e) volatile var device_kind: u16
+        fixed($0002a0) volatile var device_flags: u16
+        fixed($0002a2) volatile var device_driver: u16
+        fixed($0002a4) volatile var bad_device_kind: u16
         external reentrant procedure bios_bconout(dev: u16, ch: u16)
         external reentrant function bios_bcostat(dev: u16): u16
+        external reentrant function bios_device_first(): u16
+        external reentrant function bios_device_next(dev: u16): u16
+        external reentrant function bios_device_parent(dev: u16): u16
+        external reentrant function bios_device_child(dev: u16): u16
+        external reentrant function bios_device_kind(dev: u16): u16
+        external reentrant function bios_device_flags(dev: u16): u16
+        external reentrant function bios_device_driver(dev: u16): u16
 
         procedure main()
             bios_bconout(2, $0042)
             bios_bconout(1, $0058)
             status = bios_bcostat(2)
+            first_device = bios_device_first()
+            next_device = bios_device_next(first_device)
+            parent_device = bios_device_parent(first_device)
+            child_device = bios_device_child(first_device)
+            device_kind = bios_device_kind(first_device)
+            device_flags = bios_device_flags(first_device)
+            device_driver = bios_device_driver(first_device)
+            bad_device_kind = bios_device_kind(1)
             bios_bconout(2, $0021)
             return
         end
@@ -295,6 +318,22 @@ fn language_bios_bconout_runs_through_cop_syscall() {
     assert_eq!(run.output, b"B!");
     assert_eq!(run.machine.byte(0x000294), 0xff);
     assert_eq!(run.machine.byte(0x000295), 0xff);
+    assert_eq!(run.machine.byte(0x000296), 0x02);
+    assert_eq!(run.machine.byte(0x000297), 0x00);
+    assert_eq!(run.machine.byte(0x000298), 0x00);
+    assert_eq!(run.machine.byte(0x000299), 0x00);
+    assert_eq!(run.machine.byte(0x00029a), 0x00);
+    assert_eq!(run.machine.byte(0x00029b), 0x00);
+    assert_eq!(run.machine.byte(0x00029c), 0x00);
+    assert_eq!(run.machine.byte(0x00029d), 0x00);
+    assert_eq!(run.machine.byte(0x00029e), 0x01);
+    assert_eq!(run.machine.byte(0x00029f), 0x00);
+    assert_eq!(run.machine.byte(0x0002a0), 0x03);
+    assert_eq!(run.machine.byte(0x0002a1), 0x00);
+    assert_eq!(run.machine.byte(0x0002a2), 0x01);
+    assert_eq!(run.machine.byte(0x0002a3), 0x00);
+    assert_eq!(run.machine.byte(0x0002a4), 0x00);
+    assert_eq!(run.machine.byte(0x0002a5), 0x00);
 }
 
 #[test]

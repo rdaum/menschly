@@ -4,6 +4,13 @@ vector cop = bios_trap
 
 const BIOS_BCONOUT = $0003
 const BIOS_BCOSTAT = $0008
+const BIOS_DEV_FIRST = $0100
+const BIOS_DEV_NEXT = $0101
+const BIOS_DEV_PARENT = $0102
+const BIOS_DEV_CHILD = $0103
+const BIOS_DEV_KIND = $0104
+const BIOS_DEV_FLAGS = $0105
+const BIOS_DEV_DRIVER = $0106
 const BIOS_CONSOLE = $0002
 const BIOS_FAMILY = $0d
 const DEVICE_KIND_CHAR = $0001
@@ -58,6 +65,95 @@ export reentrant function bios_bcostat(dev: u16): u16
     return status
 end
 
+export reentrant function bios_device_first(): u16
+    var status: u16
+    asm "rep #$30"
+    asm ".a16"
+    asm ".i16"
+    asm "lda #$0100"
+    asm "cop $0d"
+    asm "sta $01,s"
+    return status
+end
+
+export reentrant function bios_device_next(dev: u16): u16
+    var status: u16
+    asm "rep #$30"
+    asm ".a16"
+    asm ".i16"
+    asm "lda $05,s"
+    asm "tax"
+    asm "lda #$0101"
+    asm "cop $0d"
+    asm "sta $01,s"
+    return status
+end
+
+export reentrant function bios_device_parent(dev: u16): u16
+    var status: u16
+    asm "rep #$30"
+    asm ".a16"
+    asm ".i16"
+    asm "lda $05,s"
+    asm "tax"
+    asm "lda #$0102"
+    asm "cop $0d"
+    asm "sta $01,s"
+    return status
+end
+
+export reentrant function bios_device_child(dev: u16): u16
+    var status: u16
+    asm "rep #$30"
+    asm ".a16"
+    asm ".i16"
+    asm "lda $05,s"
+    asm "tax"
+    asm "lda #$0103"
+    asm "cop $0d"
+    asm "sta $01,s"
+    return status
+end
+
+export reentrant function bios_device_kind(dev: u16): u16
+    var status: u16
+    asm "rep #$30"
+    asm ".a16"
+    asm ".i16"
+    asm "lda $05,s"
+    asm "tax"
+    asm "lda #$0104"
+    asm "cop $0d"
+    asm "sta $01,s"
+    return status
+end
+
+export reentrant function bios_device_flags(dev: u16): u16
+    var status: u16
+    asm "rep #$30"
+    asm ".a16"
+    asm ".i16"
+    asm "lda $05,s"
+    asm "tax"
+    asm "lda #$0105"
+    asm "cop $0d"
+    asm "sta $01,s"
+    return status
+end
+
+export reentrant function bios_device_driver(dev: u16): u16
+    var status: u16
+    asm "rep #$30"
+    asm ".a16"
+    asm ".i16"
+    asm "lda $05,s"
+    asm "tax"
+    asm "lda #$0106"
+    asm "cop $0d"
+    asm "sta $01,s"
+    return status
+end
+
 export procedure bios_init_registry()
     registry_initialized = 1
     bios_first_device = BIOS_CONSOLE
@@ -78,35 +174,39 @@ procedure bios_ensure_registry()
     return
 end
 
-function bios_find_char_device(): u16
+function bios_find_device(): u16
     bios_ensure_registry()
     if bios_first_device == bios_device
         if serial_device.id == bios_device
-            if serial_device.kind == DEVICE_KIND_CHAR
-                return serial_device.driver
-            else
-                return DEVICE_DRIVER_NONE
-            end
+            return serial_device.id
         else
-            return DEVICE_DRIVER_NONE
+            return 0
         end
     else
-        return DEVICE_DRIVER_NONE
+        return 0
     end
 end
 
 function bios_dispatch_bconout(): u16
     direct var driver: u16
-    driver = bios_find_char_device()
-    if driver == DEVICE_DRIVER_SERIAL
-        if serial_device.flags & DEVICE_FLAG_WRITE != 0
-            asm "sep #$20"
-            asm ".a8"
-            asm "lda bios_arg"
-            asm "sta f:$009f57"
-            asm "rep #$20"
-            asm ".a16"
-            return 0
+    if bios_find_device() != 0
+        if serial_device.kind == DEVICE_KIND_CHAR
+            driver = serial_device.driver
+            if driver == DEVICE_DRIVER_SERIAL
+                if serial_device.flags & DEVICE_FLAG_WRITE != 0
+                    asm "sep #$20"
+                    asm ".a8"
+                    asm "lda bios_arg"
+                    asm "sta f:$009f57"
+                    asm "rep #$20"
+                    asm ".a16"
+                    return 0
+                else
+                    return $ffff
+                end
+            else
+                return $ffff
+            end
         else
             return $ffff
         end
@@ -117,13 +217,69 @@ end
 
 function bios_dispatch_bcostat(): u16
     direct var driver: u16
-    driver = bios_find_char_device()
-    if driver == DEVICE_DRIVER_SERIAL
-        if serial_device.flags & DEVICE_FLAG_WRITE != 0
-            return $ffff
+    if bios_find_device() != 0
+        if serial_device.kind == DEVICE_KIND_CHAR
+            driver = serial_device.driver
+            if driver == DEVICE_DRIVER_SERIAL
+                if serial_device.flags & DEVICE_FLAG_WRITE != 0
+                    return $ffff
+                else
+                    return 0
+                end
+            else
+                return 0
+            end
         else
             return 0
         end
+    else
+        return 0
+    end
+end
+
+function bios_dispatch_device_next(): u16
+    if bios_find_device() != 0
+        return serial_device.next_sibling
+    else
+        return 0
+    end
+end
+
+function bios_dispatch_device_parent(): u16
+    if bios_find_device() != 0
+        return serial_device.parent
+    else
+        return 0
+    end
+end
+
+function bios_dispatch_device_child(): u16
+    if bios_find_device() != 0
+        return serial_device.first_child
+    else
+        return 0
+    end
+end
+
+function bios_dispatch_device_kind(): u16
+    if bios_find_device() != 0
+        return serial_device.kind
+    else
+        return 0
+    end
+end
+
+function bios_dispatch_device_flags(): u16
+    if bios_find_device() != 0
+        return serial_device.flags
+    else
+        return 0
+    end
+end
+
+function bios_dispatch_device_driver(): u16
+    if bios_find_device() != 0
+        return serial_device.driver
     else
         return 0
     end
@@ -140,6 +296,21 @@ interrupt(preserve = p, dbr) procedure bios_trap()
         bios_status = bios_dispatch_bconout()
     elsif bios_call == BIOS_BCOSTAT
         bios_status = bios_dispatch_bcostat()
+    elsif bios_call == BIOS_DEV_FIRST
+        bios_ensure_registry()
+        bios_status = bios_first_device
+    elsif bios_call == BIOS_DEV_NEXT
+        bios_status = bios_dispatch_device_next()
+    elsif bios_call == BIOS_DEV_PARENT
+        bios_status = bios_dispatch_device_parent()
+    elsif bios_call == BIOS_DEV_CHILD
+        bios_status = bios_dispatch_device_child()
+    elsif bios_call == BIOS_DEV_KIND
+        bios_status = bios_dispatch_device_kind()
+    elsif bios_call == BIOS_DEV_FLAGS
+        bios_status = bios_dispatch_device_flags()
+    elsif bios_call == BIOS_DEV_DRIVER
+        bios_status = bios_dispatch_device_driver()
     else
         bios_status = $ffff
     end
