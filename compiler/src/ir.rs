@@ -200,11 +200,23 @@ pub enum IrInst {
         width: Width,
         value: Value,
     },
+    Inc {
+        width: Width,
+        value: Value,
+    },
+    Compare {
+        width: Width,
+        lhs: Value,
+        rhs: Value,
+    },
     Branch {
         target: Label,
     },
     BranchIfZero {
         value: Value,
+        target: Label,
+    },
+    BranchIfNotEqual {
         target: Label,
     },
     CallProcedure {
@@ -229,9 +241,11 @@ pub enum Width {
 pub enum Address {
     Symbol(String),
     Direct(String),
+    SymbolIndexedX(String),
     NearPtr(Value),
     FarPtr(Value),
     Absolute(u32),
+    AbsoluteIndexedX(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +253,7 @@ pub enum Value {
     Accumulator,
     IndexX,
     IndexY,
+    Const(Const),
     Temp(String),
     Local(String),
     Param(String),

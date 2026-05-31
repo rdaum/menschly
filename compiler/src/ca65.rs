@@ -55,6 +55,7 @@ fn emit_inst(inst: &AsmInst) -> String {
         AsmInst::Tay => "tay".to_owned(),
         AsmInst::Txa => "txa".to_owned(),
         AsmInst::Tya => "tya".to_owned(),
+        AsmInst::Inx => "inx".to_owned(),
         AsmInst::Clc => "clc".to_owned(),
         AsmInst::Sec => "sec".to_owned(),
         AsmInst::Adc(operand) => one_operand("adc", operand),
@@ -62,6 +63,7 @@ fn emit_inst(inst: &AsmInst) -> String {
         AsmInst::Inc(operand) => one_operand("inc", operand),
         AsmInst::Dec(operand) => one_operand("dec", operand),
         AsmInst::Cmp(operand) => one_operand("cmp", operand),
+        AsmInst::Cpx(operand) => one_operand("cpx", operand),
         AsmInst::Beq(label) => branch("beq", label),
         AsmInst::Bne(label) => branch("bne", label),
         AsmInst::Bra(label) => branch("bra", label),
@@ -88,6 +90,7 @@ fn emit_operand(operand: &Operand) -> String {
     match operand {
         Operand::Immediate(value) => emit_immediate(*value),
         Operand::Absolute(symbol) => emit_symbol(symbol),
+        Operand::AbsoluteIndexedX(symbol) => format!("{},x", emit_symbol(symbol)),
         Operand::AbsoluteLong(symbol) => format!("f:{}", emit_symbol(symbol)),
         Operand::Direct(symbol) => emit_symbol(symbol),
         Operand::DirectIndexedX(symbol) => format!("{},x", emit_symbol(symbol)),
@@ -108,18 +111,24 @@ fn emit_immediate(value: Immediate) -> String {
 }
 
 fn emit_symbol(symbol: &Symbol) -> String {
-    symbol.to_string()
+    match symbol {
+        Symbol::Named(name) => name.clone(),
+        Symbol::Address(address) if *address <= 0xffff => format!("${address:04x}"),
+        Symbol::Address(address) => format!("${address:06x}"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::fixtures;
+    use crate::lower_65816::lower_module;
 
     use super::emit_module;
 
     #[test]
     fn emits_exported_return_constant_fixture() {
-        let asm = emit_module(&fixtures::return_constant_u16());
+        let module = lower_module(&fixtures::return_constant_u16()).unwrap();
+        let asm = emit_module(&module);
 
         assert!(asm.contains(".p816\n"));
         assert!(asm.contains(".export return_constant_u16\n"));
@@ -131,12 +140,25 @@ mod tests {
 
     #[test]
     fn emits_store_byte_fixture() {
-        let asm = emit_module(&fixtures::store_byte());
+        let module = lower_module(&fixtures::store_byte()).unwrap();
+        let asm = emit_module(&module);
 
         assert!(asm.contains(".export store_byte\n"));
         assert!(asm.contains("\tsep #$20\n\t.a8\n\t.i16\n"));
         assert!(asm.contains("\tlda #$7f\n"));
         assert!(asm.contains("\tsta $040000\n"));
         assert!(asm.contains("\trtl\n"));
+    }
+
+    #[test]
+    fn emits_branching_copy_fixture() {
+        let module = lower_module(&fixtures::copy_bytes_near()).unwrap();
+        let asm = emit_module(&module);
+
+        assert!(asm.contains("copy_loop:\n"));
+        assert!(asm.contains("\tlda $1000,x\n"));
+        assert!(asm.contains("\tsta $1100,x\n"));
+        assert!(asm.contains("\tinx\n"));
+        assert!(asm.contains("\tbne copy_loop\n"));
     }
 }

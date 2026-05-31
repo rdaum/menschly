@@ -67,6 +67,7 @@ pub enum AsmInst {
     Tay,
     Txa,
     Tya,
+    Inx,
     Clc,
     Sec,
     Adc(Operand),
@@ -74,6 +75,7 @@ pub enum AsmInst {
     Inc(Operand),
     Dec(Operand),
     Cmp(Operand),
+    Cpx(Operand),
     Beq(String),
     Bne(String),
     Bra(String),
@@ -110,6 +112,7 @@ impl Mode {
 pub enum Operand {
     Immediate(Immediate),
     Absolute(Symbol),
+    AbsoluteIndexedX(Symbol),
     AbsoluteLong(Symbol),
     Direct(Symbol),
     DirectIndexedX(Symbol),

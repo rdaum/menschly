@@ -4,13 +4,12 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mensch_systems_tests::{ca65, fixtures};
+use mensch_systems_tests::{ca65, fixtures, lower_65816};
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
 
 const ROUTINE_ADDR: usize = 0x020000;
 const RETURN_BANK: u8 = 0x03;
 const RETURN_ADDR: u16 = 0x1234;
-const STORE_ADDR: usize = 0x040000;
 
 static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -50,7 +49,10 @@ impl HasAddressBus for Memory {
 fn run_generated_routine(binary: &[u8]) -> (Processor, Memory) {
     let mut memory = Memory::new();
     memory.load(ROUTINE_ADDR, binary);
+    run_loaded_generated_routine(memory)
+}
 
+fn run_loaded_generated_routine(mut memory: Memory) -> (Processor, Memory) {
     let mut cpu = Processor::new();
     cpu.p = StatusRegister::from_byte(0x00, false);
     cpu.pbr = (ROUTINE_ADDR >> 16) as u8;
@@ -106,6 +108,13 @@ fn assemble_fixture(name: &str, asm: &str) -> Vec<u8> {
     fs::read(&bin_path).expect("linked fixture binary should exist")
 }
 
+fn assemble_ir_fixture(name: &str, module: &mensch_systems_tests::ir::Module) -> Vec<u8> {
+    let asm = ca65::emit_module(
+        &lower_65816::lower_module(module).expect("fixture should lower to 65816 assembly"),
+    );
+    assemble_fixture(name, &asm)
+}
+
 fn run_command(command: &mut Command) {
     let output = command
         .output()
@@ -136,8 +145,7 @@ fn temp_dir(name: &str) -> PathBuf {
 
 #[test]
 fn generated_return_constant_routine_runs() {
-    let asm = ca65::emit_module(&fixtures::return_constant_u16());
-    let binary = assemble_fixture("return-constant", &asm);
+    let binary = assemble_ir_fixture("return-constant", &fixtures::return_constant_u16());
 
     let (cpu, _memory) = run_generated_routine(&binary);
 
@@ -146,10 +154,96 @@ fn generated_return_constant_routine_runs() {
 
 #[test]
 fn generated_store_byte_routine_runs() {
-    let asm = ca65::emit_module(&fixtures::store_byte());
-    let binary = assemble_fixture("store-byte", &asm);
+    let binary = assemble_ir_fixture("store-byte", &fixtures::store_byte());
 
     let (_cpu, memory) = run_generated_routine(&binary);
 
-    assert_eq!(memory.byte(STORE_ADDR), 0x7f);
+    assert_eq!(memory.byte(fixtures::STORE_BYTE_ADDR as usize), 0x7f);
+}
+
+#[test]
+fn generated_copy_bytes_near_routine_runs() {
+    let binary = assemble_ir_fixture("copy-bytes-near", &fixtures::copy_bytes_near());
+    let mut memory = Memory::new();
+    memory.load(ROUTINE_ADDR, &binary);
+    memory.load(
+        0x020000 + fixtures::COPY_SRC as usize,
+        &[0x10, 0x20, 0x30, 0x40],
+    );
+
+    let (_cpu, memory) = run_loaded_generated_routine(memory);
+
+    assert_eq!(memory.byte(0x020000 + fixtures::COPY_DST as usize), 0x10);
+    assert_eq!(
+        memory.byte(0x020000 + fixtures::COPY_DST as usize + 1),
+        0x20
+    );
+    assert_eq!(
+        memory.byte(0x020000 + fixtures::COPY_DST as usize + 2),
+        0x30
+    );
+    assert_eq!(
+        memory.byte(0x020000 + fixtures::COPY_DST as usize + 3),
+        0x40
+    );
+}
+
+#[test]
+fn generated_clear_memory_routine_runs() {
+    let binary = assemble_ir_fixture("clear-memory", &fixtures::clear_memory());
+    let mut memory = Memory::new();
+    memory.load(ROUTINE_ADDR, &binary);
+    memory.load(
+        0x020000 + fixtures::CLEAR_DST as usize,
+        &[0xaa, 0xbb, 0xcc, 0xdd],
+    );
+
+    let (_cpu, memory) = run_loaded_generated_routine(memory);
+
+    assert_eq!(memory.byte(0x020000 + fixtures::CLEAR_DST as usize), 0x00);
+    assert_eq!(
+        memory.byte(0x020000 + fixtures::CLEAR_DST as usize + 1),
+        0x00
+    );
+    assert_eq!(
+        memory.byte(0x020000 + fixtures::CLEAR_DST as usize + 2),
+        0x00
+    );
+    assert_eq!(
+        memory.byte(0x020000 + fixtures::CLEAR_DST as usize + 3),
+        0x00
+    );
+}
+
+#[test]
+fn generated_internal_procedure_call_runs() {
+    let binary = assemble_ir_fixture(
+        "call-internal-procedure",
+        &fixtures::call_internal_procedure(),
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(fixtures::HELPER_STORE_ADDR as usize), 0x42);
+}
+
+#[test]
+fn generated_internal_function_call_runs() {
+    let binary = assemble_ir_fixture(
+        "call-internal-function",
+        &fixtures::call_internal_function(),
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(fixtures::FUNCTION_STORE_ADDR as usize), 0x55);
+}
+
+#[test]
+fn generated_exported_main_routine_runs() {
+    let binary = assemble_ir_fixture("exported-main", &fixtures::exported_main());
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(fixtures::MAIN_STORE_ADDR as usize), 0x99);
 }
