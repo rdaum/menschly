@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, IrInst, Label, Local, Module, Param, PointerKind, Routine, RoutineKind,
-    Storage, Type, Value, Width,
+    Abi, Address, Const, Global, GlobalPlacement, IrInst, Label, Local, Metadata, Module, Param,
+    PointerKind, Routine, RoutineKind, Storage, Type, Value, Vector, Width,
 };
 
 pub fn parse_source(source: &str) -> Result<SourceModule, FrontendError> {
@@ -17,7 +17,31 @@ pub fn compile_source(source: &str) -> Result<Module, FrontendError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceModule {
     pub name: String,
+    pub globals: Vec<GlobalDecl>,
+    pub vectors: Vec<VectorDecl>,
+    pub metadata: Vec<MetadataDecl>,
     pub routines: Vec<RoutineDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalDecl {
+    pub name: String,
+    pub ty: Type,
+    pub placement: GlobalPlacement,
+    pub volatile: bool,
+    pub export: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorDecl {
+    pub name: String,
+    pub routine: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataDecl {
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +74,7 @@ pub enum Stmt {
     If { cond: Cond, body: Vec<Stmt> },
     While { cond: Cond, body: Vec<Stmt> },
     Return(Option<Expr>),
+    InlineAsm(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +128,7 @@ struct Token {
 enum TokenKind {
     Ident(String),
     Number(u32),
+    String(String),
     LParen,
     RParen,
     Colon,
@@ -122,6 +148,10 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
     while let Some((offset, ch)) = chars.next() {
         match ch {
             ' ' | '\t' | '\r' | '\n' => {}
+            '"' => out.push(token(
+                TokenKind::String(read_string(&mut chars, offset)?),
+                offset,
+            )),
             '#' => {
                 while let Some((_, next)) = chars.peek() {
                     if *next == '\n' {
@@ -200,6 +230,40 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
 
 fn token(kind: TokenKind, offset: usize) -> Token {
     Token { kind, offset }
+}
+
+fn read_string(
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    offset: usize,
+) -> Result<String, FrontendError> {
+    let mut out = String::new();
+    while let Some((_, ch)) = chars.next() {
+        match ch {
+            '"' => return Ok(out),
+            '\\' => {
+                let Some((_, escaped)) = chars.next() else {
+                    return Err(FrontendError::Lex(format!(
+                        "unterminated escape at {offset}"
+                    )));
+                };
+                match escaped {
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    other => {
+                        return Err(FrontendError::Lex(format!(
+                            "unsupported escape \\{other} at {offset}"
+                        )));
+                    }
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    Err(FrontendError::Lex(format!(
+        "unterminated string at {offset}"
+    )))
 }
 
 fn read_number(
@@ -281,13 +345,91 @@ impl Parser {
     fn parse_module(&mut self) -> Result<SourceModule, FrontendError> {
         self.expect_keyword("module")?;
         let name = self.expect_ident()?;
+        let mut globals = Vec::new();
+        let mut vectors = Vec::new();
+        let mut metadata = Vec::new();
         let mut routines = Vec::new();
 
         while !self.at_eof() {
-            routines.push(self.parse_routine()?);
+            if self.take_keyword("metadata") {
+                metadata.push(self.parse_metadata_decl()?);
+            } else if self.take_keyword("vector") {
+                vectors.push(self.parse_vector_decl()?);
+            } else if self.starts_global_decl() {
+                globals.push(self.parse_global_decl()?);
+            } else {
+                routines.push(self.parse_routine()?);
+            }
         }
 
-        Ok(SourceModule { name, routines })
+        Ok(SourceModule {
+            name,
+            globals,
+            vectors,
+            metadata,
+            routines,
+        })
+    }
+
+    fn parse_metadata_decl(&mut self) -> Result<MetadataDecl, FrontendError> {
+        let key = self.expect_ident()?;
+        self.expect(TokenKind::Equal)?;
+        let value = if let Some(value) = self.take_string() {
+            value
+        } else if let Some(value) = self.take_number() {
+            value.to_string()
+        } else {
+            self.expect_ident()?
+        };
+        Ok(MetadataDecl { key, value })
+    }
+
+    fn parse_vector_decl(&mut self) -> Result<VectorDecl, FrontendError> {
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::Equal)?;
+        let routine = self.expect_ident()?;
+        Ok(VectorDecl { name, routine })
+    }
+
+    fn parse_global_decl(&mut self) -> Result<GlobalDecl, FrontendError> {
+        let export = self.take_keyword("export");
+        let placement = self.parse_global_placement()?;
+        let volatile = self.take_keyword("volatile");
+        self.expect_keyword("var")?;
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::Colon)?;
+        let ty = self.parse_type()?;
+        Ok(GlobalDecl {
+            name,
+            ty,
+            placement,
+            volatile,
+            export,
+        })
+    }
+
+    fn parse_global_placement(&mut self) -> Result<GlobalPlacement, FrontendError> {
+        if self.take_keyword("fixed") {
+            self.expect(TokenKind::LParen)?;
+            let address = self
+                .take_number()
+                .ok_or_else(|| self.parse_error("expected fixed address"))?;
+            self.expect(TokenKind::RParen)?;
+            Ok(GlobalPlacement::Fixed(address))
+        } else if self.take_keyword("bank") {
+            self.expect(TokenKind::LParen)?;
+            let bank = self
+                .take_number()
+                .ok_or_else(|| self.parse_error("expected bank number"))?;
+            self.expect(TokenKind::RParen)?;
+            if bank > u8::MAX as u32 {
+                Err(FrontendError::Parse(format!("bank {bank} is out of range")))
+            } else {
+                Ok(GlobalPlacement::Bank(bank as u8))
+            }
+        } else {
+            Ok(GlobalPlacement::Static)
+        }
     }
 
     fn parse_routine(&mut self) -> Result<RoutineDecl, FrontendError> {
@@ -441,6 +583,12 @@ impl Parser {
             };
             return Ok(Stmt::Return(value));
         }
+        if self.take_keyword("asm") {
+            let Some(line) = self.take_string() else {
+                return Err(self.parse_error("expected inline assembly string"));
+            };
+            return Ok(Stmt::InlineAsm(line));
+        }
 
         let expr = self.parse_expr()?;
         if self.take(TokenKind::Equal) {
@@ -532,6 +680,18 @@ impl Parser {
                 && self.is_keyword_at(1, "var"))
     }
 
+    fn starts_global_decl(&self) -> bool {
+        self.is_keyword_at(0, "var")
+            || self.is_keyword_at(0, "volatile")
+            || self.is_keyword_at(0, "fixed")
+            || self.is_keyword_at(0, "bank")
+            || (self.is_keyword_at(0, "export")
+                && (self.is_keyword_at(1, "var")
+                    || self.is_keyword_at(1, "volatile")
+                    || self.is_keyword_at(1, "fixed")
+                    || self.is_keyword_at(1, "bank")))
+    }
+
     fn next_is_block_end(&self) -> bool {
         self.is_keyword_at(0, "end")
     }
@@ -575,6 +735,16 @@ impl Parser {
             Some(TokenKind::Number(value)) => {
                 self.pos += 1;
                 Some(*value)
+            }
+            _ => None,
+        }
+    }
+
+    fn take_string(&mut self) -> Option<String> {
+        match self.tokens.get(self.pos).map(|token| &token.kind) {
+            Some(TokenKind::String(value)) => {
+                self.pos += 1;
+                Some(value.clone())
             }
             _ => None,
         }
@@ -647,9 +817,40 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
     };
 
     let mut module = Module::new(source.name);
+    module.globals = source
+        .globals
+        .iter()
+        .map(|global| Global {
+            name: global.name.clone(),
+            ty: global.ty.clone(),
+            placement: global.placement.clone(),
+            volatile: global.volatile,
+            export: global.export,
+        })
+        .collect();
+    module.vectors = source
+        .vectors
+        .iter()
+        .map(|vector| Vector {
+            name: vector.name.clone(),
+            routine: vector.routine.clone(),
+        })
+        .collect();
+    module.metadata = source
+        .metadata
+        .iter()
+        .map(|metadata| Metadata {
+            key: metadata.key.clone(),
+            value: metadata.value.clone(),
+        })
+        .collect();
+
     for routine in &source.routines {
-        module.routines.push(lowerer.lower_routine(routine)?);
+        module
+            .routines
+            .push(lowerer.lower_routine(routine, &source.globals)?);
     }
+    lowerer.validate_vectors(&module)?;
     Ok(module)
 }
 
@@ -680,7 +881,11 @@ fn routine_sigs(source: &SourceModule) -> Result<BTreeMap<String, RoutineSig>, F
 }
 
 impl Lowerer {
-    fn lower_routine(&mut self, source: &RoutineDecl) -> Result<Routine, FrontendError> {
+    fn lower_routine(
+        &mut self,
+        source: &RoutineDecl,
+        globals: &[GlobalDecl],
+    ) -> Result<Routine, FrontendError> {
         let kind = match &source.kind {
             RoutineDeclKind::Procedure => RoutineKind::Procedure,
             RoutineDeclKind::Function { result } => RoutineKind::Function {
@@ -712,7 +917,7 @@ impl Lowerer {
             body: Vec::new(),
         };
 
-        let mut lowerer = RoutineLowerer::new(self, source)?;
+        let mut lowerer = RoutineLowerer::new(self, source, globals)?;
         if !source.params.is_empty() {
             return Err(FrontendError::Type(format!(
                 "routine {} declares parameters, but parameter passing is not implemented yet",
@@ -724,6 +929,28 @@ impl Lowerer {
         }
         routine.body = lowerer.body;
         Ok(routine)
+    }
+
+    fn validate_vectors(&self, module: &Module) -> Result<(), FrontendError> {
+        for vector in &module.vectors {
+            let Some(routine) = module
+                .routines
+                .iter()
+                .find(|routine| routine.name == vector.routine)
+            else {
+                return Err(FrontendError::Type(format!(
+                    "vector {} references unknown routine {}",
+                    vector.name, vector.routine
+                )));
+            };
+            if !matches!(routine.abi, Abi::Interrupt) {
+                return Err(FrontendError::Type(format!(
+                    "vector {} references non-interrupt routine {}",
+                    vector.name, vector.routine
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn label(&mut self, prefix: &str) -> Label {
@@ -740,8 +967,22 @@ impl Lowerer {
 }
 
 impl<'a> RoutineLowerer<'a> {
-    fn new(parent: &'a mut Lowerer, routine: &'a RoutineDecl) -> Result<Self, FrontendError> {
+    fn new(
+        parent: &'a mut Lowerer,
+        routine: &'a RoutineDecl,
+        globals: &[GlobalDecl],
+    ) -> Result<Self, FrontendError> {
         let mut bindings = BTreeMap::new();
+        for global in globals {
+            insert_binding(
+                &mut bindings,
+                &global.name,
+                Binding {
+                    ty: global.ty.clone(),
+                    value: Value::Global(global.name.clone()),
+                },
+            )?;
+        }
         for param in &routine.params {
             insert_binding(
                 &mut bindings,
@@ -772,6 +1013,10 @@ impl<'a> RoutineLowerer<'a> {
 
     fn lower_stmt(&mut self, stmt: &Stmt) -> Result<(), FrontendError> {
         match stmt {
+            Stmt::InlineAsm(line) => {
+                self.body.push(IrInst::InlineAsm(line.clone()));
+                Ok(())
+            }
             Stmt::Assign { target, value } => self.lower_assign(target, value),
             Stmt::Call { name, args } => {
                 self.check_call(name, args, true)?;
@@ -1187,6 +1432,58 @@ mod tests {
         let source = "
             module Params
             procedure store(value: u8)
+                return
+            end
+        ";
+
+        assert!(compile_source(source).is_err());
+    }
+
+    #[test]
+    fn compiles_os_level_declarations_to_ca65() {
+        let source = "
+            module Kernel
+            metadata platform = \"c256\"
+            vector irq = vblank
+            fixed($040005) volatile var io: u8
+            export bank(2) var page: u16
+
+            interrupt procedure vblank()
+                asm \"nop\"
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        assert_eq!(module.metadata[0].key, "platform");
+        assert_eq!(module.vectors[0].routine, "vblank");
+        assert!(module.globals[0].volatile);
+        assert_eq!(
+            module.globals[0].placement,
+            GlobalPlacement::Fixed(0x040005)
+        );
+        assert_eq!(module.globals[1].placement, GlobalPlacement::Bank(2));
+
+        let (lowered, _assignment) =
+            crate::lower_65816::lower_module_with_storage(&module).unwrap();
+        let asm = crate::ca65::emit_module(&lowered);
+
+        assert!(asm.contains("io = $040005\n"));
+        assert!(asm.contains(".segment \"BANK2\"\n"));
+        assert!(asm.contains(".export page\n"));
+        assert!(asm.contains("__vector_irq: .addr vblank\n"));
+        assert!(asm.contains(".segment \"MENSCH_META\"\n"));
+        assert!(asm.contains("\t.asciiz \"platform=c256\"\n"));
+        assert!(asm.contains("\tnop\n"));
+        assert!(asm.contains("\trti\n"));
+    }
+
+    #[test]
+    fn rejects_vectors_to_non_interrupt_procedures() {
+        let source = "
+            module BadVector
+            vector irq = main
+            procedure main()
                 return
             end
         ";

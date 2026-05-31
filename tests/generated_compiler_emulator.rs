@@ -300,3 +300,24 @@ fn generated_frontend_program_runs() {
 
     assert_eq!(memory.byte(0x020000 + 0x1300), 4);
 }
+
+#[test]
+fn generated_frontend_fixed_volatile_io_program_runs() {
+    let binary = assemble_source_fixture(
+        "frontend-fixed-volatile",
+        "
+        module FixedVolatileDemo
+        fixed($040005) volatile var io: u8
+
+        export procedure main()
+            asm \"nop\"
+            io = $5a
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x040005), 0x5a);
+}

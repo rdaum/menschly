@@ -15,6 +15,10 @@ pub fn optimize_module(module: &AsmModule) -> AsmModule {
         name: module.name.clone(),
         direct_symbols: module.direct_symbols.clone(),
         static_symbols: module.static_symbols.clone(),
+        fixed_symbols: module.fixed_symbols.clone(),
+        banked_symbols: module.banked_symbols.clone(),
+        vectors: module.vectors.clone(),
+        metadata: module.metadata.clone(),
         routines: module
             .routines
             .iter()

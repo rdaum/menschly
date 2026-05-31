@@ -152,6 +152,9 @@ pub fn apply_storage(module: &Module, assignment: &StorageAssignment) -> Module 
 
     Module {
         name: module.name.clone(),
+        globals: module.globals.clone(),
+        vectors: module.vectors.clone(),
+        metadata: module.metadata.clone(),
         routines,
     }
 }
@@ -344,6 +347,7 @@ fn allocate_direct_local(
 
 fn rewrite_inst(inst: &IrInst, layout: &RoutineStorage) -> IrInst {
     match inst {
+        IrInst::InlineAsm(_) => inst.clone(),
         IrInst::Move { dst, src } => IrInst::Move {
             dst: rewrite_value(dst, layout),
             src: rewrite_value(src, layout),
@@ -493,6 +497,7 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
         }
         IrInst::CallFunction { dst, .. } => collect_temp_value(dst, 2, &mut out),
         IrInst::Label(_)
+        | IrInst::InlineAsm(_)
         | IrInst::Branch { .. }
         | IrInst::BranchIfEqual { .. }
         | IrInst::BranchIfNotEqual { .. }

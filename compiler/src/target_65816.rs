@@ -5,6 +5,10 @@ pub struct AsmModule {
     pub name: String,
     pub direct_symbols: Vec<DirectSymbol>,
     pub static_symbols: Vec<StaticSymbol>,
+    pub fixed_symbols: Vec<FixedSymbol>,
+    pub banked_symbols: Vec<BankedSymbol>,
+    pub vectors: Vec<VectorEntry>,
+    pub metadata: Vec<ModuleMetadata>,
     pub routines: Vec<AsmRoutine>,
 }
 
@@ -14,6 +18,10 @@ impl AsmModule {
             name: name.into(),
             direct_symbols: Vec::new(),
             static_symbols: Vec::new(),
+            fixed_symbols: Vec::new(),
+            banked_symbols: Vec::new(),
+            vectors: Vec::new(),
+            metadata: Vec::new(),
             routines: Vec::new(),
         }
     }
@@ -34,6 +42,34 @@ pub struct DirectSymbol {
 pub struct StaticSymbol {
     pub name: String,
     pub size: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixedSymbol {
+    pub name: String,
+    pub address: u32,
+    pub size: u16,
+    pub export: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BankedSymbol {
+    pub name: String,
+    pub bank: u8,
+    pub size: u16,
+    pub export: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorEntry {
+    pub name: String,
+    pub routine: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleMetadata {
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

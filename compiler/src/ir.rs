@@ -3,6 +3,9 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
     pub name: String,
+    pub globals: Vec<Global>,
+    pub vectors: Vec<Vector>,
+    pub metadata: Vec<Metadata>,
     pub routines: Vec<Routine>,
 }
 
@@ -10,14 +13,60 @@ impl Module {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            globals: Vec::new(),
+            vectors: Vec::new(),
+            metadata: Vec::new(),
             routines: Vec::new(),
         }
+    }
+
+    pub fn with_global(mut self, global: Global) -> Self {
+        self.globals.push(global);
+        self
+    }
+
+    pub fn with_vector(mut self, vector: Vector) -> Self {
+        self.vectors.push(vector);
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: Metadata) -> Self {
+        self.metadata.push(metadata);
+        self
     }
 
     pub fn with_routine(mut self, routine: Routine) -> Self {
         self.routines.push(routine);
         self
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Global {
+    pub name: String,
+    pub ty: Type,
+    pub placement: GlobalPlacement,
+    pub volatile: bool,
+    pub export: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GlobalPlacement {
+    Static,
+    Fixed(u32),
+    Bank(u8),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Vector {
+    pub name: String,
+    pub routine: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Metadata {
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +238,7 @@ pub enum Storage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrInst {
     Label(Label),
+    InlineAsm(String),
     Move {
         dst: Value,
         src: Value,
@@ -278,6 +328,7 @@ pub enum Value {
     Local(String),
     Param(String),
     Direct(String),
+    Global(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

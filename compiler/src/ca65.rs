@@ -4,6 +4,21 @@ pub fn emit_module(module: &AsmModule) -> String {
     let mut out = String::new();
     out.push_str(".p816\n");
 
+    for symbol in &module.fixed_symbols {
+        if symbol.export {
+            out.push_str(".export ");
+            out.push_str(&symbol.name);
+            out.push('\n');
+        }
+        out.push_str(&symbol.name);
+        out.push_str(" = ");
+        out.push_str(&emit_symbol(&Symbol::Address(symbol.address)));
+        out.push('\n');
+    }
+    if !module.fixed_symbols.is_empty() {
+        out.push('\n');
+    }
+
     if !module.direct_symbols.is_empty() {
         out.push_str(".segment \"ZEROPAGE\"\n");
         for symbol in &module.direct_symbols {
@@ -26,6 +41,44 @@ pub fn emit_module(module: &AsmModule) -> String {
         out.push('\n');
     }
 
+    for symbol in &module.banked_symbols {
+        out.push_str(".segment \"BANK");
+        out.push_str(&symbol.bank.to_string());
+        out.push_str("\"\n");
+        if symbol.export {
+            out.push_str(".export ");
+            out.push_str(&symbol.name);
+            out.push('\n');
+        }
+        out.push_str(&symbol.name);
+        out.push_str(": .res ");
+        out.push_str(&symbol.size.to_string());
+        out.push('\n');
+        out.push('\n');
+    }
+
+    if !module.vectors.is_empty() {
+        out.push_str(".segment \"VECTORS\"\n");
+        for vector in &module.vectors {
+            out.push_str("__vector_");
+            out.push_str(&vector.name);
+            out.push_str(": .addr ");
+            out.push_str(&vector.routine);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
+    if !module.metadata.is_empty() {
+        out.push_str(".segment \"MENSCH_META\"\n");
+        for metadata in &module.metadata {
+            out.push_str("\t.asciiz ");
+            out.push_str(&quoted(&format!("{}={}", metadata.key, metadata.value)));
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
     out.push_str(".code\n\n");
 
     for routine in &module.routines {
@@ -33,6 +86,20 @@ pub fn emit_module(module: &AsmModule) -> String {
         out.push('\n');
     }
 
+    out
+}
+
+fn quoted(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
     out
 }
 

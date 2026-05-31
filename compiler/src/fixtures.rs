@@ -1,5 +1,5 @@
 use crate::ir::{
-    Abi, Address, Const, IrInst, Label, Local, Module, Routine, Storage, Type, Value, Width,
+    Address, Const, IrInst, Label, Local, Module, Routine, Storage, Type, Value, Width,
 };
 
 pub const COPY_SRC: u32 = 0x1000;
@@ -173,13 +173,8 @@ pub fn call_internal_function() -> Module {
 }
 
 pub fn exported_main() -> Module {
-    Module::new("exported_main").with_routine(Routine {
-        name: "main".to_owned(),
-        kind: crate::ir::RoutineKind::Procedure,
-        abi: Abi::Exported,
-        params: Vec::new(),
-        locals: Vec::new(),
-        body: vec![
+    Module::new("exported_main").with_routine(Routine::procedure("main").exported().with_body(
+        vec![
             IrInst::LoadConst {
                 dst: Value::Accumulator,
                 value: Const::U8(0x99),
@@ -191,7 +186,7 @@ pub fn exported_main() -> Module {
             },
             IrInst::Return,
         ],
-    })
+    ))
 }
 
 pub fn direct_local_store() -> Module {

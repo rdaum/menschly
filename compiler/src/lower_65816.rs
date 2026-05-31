@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::ir::{Abi, Address, Const, IrInst, Module, Routine, RoutineKind, Value, Width};
+use crate::ir::{
+    Abi, Address, Const, GlobalPlacement, IrInst, Module, Routine, RoutineKind, Value, Width,
+};
 use crate::optimize_65816::optimize_module;
 use crate::storage::{apply_storage, assign_storage, StorageAssignment};
 use crate::target_65816::{AsmInst, AsmModule, AsmRoutine, Immediate, Mode, Operand, Symbol};
@@ -12,10 +14,57 @@ pub fn lower_module(module: &Module) -> Result<AsmModule, LowerError> {
 
 fn lower_module_unoptimized(module: &Module) -> Result<AsmModule, LowerError> {
     let mut out = AsmModule::new(module.name.clone());
+    lower_module_declarations(module, &mut out);
     for routine in &module.routines {
         out.routines.push(lower_routine(routine)?);
     }
     Ok(out)
+}
+
+fn lower_module_declarations(module: &Module, out: &mut AsmModule) {
+    for global in &module.globals {
+        match global.placement {
+            GlobalPlacement::Static => {
+                out.static_symbols.push(crate::target_65816::StaticSymbol {
+                    name: global.name.clone(),
+                    size: global.ty.size_bytes(),
+                });
+            }
+            GlobalPlacement::Fixed(address) => {
+                out.fixed_symbols.push(crate::target_65816::FixedSymbol {
+                    name: global.name.clone(),
+                    address,
+                    size: global.ty.size_bytes(),
+                    export: global.export,
+                });
+            }
+            GlobalPlacement::Bank(bank) => {
+                out.banked_symbols.push(crate::target_65816::BankedSymbol {
+                    name: global.name.clone(),
+                    bank,
+                    size: global.ty.size_bytes(),
+                    export: global.export,
+                });
+            }
+        }
+    }
+
+    out.vectors = module
+        .vectors
+        .iter()
+        .map(|vector| crate::target_65816::VectorEntry {
+            name: vector.name.clone(),
+            routine: vector.routine.clone(),
+        })
+        .collect();
+    out.metadata = module
+        .metadata
+        .iter()
+        .map(|metadata| crate::target_65816::ModuleMetadata {
+            key: metadata.key.clone(),
+            value: metadata.value.clone(),
+        })
+        .collect();
 }
 
 pub fn lower_module_with_storage(
@@ -50,10 +99,11 @@ pub fn lower_module_with_storage(
                 .or_insert(local.size);
             symbols
         });
-    lowered.static_symbols = static_symbols
-        .into_iter()
-        .map(|(name, size)| crate::target_65816::StaticSymbol { name, size })
-        .collect();
+    lowered.static_symbols.extend(
+        static_symbols
+            .into_iter()
+            .map(|(name, size)| crate::target_65816::StaticSymbol { name, size }),
+    );
     Ok((optimize_module(&lowered), assignment))
 }
 
@@ -73,6 +123,7 @@ fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
 fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Result<(), LowerError> {
     match inst {
         IrInst::Label(label) => out.push(AsmInst::Label(label.to_string())),
+        IrInst::InlineAsm(line) => out.push(AsmInst::Raw(line.clone())),
         IrInst::Move { dst, src } => {
             load_value_to_a(out, src)?;
             store_a_to_value(out, dst)?;
@@ -87,6 +138,10 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                     out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
                     out.push(AsmInst::Sta(Operand::Direct(Symbol::Named(name.clone()))));
                 }
+                Value::Global(name) => {
+                    out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
+                    out.push(AsmInst::Sta(Operand::Absolute(Symbol::Named(name.clone()))));
+                }
                 other => return Err(LowerError::UnsupportedValue(other.clone())),
             }
         }
@@ -97,7 +152,11 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                 Value::Accumulator => out.push(AsmInst::Lda(operand)),
                 Value::IndexX => out.push(AsmInst::Ldx(operand)),
                 Value::IndexY => out.push(AsmInst::Ldy(operand)),
-                Value::Direct(_) | Value::Temp(_) | Value::Local(_) | Value::Param(_) => {
+                Value::Direct(_)
+                | Value::Temp(_)
+                | Value::Local(_)
+                | Value::Param(_)
+                | Value::Global(_) => {
                     out.push(AsmInst::Lda(operand));
                     store_a_to_value(out, dst)?;
                 }
@@ -231,6 +290,7 @@ fn operand_for_value(value: &Value) -> Result<Operand, LowerError> {
         Value::Temp(name) | Value::Local(name) | Value::Param(name) => {
             Ok(Operand::Absolute(Symbol::Named(name.clone())))
         }
+        Value::Global(name) => Ok(Operand::Absolute(Symbol::Named(name.clone()))),
         other => Err(LowerError::UnsupportedValue(other.clone())),
     }
 }
@@ -250,6 +310,10 @@ fn load_value_to_a(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerErr
             out.push(AsmInst::Lda(Operand::Absolute(Symbol::Named(name.clone()))));
             Ok(())
         }
+        Value::Global(name) => {
+            out.push(AsmInst::Lda(Operand::Absolute(Symbol::Named(name.clone()))));
+            Ok(())
+        }
         other => Err(LowerError::UnsupportedValue(other.clone())),
     }
 }
@@ -262,6 +326,10 @@ fn store_a_to_value(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerEr
             Ok(())
         }
         Value::Temp(name) | Value::Local(name) | Value::Param(name) => {
+            out.push(AsmInst::Sta(Operand::Absolute(Symbol::Named(name.clone()))));
+            Ok(())
+        }
+        Value::Global(name) => {
             out.push(AsmInst::Sta(Operand::Absolute(Symbol::Named(name.clone()))));
             Ok(())
         }
