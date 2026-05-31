@@ -1,6 +1,6 @@
 target/
-asm/*.bin
-asm/*.lbl
-asm/*.lst
-asm/*.map
-asm/*.o
+loader/asm/*.bin
+loader/asm/*.lbl
+loader/asm/*.lst
+loader/asm/*.map
+loader/asm/*.o

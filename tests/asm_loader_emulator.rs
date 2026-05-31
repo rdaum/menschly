@@ -204,19 +204,20 @@ fn build_loader() -> Vec<u8> {
         .get_or_init(|| {
             let output = Command::new("make")
                 .arg("-C")
-                .arg("asm")
+                .arg("loader/asm")
                 .arg("-B")
                 .arg("o65_loader.bin")
                 .output()
                 .expect("failed to execute make; install make and cc65/ca65");
             assert!(
                 output.status.success(),
-                "failed to build asm/o65_loader.bin\nstdout:\n{}\nstderr:\n{}",
+                "failed to build loader/asm/o65_loader.bin\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
 
-            std::fs::read("asm/o65_loader.bin").expect("asm/o65_loader.bin should exist after make")
+            std::fs::read("loader/asm/o65_loader.bin")
+                .expect("loader/asm/o65_loader.bin should exist after make")
         })
         .clone()
 }
@@ -314,7 +315,7 @@ fn seg_base(memory: &Memory) -> usize {
 #[test]
 fn loader_stays_small() {
     let size = build_loader().len();
-    assert!(size <= 2968, "loader grew to {size} bytes");
+    assert!(size <= 2703, "loader grew to {size} bytes");
 }
 
 #[test]

@@ -1,4 +1,11 @@
-# 65816 o65 Loader
+# 65816 Systems Experiments
+
+This repository now has two related tracks:
+
+- a working 65816 o65 relocating loader
+- notes for a future 65816-first systems language and compiler
+
+## o65 Loader
 
 This is a relocating executable loader for the o65 binary format, written in
 65816 assembly for ca65.
@@ -15,8 +22,10 @@ http://www.6502.org/users/andre/o65/
 
 ## Repository Layout
 
-- `asm/` contains the maintained ca65 implementation.
-- `tests/` contains an emulator-backed Rust integration test suite.
+- `loader/asm/` contains the maintained ca65 loader implementation.
+- `compiler/` contains planning notes for the future systems language/compiler.
+- `tests/` contains an emulator-backed Rust integration test suite for the
+  loader.
 
 ## Loader Model
 
@@ -59,13 +68,13 @@ runtime addresses. If the loader context pointer is zero, external symbol
 resolution and whole-image truncation checks are disabled.
 
 The loader code address and direct-page workspace address are fixed at link
-time by `asm/o65_loader.cfg`. The o65 image address is supplied by the caller at
-runtime.
+time by `loader/asm/o65_loader.cfg`. The o65 image address is supplied by the
+caller at runtime.
 
 That split is intentional. A resident OS/monitor service normally has a known
 address in the system memory map, and link-time placement keeps the loader
 small and straightforward. Porting it to a different memory map should usually
-mean adjusting `asm/o65_loader.cfg`; making the loader itself
+mean adjusting `loader/asm/o65_loader.cfg`; making the loader itself
 position-independent is a separate portability feature, not a requirement for
 the basic OS-resident use case.
 
@@ -129,7 +138,7 @@ The loader returns status in `A` and stores it in zero page `status`.
 The implementation uses ca65/ld65 from cc65:
 
 ```sh
-make -C asm
+make -C loader/asm
 ```
 
 Generated assembler/linker outputs are ignored by git.
@@ -169,7 +178,7 @@ Coverage includes:
 - exported `main` / `_main` entry-point selection and general export publishing
 
 The tests also keep a loader-size guard. As of this README, the assembled
-loader is `2968` bytes.
+loader is `2703` bytes.
 
 ## Remaining gaps / TODO
 
