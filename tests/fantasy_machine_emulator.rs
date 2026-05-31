@@ -513,6 +513,24 @@ fn hellord_example_boots_as_interrupt_driven_xex() {
 }
 
 #[test]
+fn hellord_command_matcher_handles_aliases_and_rejects_partial_words() {
+    let build = build_hellord_example();
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> p\r\nA:/\r\nA> cd \r\n?SYNTAX\r\nA> e hi\r\nhi\r\nA> echox\r\n?SYNTAX\r\nA> ";
+
+    let run = run_image_until_output(
+        &build.image,
+        b"p\ncd \ne hi\nechox\n",
+        expected.len(),
+        200_000,
+    )
+    .expect("Hellord image should produce matcher transcript");
+
+    assert_eq!(run.output, expected);
+    assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
+    assert_eq!(run.machine.byte(HELLORD_TX_OVERFLOW_ADDR), 0);
+}
+
+#[test]
 fn hellord_example_flags_full_rx_ring_and_drops_input() {
     let build = build_hellord_example();
     let input = b"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789overflow";
