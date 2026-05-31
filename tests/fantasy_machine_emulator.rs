@@ -439,6 +439,67 @@ fn external_multi_argument_call_links_and_runs() {
     assert_eq!(run.machine.byte(0x000285), 0x34);
 }
 
+#[test]
+fn external_reentrant_stack_argument_call_links_and_runs() {
+    let dir = temp_dir("external-reentrant-stack-argument-link");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let callee_path = dir.join("callee.mensch");
+    let cfg_path = dir.join("image.cfg");
+
+    fs::write(
+        &caller_path,
+        "
+        module Caller
+        application main
+        external reentrant procedure store_pair(first: u8, second: u16)
+
+        procedure main()
+            store_pair('R', $2345)
+            return
+        end
+        ",
+    )
+    .expect("caller source should be written");
+    fs::write(
+        &callee_path,
+        "
+        module Callee
+        fixed($009f57) volatile var serial_data: u8
+        fixed($000286) var first_out: u8
+        fixed($000288) var second_out: u16
+        fixed($00028a) var local_out: u8
+
+        export reentrant procedure store_pair(first: u8, second: u16)
+            var derived: u8
+            derived = first + 1
+            first_out = first
+            second_out = second
+            local_out = derived
+            serial_data = derived
+            return
+        end
+        ",
+    )
+    .expect("callee source should be written");
+    fs::write(&cfg_path, xex_linker_config()).expect("linker config should be written");
+
+    let build = build_mensch_xex_sources(
+        "external-reentrant-stack-argument-link",
+        &[caller_path, callee_path],
+        &cfg_path,
+    )
+    .expect("external reentrant stack-argument image should build");
+    let run = run_image_until_output(&build.image, b"", 1, 20_000)
+        .expect("external reentrant stack-argument image should output a byte");
+
+    assert_eq!(run.output, b"S");
+    assert_eq!(run.machine.byte(0x000286), b'R');
+    assert_eq!(run.machine.byte(0x000288), 0x45);
+    assert_eq!(run.machine.byte(0x000289), 0x23);
+    assert_eq!(run.machine.byte(0x00028a), b'S');
+}
+
 fn xex_linker_config() -> &'static str {
     "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $008000, size = $001000, file = %O;\n  META: start = $008f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  VECTORS: start = $00ffee, size = $000002, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
 }
