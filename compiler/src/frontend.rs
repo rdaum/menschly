@@ -3559,10 +3559,10 @@ mod tests {
             crate::lower_65816::lower_module_with_storage(&module).unwrap();
         let asm = crate::ca65::emit_module(&lowered);
 
-        assert!(asm.contains("__dp_store_param_value: .res 1\n"));
-        assert!(asm.contains("\tsta __dp_store_param_value\n"));
+        assert!(asm.contains("__dp_arg_0: .res 1\n"));
+        assert!(asm.contains("\tsta __dp_arg_0\n"));
         assert!(asm.contains("\tjsr store\n"));
-        assert!(asm.contains("\tlda __dp_store_param_value\n"));
+        assert!(asm.contains("\tlda __dp_arg_0\n"));
         assert!(!asm.contains(".exportzp __dp_store_param_value\n"));
     }
 

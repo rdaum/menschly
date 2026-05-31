@@ -12,7 +12,7 @@ use x65alike_emul::{
     Machine,
 };
 
-use crate::{ca65, frontend, lower_65816};
+use crate::{ca65, frontend, lower_65816, storage};
 
 const DEFAULT_RAW_LOAD_ADDR: u32 = 0x020000;
 const NATIVE_IRQ_VECTOR: usize = 0x00ffee;
@@ -71,6 +71,7 @@ pub fn build_mensch_xex_sources(
     fs::create_dir_all(&dir).map_err(|error| format!("failed to create build dir: {error}"))?;
     let xex_path = dir.join(format!("{name}.xex"));
     let mut obj_paths = Vec::new();
+    let mut storage_assignments = Vec::new();
 
     for (index, source_path) in source_paths.iter().enumerate() {
         let stem = source_path
@@ -83,8 +84,9 @@ pub fn build_mensch_xex_sources(
         let source = fs::read_to_string(source_path)
             .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
         let module = frontend::compile_source(&source).map_err(|error| error.to_string())?;
-        let (lowered, _assignment) =
+        let (lowered, assignment) =
             lower_65816::lower_module_with_storage(&module).map_err(|error| error.to_string())?;
+        storage_assignments.push(assignment);
         fs::write(&asm_path, ca65::emit_module(&lowered))
             .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
 
@@ -99,6 +101,9 @@ pub fn build_mensch_xex_sources(
         )?;
         obj_paths.push(obj_path);
     }
+
+    storage::validate_direct_page_budget(&storage_assignments, storage::DEFAULT_DIRECT_PAGE_BUDGET)
+        .map_err(|error| error.to_string())?;
 
     let mut ld65 = Command::new("ld65");
     ld65.arg("-C").arg(cfg_path.as_ref());
