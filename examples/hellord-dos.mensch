@@ -35,6 +35,7 @@ const COMMAND_MAP = 9
 const COMMAND_TYPE = 10
 const COMMAND_CLS = 11
 const COMMAND_PROMPT = 12
+const COMMAND_SET = 13
 const COMMAND_EMPTY = 255
 const FILE_UNKNOWN = 0
 const FILE_README = 1
@@ -90,6 +91,8 @@ function command_code(): u8
         return COMMAND_CLS
     elsif is_prompt() != 0
         return COMMAND_PROMPT
+    elsif is_set() != 0
+        return COMMAND_SET
     elsif is_type() != 0
         return COMMAND_TYPE
     elsif is_cd() != 0
@@ -240,6 +243,29 @@ function argument_word_matches(index: u16, word: near ^u8): u8
     end
 end
 
+function argument_name_matches(index: u16, word: near ^u8): u8
+    var ch: u8
+    ch = word^
+    while ch != 0
+        if index >= line_len
+            return 0
+        elsif command_char_matches(index, ch) == 0
+            return 0
+        else
+            index = index + 1
+            word = word + 1
+            ch = word^
+        end
+    end
+    if index == line_len
+        return 1
+    elsif command_buffer[index] == ' '
+        return 1
+    else
+        return 0
+    end
+end
+
 function is_help(): u8
     if command_word_matches("H") != 0
         return 1
@@ -328,6 +354,16 @@ function is_prompt(): u8
     if command_word_matches("PROMPT") != 0
         return 1
     elsif command_argument_matches("PROMPT") != 0
+        return 1
+    else
+        return 0
+    end
+end
+
+function is_set(): u8
+    if command_word_matches("SET") != 0
+        return 1
+    elsif command_argument_matches("SET") != 0
         return 1
     else
         return 0
@@ -432,6 +468,8 @@ procedure dispatch_line()
         console_clear()
     elsif code == COMMAND_PROMPT
         configure_prompt()
+    elsif code == COMMAND_SET
+        configure_set()
     elsif code == COMMAND_TYPE
         type_file()
     elsif code == COMMAND_CD
@@ -471,6 +509,16 @@ procedure write_path_prefix()
     var index: u16
     console_write(current_drive)
     console_write(':')
+    index = 0
+    while index != path_len
+        console_write(current_path[index])
+        index = index + 1
+    end
+    return
+end
+
+procedure write_dir_prefix()
+    var index: u16
     index = 0
     while index != path_len
         console_write(current_path[index])
@@ -523,10 +571,62 @@ end
 procedure configure_prompt()
     if command_word_matches("PROMPT") != 0
         write_prompt_mode()
-    elsif argument_word_matches(7, "SHORT") != 0
+    elsif set_prompt_mode(7) != 0
+        prompt_mode = prompt_mode
+    else
+        console_write_unknown()
+    end
+    return
+end
+
+function set_prompt_mode(index: u16): u8
+    if argument_word_matches(index, "SHORT") != 0
         prompt_mode = PROMPT_SHORT
-    elsif argument_word_matches(7, "FULL") != 0
+        return 1
+    elsif argument_word_matches(index, "FULL") != 0
         prompt_mode = PROMPT_FULL
+        return 1
+    else
+        return 0
+    end
+end
+
+procedure write_environment()
+    console_write_text("DRIVE=")
+    console_write(current_drive)
+    console_newline()
+    console_write_text("DIR=")
+    write_dir_prefix()
+    console_newline()
+    console_write_text("PROMPT=")
+    if prompt_mode == PROMPT_SHORT
+        console_write_text("SHORT\r\n")
+    else
+        console_write_text("FULL\r\n")
+    end
+    return
+end
+
+function set_drive_from_argument(index: u16): u8
+    if line_len == index + 1 and is_drive_letter(command_buffer[index]) != 0
+        current_drive = normalized_drive(command_buffer[index])
+        return 1
+    else
+        return 0
+    end
+end
+
+procedure configure_set()
+    if command_word_matches("SET") != 0
+        write_environment()
+    elsif argument_name_matches(4, "PROMPT") != 0
+        if set_prompt_mode(11) == 0
+            console_write_unknown()
+        end
+    elsif argument_name_matches(4, "DRIVE") != 0
+        if set_drive_from_argument(10) == 0
+            console_write_unknown()
+        end
     else
         console_write_unknown()
     end

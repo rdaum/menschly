@@ -497,7 +497,7 @@ fn raw_interrupt_skips_generated_entry_state() {
 #[test]
 fn hellord_example_boots_as_interrupt_driven_xex() {
     let build = build_hellord_example();
-    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> HELP\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nT  type\r\nE  echo\r\nS  status\r\nP  pwd\r\nM  map\r\nC  cls\r\nPROMPT mode\r\nCD path\r\nA:-Z: drive\r\nA> VER\r\nHellord DOS 0.1\r\nA> DIR\r\nDirectory of A:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\nGAMES      <DIR>\r\n2 file(s)  1 dir(s)\r\nA> b:\r\nB> DIR\r\nDirectory of B:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\nGAMES      <DIR>\r\n2 file(s)  1 dir(s)\r\nB> PWD\r\nB:/\r\nB> CD GAMES\r\nB> PWD\r\nB:GAMES\r\nB> MAP\r\nMemory map:\r\nRAM $0000-$8FFF\r\nI/O $9F00-$9FFF\r\nROM $C000-$FFFF\r\nB> STAT\r\nR: 0\r\nT: 0\r\nB> ECHO heX\x08 \x08llo\r\nhello\r\nB> X\r\n?SYNTAX\r\nB> \r\nB> ";
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> HELP\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nT  type\r\nE  echo\r\nS  status\r\nP  pwd\r\nM  map\r\nC  cls\r\nSET name value\r\nPROMPT mode\r\nCD path\r\nA:-Z: drive\r\nA> VER\r\nHellord DOS 0.1\r\nA> DIR\r\nDirectory of A:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\nGAMES      <DIR>\r\n2 file(s)  1 dir(s)\r\nA> b:\r\nB> DIR\r\nDirectory of B:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\nGAMES      <DIR>\r\n2 file(s)  1 dir(s)\r\nB> PWD\r\nB:/\r\nB> CD GAMES\r\nB> PWD\r\nB:GAMES\r\nB> MAP\r\nMemory map:\r\nRAM $0000-$8FFF\r\nI/O $9F00-$9FFF\r\nROM $C000-$FFFF\r\nB> STAT\r\nR: 0\r\nT: 0\r\nB> ECHO heX\x08 \x08llo\r\nhello\r\nB> X\r\n?SYNTAX\r\nB> \r\nB> ";
 
     let run = run_image_until_output(
         &build.image,
@@ -506,6 +506,37 @@ fn hellord_example_boots_as_interrupt_driven_xex() {
         200_000,
     )
     .expect("Hellord image should produce expected output");
+
+    assert_eq!(run.output, expected);
+    assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
+    assert_eq!(run.machine.byte(HELLORD_TX_OVERFLOW_ADDR), 0);
+}
+
+#[test]
+fn hellord_set_lists_and_updates_environment_state() {
+    let build = build_hellord_example();
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> set\r\nDRIVE=A\r\nDIR=/\r\nPROMPT=SHORT\r\nA> set prompt full\r\nA:/> set drive c\r\nC:/> set\r\nDRIVE=C\r\nDIR=/\r\nPROMPT=FULL\r\nC:/> set prompt short\r\nC> ";
+
+    let run = run_image_until_output(
+        &build.image,
+        b"set\nset prompt full\nset drive c\nset\nset prompt short\n",
+        expected.len(),
+        250_000,
+    )
+    .expect("Hellord image should produce SET environment transcript");
+
+    assert_eq!(run.output, expected);
+    assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
+    assert_eq!(run.machine.byte(HELLORD_TX_OVERFLOW_ADDR), 0);
+}
+
+#[test]
+fn hellord_set_rejects_invalid_assignments() {
+    let build = build_hellord_example();
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> set drive 1\r\n?SYNTAX\r\nA> ";
+
+    let run = run_image_until_output(&build.image, b"set drive 1\n", expected.len(), 150_000)
+        .expect("Hellord image should reject bad SET assignment");
 
     assert_eq!(run.output, expected);
     assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
