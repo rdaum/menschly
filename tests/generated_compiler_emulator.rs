@@ -268,6 +268,33 @@ fn generated_direct_local_storage_routine_runs() {
 }
 
 #[test]
+fn generated_frontend_scratch_local_program_runs() {
+    let binary = assemble_source_fixture(
+        "frontend-scratch-local",
+        "
+        module ScratchLocalDemo
+
+        fixed($1300) volatile var out: u8
+
+        export far procedure main()
+            scratch var first: u8
+            scratch var second: u8
+
+            first = $12
+            out = first
+            second = $34
+            out = second
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x020000 + 0x1300), 0x34);
+}
+
+#[test]
 fn generated_frontend_program_runs() {
     let binary = assemble_source_fixture(
         "frontend-program",

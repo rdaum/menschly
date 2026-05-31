@@ -39,6 +39,9 @@ fn optimize_routine(routine: &AsmRoutine, direct_symbols: &BTreeSet<String>) -> 
     let insts = use_relative_pushes(&insts);
     let insts = peephole(&insts);
     let insts = remove_redundant_modes(&insts);
+    let insts = remove_redundant_accumulator_loads(&insts);
+    let insts = remove_redundant_index_transfers(&insts);
+    let insts = remove_redundant_modes(&insts);
 
     AsmRoutine {
         name: routine.name.clone(),
@@ -211,12 +214,6 @@ fn peephole_at(insts: &[AsmInst]) -> Option<(Vec<AsmInst>, usize)> {
         }
     }
 
-    if let [AsmInst::Lda(_), AsmInst::Sta(store), AsmInst::Lda(reload), ..] = insts {
-        if store == reload && accumulator_cached_operand(store) {
-            return Some((vec![insts[0].clone(), insts[1].clone()], 3));
-        }
-    }
-
     None
 }
 
@@ -261,11 +258,338 @@ fn inc_dec_operand(operand: &Operand) -> bool {
     )
 }
 
-fn accumulator_cached_operand(operand: &Operand) -> bool {
+fn remove_redundant_accumulator_loads(insts: &[AsmInst]) -> Vec<AsmInst> {
+    let mut out = Vec::with_capacity(insts.len());
+    let mut state = AccumulatorState::default();
+
+    for inst in insts {
+        match inst {
+            AsmInst::Lda(operand)
+                if state.flags_match_a
+                    && state.aliases.iter().any(|alias| alias == operand)
+                    && accumulator_load_cacheable(operand) => {}
+            AsmInst::Lda(operand) => {
+                out.push(inst.clone());
+                state.load(operand);
+            }
+            AsmInst::Sta(operand)
+                if state.aliases.iter().any(|alias| alias == operand)
+                    && accumulator_store_cacheable(operand) => {}
+            AsmInst::Sta(operand) => {
+                out.push(inst.clone());
+                state.store_a_to(operand);
+            }
+            AsmInst::Adc(_) | AsmInst::Sbc(_) | AsmInst::And(_) => {
+                out.push(inst.clone());
+                state.a_changed_with_matching_flags();
+            }
+            AsmInst::Txa | AsmInst::Tya | AsmInst::Pla => {
+                out.push(inst.clone());
+                state.a_changed_with_matching_flags();
+            }
+            AsmInst::Cmp(_)
+            | AsmInst::Cpx(_)
+            | AsmInst::Tax
+            | AsmInst::Tay
+            | AsmInst::Ldx(_)
+            | AsmInst::Ldy(_)
+            | AsmInst::Inx
+            | AsmInst::Inc(_)
+            | AsmInst::Dec(_)
+            | AsmInst::Plx
+            | AsmInst::Ply
+            | AsmInst::Plp => {
+                out.push(inst.clone());
+                state.flags_no_longer_match_a();
+            }
+            AsmInst::Stx(operand) | AsmInst::Sty(operand) | AsmInst::Stz(operand) => {
+                out.push(inst.clone());
+                state.invalidate_memory_aliases_for_store(operand);
+            }
+            AsmInst::Mode(_)
+            | AsmInst::Label(_)
+            | AsmInst::Jsr(_)
+            | AsmInst::Jsl(_)
+            | AsmInst::Rts
+            | AsmInst::Rtl
+            | AsmInst::Rti
+            | AsmInst::Raw(_)
+            | AsmInst::Xba
+            | AsmInst::Tsc
+            | AsmInst::Tcs => {
+                out.push(inst.clone());
+                state.clear();
+            }
+            AsmInst::Bra(_) | AsmInst::Brl(_) => {
+                out.push(inst.clone());
+                state.clear();
+            }
+            AsmInst::Clc
+            | AsmInst::Sec
+            | AsmInst::Pha
+            | AsmInst::Phx
+            | AsmInst::Phy
+            | AsmInst::Php
+            | AsmInst::Phb
+            | AsmInst::Phk
+            | AsmInst::Pea(_)
+            | AsmInst::Per(_)
+            | AsmInst::Plb
+            | AsmInst::Beq(_)
+            | AsmInst::Bne(_)
+            | AsmInst::Bcc(_)
+            | AsmInst::Bcs(_)
+            | AsmInst::Nop
+            | AsmInst::Stp => out.push(inst.clone()),
+        }
+    }
+
+    out
+}
+
+#[derive(Debug, Default)]
+struct AccumulatorState {
+    aliases: Vec<Operand>,
+    flags_match_a: bool,
+}
+
+impl AccumulatorState {
+    fn clear(&mut self) {
+        self.aliases.clear();
+        self.flags_match_a = false;
+    }
+
+    fn load(&mut self, operand: &Operand) {
+        self.aliases.clear();
+        if accumulator_load_cacheable(operand) {
+            self.aliases.push(operand.clone());
+        }
+        self.flags_match_a = true;
+    }
+
+    fn store_a_to(&mut self, operand: &Operand) {
+        self.invalidate_memory_aliases_for_store(operand);
+        if self.flags_match_a && accumulator_store_cacheable(operand) {
+            self.add_alias(operand.clone());
+        }
+    }
+
+    fn a_changed_with_matching_flags(&mut self) {
+        self.aliases.clear();
+        self.flags_match_a = true;
+    }
+
+    fn flags_no_longer_match_a(&mut self) {
+        self.flags_match_a = false;
+    }
+
+    fn invalidate_memory_aliases_for_store(&mut self, operand: &Operand) {
+        self.aliases
+            .retain(|alias| operand_alias_survives_store(alias, operand));
+    }
+
+    fn add_alias(&mut self, operand: Operand) {
+        if !self.aliases.iter().any(|alias| alias == &operand) {
+            self.aliases.push(operand);
+        }
+    }
+}
+
+fn operand_alias_survives_store(alias: &Operand, store: &Operand) -> bool {
+    if alias == store {
+        return true;
+    }
+
+    matches!(alias, Operand::Immediate(_) | Operand::ImmediateSymbol(_))
+}
+
+fn accumulator_load_cacheable(operand: &Operand) -> bool {
+    matches!(
+        operand,
+        Operand::Immediate(_)
+            | Operand::ImmediateSymbol(_)
+            | Operand::Direct(_)
+            | Operand::DirectIndexedX(_)
+            | Operand::StackRelative(_)
+    )
+}
+
+fn accumulator_store_cacheable(operand: &Operand) -> bool {
     matches!(
         operand,
         Operand::Direct(_) | Operand::DirectIndexedX(_) | Operand::StackRelative(_)
     )
+}
+
+fn remove_redundant_index_transfers(insts: &[AsmInst]) -> Vec<AsmInst> {
+    let mut out = Vec::with_capacity(insts.len());
+    let mut state = IndexTransferState::default();
+    let mut i = 0;
+
+    while i < insts.len() {
+        if let [AsmInst::Lda(operand), AsmInst::Tax, next, ..] = &insts[i..] {
+            if state.x_aliases.iter().any(|alias| alias == operand)
+                && accumulator_load_cacheable(operand)
+                && load_uses_index_x(next)
+            {
+                i += 2;
+                continue;
+            }
+        }
+
+        let inst = &insts[i];
+        out.push(inst.clone());
+        state.observe(inst);
+        i += 1;
+    }
+
+    out
+}
+
+#[derive(Debug, Default)]
+struct IndexTransferState {
+    a_aliases: Vec<Operand>,
+    x_aliases: Vec<Operand>,
+}
+
+impl IndexTransferState {
+    fn observe(&mut self, inst: &AsmInst) {
+        match inst {
+            AsmInst::Lda(operand) => {
+                self.a_aliases.clear();
+                if accumulator_load_cacheable(operand) {
+                    self.a_aliases.push(operand.clone());
+                }
+            }
+            AsmInst::Ldx(operand) => {
+                self.x_aliases.clear();
+                if index_load_cacheable(operand) {
+                    self.x_aliases.push(operand.clone());
+                }
+            }
+            AsmInst::Tax => {
+                self.x_aliases = self.a_aliases.clone();
+            }
+            AsmInst::Txa => {
+                self.a_aliases = self.x_aliases.clone();
+            }
+            AsmInst::Sta(operand) => {
+                self.invalidate_a_memory_aliases_for_accumulator_store(operand);
+                self.invalidate_x_memory_aliases_for_unrelated_store(operand);
+            }
+            AsmInst::Stx(operand) => {
+                self.invalidate_a_memory_aliases_for_unrelated_store(operand);
+                self.invalidate_x_memory_aliases_for_index_store(operand);
+                if index_store_cacheable(operand) {
+                    self.add_x_alias(operand.clone());
+                }
+            }
+            AsmInst::Sty(operand) | AsmInst::Stz(operand) => {
+                self.invalidate_a_memory_aliases_for_unrelated_store(operand);
+                self.invalidate_x_memory_aliases_for_unrelated_store(operand);
+            }
+            AsmInst::Adc(_) | AsmInst::Sbc(_) | AsmInst::And(_) | AsmInst::Tya | AsmInst::Pla => {
+                self.a_aliases.clear();
+            }
+            AsmInst::Inx | AsmInst::Plx => {
+                self.x_aliases.clear();
+            }
+            AsmInst::Mode(_)
+            | AsmInst::Label(_)
+            | AsmInst::Jsr(_)
+            | AsmInst::Jsl(_)
+            | AsmInst::Rts
+            | AsmInst::Rtl
+            | AsmInst::Rti
+            | AsmInst::Raw(_)
+            | AsmInst::Xba
+            | AsmInst::Tsc
+            | AsmInst::Tcs
+            | AsmInst::Bra(_)
+            | AsmInst::Brl(_)
+            | AsmInst::Beq(_)
+            | AsmInst::Bne(_)
+            | AsmInst::Bcc(_)
+            | AsmInst::Bcs(_) => self.clear(),
+            AsmInst::Ldy(_)
+            | AsmInst::Tay
+            | AsmInst::Phx
+            | AsmInst::Phy
+            | AsmInst::Php
+            | AsmInst::Phb
+            | AsmInst::Phk
+            | AsmInst::Pea(_)
+            | AsmInst::Per(_)
+            | AsmInst::Ply
+            | AsmInst::Plp
+            | AsmInst::Plb
+            | AsmInst::Cmp(_)
+            | AsmInst::Cpx(_)
+            | AsmInst::Inc(_)
+            | AsmInst::Dec(_)
+            | AsmInst::Clc
+            | AsmInst::Sec
+            | AsmInst::Pha
+            | AsmInst::Nop
+            | AsmInst::Stp => {}
+        }
+    }
+
+    fn clear(&mut self) {
+        self.a_aliases.clear();
+        self.x_aliases.clear();
+    }
+
+    fn invalidate_a_memory_aliases_for_accumulator_store(&mut self, operand: &Operand) {
+        self.a_aliases
+            .retain(|alias| operand_alias_survives_store(alias, operand));
+    }
+
+    fn invalidate_a_memory_aliases_for_unrelated_store(&mut self, operand: &Operand) {
+        self.a_aliases
+            .retain(|alias| memory_alias_survives_unrelated_store(alias, operand));
+    }
+
+    fn invalidate_x_memory_aliases_for_index_store(&mut self, operand: &Operand) {
+        self.x_aliases
+            .retain(|alias| operand_alias_survives_store(alias, operand));
+    }
+
+    fn invalidate_x_memory_aliases_for_unrelated_store(&mut self, operand: &Operand) {
+        self.x_aliases
+            .retain(|alias| memory_alias_survives_unrelated_store(alias, operand));
+    }
+
+    fn add_x_alias(&mut self, operand: Operand) {
+        if !self.x_aliases.iter().any(|alias| alias == &operand) {
+            self.x_aliases.push(operand);
+        }
+    }
+}
+
+fn memory_alias_survives_unrelated_store(alias: &Operand, store: &Operand) -> bool {
+    alias != store && matches!(alias, Operand::Immediate(_) | Operand::ImmediateSymbol(_))
+}
+
+fn load_uses_index_x(inst: &AsmInst) -> bool {
+    matches!(
+        inst,
+        AsmInst::Lda(Operand::AbsoluteIndexedX(_) | Operand::DirectIndexedX(_))
+    )
+}
+
+fn index_load_cacheable(operand: &Operand) -> bool {
+    matches!(
+        operand,
+        Operand::Immediate(_)
+            | Operand::ImmediateSymbol(_)
+            | Operand::Direct(_)
+            | Operand::StackRelative(_)
+    )
+}
+
+fn index_store_cacheable(operand: &Operand) -> bool {
+    matches!(operand, Operand::Direct(_) | Operand::StackRelative(_))
 }
 
 fn remove_redundant_modes(insts: &[AsmInst]) -> Vec<AsmInst> {
@@ -437,12 +761,57 @@ mod tests {
     }
 
     #[test]
-    fn keeps_absolute_named_reload_after_store() {
+    fn removes_redundant_direct_reload_after_stack_push() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc16Index16),
+            AsmInst::Lda(Operand::Immediate(Immediate::Word(0x1234))),
+            AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
+            AsmInst::Pha,
+            AsmInst::Lda(Operand::Direct(Symbol::Named("slot".to_owned()))),
+            AsmInst::Adc(Operand::Immediate(Immediate::Word(1))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc16Index16),
+                AsmInst::Lda(Operand::Immediate(Immediate::Word(0x1234))),
+                AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
+                AsmInst::Pha,
+                AsmInst::Adc(Operand::Immediate(Immediate::Word(1))),
+            ]
+        );
+    }
+
+    #[test]
+    fn removes_redundant_direct_reload_after_redundant_mode() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc16Index16),
+            AsmInst::Lda(Operand::Immediate(Immediate::Word(0x1234))),
+            AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
+            AsmInst::Mode(Mode::Acc16Index16),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("slot".to_owned()))),
+            AsmInst::Adc(Operand::Immediate(Immediate::Word(1))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc16Index16),
+                AsmInst::Lda(Operand::Immediate(Immediate::Word(0x1234))),
+                AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
+                AsmInst::Adc(Operand::Immediate(Immediate::Word(1))),
+            ]
+        );
+    }
+
+    #[test]
+    fn removes_redundant_immediate_reload_after_store() {
         let module = module(vec![
             AsmInst::Mode(Mode::Acc8Index16),
             AsmInst::Lda(Operand::Immediate(Immediate::Byte(0x41))),
-            AsmInst::Sta(Operand::Absolute(Symbol::Named("maybe_volatile".to_owned()))),
-            AsmInst::Lda(Operand::Absolute(Symbol::Named("maybe_volatile".to_owned()))),
+            AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
+            AsmInst::Lda(Operand::Immediate(Immediate::Byte(0x41))),
         ]);
 
         assert_eq!(
@@ -450,8 +819,221 @@ mod tests {
             vec![
                 AsmInst::Mode(Mode::Acc8Index16),
                 AsmInst::Lda(Operand::Immediate(Immediate::Byte(0x41))),
-                AsmInst::Sta(Operand::Absolute(Symbol::Named("maybe_volatile".to_owned()))),
-                AsmInst::Lda(Operand::Absolute(Symbol::Named("maybe_volatile".to_owned()))),
+                AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
+            ]
+        );
+    }
+
+    #[test]
+    fn removes_redundant_direct_self_store_after_load() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("__dp_arg_0".to_owned()))),
+            AsmInst::Sta(Operand::Direct(Symbol::Named("__dp_arg_0".to_owned()))),
+            AsmInst::Jsr("callee".to_owned()),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Lda(Operand::Direct(Symbol::Named("__dp_arg_0".to_owned()))),
+                AsmInst::Jsr("callee".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_direct_store_when_accumulator_value_is_unknown() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Jsr("producer".to_owned()),
+            AsmInst::Sta(Operand::Direct(Symbol::Named("__dp_arg_0".to_owned()))),
+            AsmInst::Jsr("callee".to_owned()),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Jsr("producer".to_owned()),
+                AsmInst::Sta(Operand::Direct(Symbol::Named("__dp_arg_0".to_owned()))),
+                AsmInst::Jsr("callee".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_reload_after_flags_stop_matching_accumulator() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc16Index16),
+            AsmInst::Lda(Operand::Immediate(Immediate::Word(0x1234))),
+            AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
+            AsmInst::Cmp(Operand::Immediate(Immediate::Word(0))),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("slot".to_owned()))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc16Index16),
+                AsmInst::Lda(Operand::Immediate(Immediate::Word(0x1234))),
+                AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
+                AsmInst::Cmp(Operand::Immediate(Immediate::Word(0))),
+                AsmInst::Lda(Operand::Direct(Symbol::Named("slot".to_owned()))),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_reload_after_label_boundary() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Lda(Operand::Immediate(Immediate::Byte(0x41))),
+            AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
+            AsmInst::Label("entry".to_owned()),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("slot".to_owned()))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Lda(Operand::Immediate(Immediate::Byte(0x41))),
+                AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
+                AsmInst::Label("entry".to_owned()),
+                AsmInst::Lda(Operand::Direct(Symbol::Named("slot".to_owned()))),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_absolute_named_reload_after_store() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Lda(Operand::Immediate(Immediate::Byte(0x41))),
+            AsmInst::Sta(Operand::Absolute(Symbol::Named(
+                "maybe_volatile".to_owned(),
+            ))),
+            AsmInst::Lda(Operand::Absolute(Symbol::Named(
+                "maybe_volatile".to_owned(),
+            ))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Lda(Operand::Immediate(Immediate::Byte(0x41))),
+                AsmInst::Sta(Operand::Absolute(Symbol::Named(
+                    "maybe_volatile".to_owned()
+                ))),
+                AsmInst::Lda(Operand::Absolute(Symbol::Named(
+                    "maybe_volatile".to_owned()
+                ))),
+            ]
+        );
+    }
+
+    #[test]
+    fn removes_redundant_index_transfer_before_indexed_load() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+            AsmInst::Tax,
+            AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+            AsmInst::Tax,
+            AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("other".to_owned()))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+                AsmInst::Tax,
+                AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
+                AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("other".to_owned()))),
+            ]
+        );
+    }
+
+    #[test]
+    fn removes_redundant_index_transfer_after_redundant_mode() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+            AsmInst::Tax,
+            AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+            AsmInst::Tax,
+            AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("other".to_owned()))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+                AsmInst::Tax,
+                AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
+                AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("other".to_owned()))),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_index_transfer_after_index_source_store() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+            AsmInst::Tax,
+            AsmInst::Stz(Operand::Direct(Symbol::Named("index".to_owned()))),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+            AsmInst::Tax,
+            AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+                AsmInst::Tax,
+                AsmInst::Stz(Operand::Direct(Symbol::Named("index".to_owned()))),
+                AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+                AsmInst::Tax,
+                AsmInst::Lda(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_index_transfer_before_indexed_store() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc8Index16),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+            AsmInst::Tax,
+            AsmInst::Lda(Operand::Direct(Symbol::Named("value".to_owned()))),
+            AsmInst::Sta(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
+            AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+            AsmInst::Tax,
+            AsmInst::Sta(Operand::AbsoluteIndexedX(Symbol::Named("other".to_owned()))),
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc8Index16),
+                AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+                AsmInst::Tax,
+                AsmInst::Lda(Operand::Direct(Symbol::Named("value".to_owned()))),
+                AsmInst::Sta(Operand::AbsoluteIndexedX(Symbol::Named("table".to_owned()))),
+                AsmInst::Lda(Operand::Direct(Symbol::Named("index".to_owned()))),
+                AsmInst::Tax,
+                AsmInst::Sta(Operand::AbsoluteIndexedX(Symbol::Named("other".to_owned()))),
             ]
         );
     }

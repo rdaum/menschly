@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::ir::{
@@ -122,6 +122,33 @@ impl fmt::Display for DirectPageBudgetError {
 impl std::error::Error for DirectPageBudgetError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageAssignmentError {
+    pub missing: Vec<MissingStorageBinding>,
+}
+
+impl fmt::Display for StorageAssignmentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "storage assignment is incomplete")?;
+        for missing in &self.missing {
+            writeln!(
+                f,
+                "  routine {} is missing storage for {:?}",
+                missing.routine, missing.key
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for StorageAssignmentError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingStorageBinding {
+    pub routine: String,
+    pub key: BindingKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutineStorage {
     pub name: String,
     pub direct_slots: Vec<DirectSlot>,
@@ -228,7 +255,44 @@ pub fn assign_storage(module: &Module) -> StorageAssignment {
     }
 }
 
+pub fn validate_storage_assignment(
+    module: &Module,
+    assignment: &StorageAssignment,
+) -> Result<(), StorageAssignmentError> {
+    let mut missing = Vec::new();
+
+    for routine in &module.routines {
+        let Some(layout) = assignment.routine(&routine.name) else {
+            missing.push(MissingStorageBinding {
+                routine: routine.name.clone(),
+                key: BindingKey::Local("<routine layout>".to_owned()),
+            });
+            continue;
+        };
+
+        for key in referenced_bindings(routine) {
+            if layout.location(key.clone()).is_none() {
+                missing.push(MissingStorageBinding {
+                    routine: routine.name.clone(),
+                    key,
+                });
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(StorageAssignmentError { missing })
+    }
+}
+
 pub fn apply_storage(module: &Module, assignment: &StorageAssignment) -> Module {
+    debug_assert!(
+        validate_storage_assignment(module, assignment).is_ok(),
+        "storage assignment must cover all referenced params, locals, and temps"
+    );
+
     let direct_aliases = direct_symbol_aliases(assignment);
     let routines = module
         .routines
@@ -301,12 +365,12 @@ fn assign_routine(
 
     if matches!(routine.abi, Abi::Reentrant) {
         assign_locals(routine, allocator, &mut out);
-        assign_scratch_temps(routine, allocator, scratch, &mut out);
+        assign_scratch_bindings(routine, allocator, scratch, &mut out);
         assign_stack_params(routine, &mut out);
     } else {
         assign_params(routine, allocator, args, &mut out);
         assign_locals(routine, allocator, &mut out);
-        assign_scratch_temps(routine, allocator, scratch, &mut out);
+        assign_scratch_bindings(routine, allocator, scratch, &mut out);
     }
 
     out
@@ -414,51 +478,57 @@ fn assign_locals(routine: &Routine, allocator: &mut DirectAllocator, out: &mut R
     }
 }
 
-fn assign_scratch_temps(
+fn assign_scratch_bindings(
     routine: &Routine,
     allocator: &mut DirectAllocator,
     scratch: &mut DirectSlotPool,
     out: &mut RoutineStorage,
 ) {
-    let mut lifetimes = temp_lifetimes(routine);
-    lifetimes.sort_by_key(|temp| (temp.first_use, temp.last_use, temp.name.clone()));
+    let mut lifetimes = scratch_lifetimes(routine);
+    lifetimes.sort_by_key(|binding| {
+        (
+            binding.first_use,
+            binding.last_use,
+            binding.symbol_name.clone(),
+        )
+    });
 
     if matches!(routine.abi, Abi::Reentrant) {
-        for temp in lifetimes {
+        for binding in lifetimes {
             let offset = out.stack_frame_bytes + 1;
             out.bindings.insert(
-                BindingKey::Temp(temp.name.clone()),
+                binding.key,
                 Location::Stack {
                     offset,
-                    size: temp.size,
+                    size: binding.size,
                 },
             );
             out.stack_slots.push(StackSlot {
-                name: temp_symbol(&routine.name, &temp.name),
+                name: binding.symbol_name,
                 offset,
-                size: temp.size,
+                size: binding.size,
             });
-            out.stack_frame_bytes += temp.size;
+            out.stack_frame_bytes += binding.size;
         }
         return;
     }
 
     let mut volatile_lifetimes = Vec::new();
     let mut private_lifetimes = Vec::new();
-    for temp in lifetimes {
-        if temp.crosses_call {
-            private_lifetimes.push(temp);
+    for binding in lifetimes {
+        if binding.crosses_call {
+            private_lifetimes.push(binding);
         } else {
-            volatile_lifetimes.push(temp);
+            volatile_lifetimes.push(binding);
         }
     }
 
-    assign_volatile_scratch_temps(volatile_lifetimes, allocator, scratch, out);
-    assign_private_scratch_temps(&routine.name, private_lifetimes, allocator, out);
+    assign_volatile_scratch_bindings(volatile_lifetimes, allocator, scratch, out);
+    assign_private_scratch_bindings(private_lifetimes, allocator, out);
 }
 
-fn assign_volatile_scratch_temps(
-    lifetimes: Vec<TempLifetime>,
+fn assign_volatile_scratch_bindings(
+    lifetimes: Vec<ScratchLifetime>,
     allocator: &mut DirectAllocator,
     scratch: &mut DirectSlotPool,
     out: &mut RoutineStorage,
@@ -487,7 +557,7 @@ fn assign_volatile_scratch_temps(
             None => scratch.alloc(allocator, temp.size),
         };
 
-        bind_direct_temp(out, &temp, &slot);
+        bind_direct_scratch(out, &temp, &slot);
         active.push(ActiveDirectSlot {
             symbol: slot.symbol,
             offset: slot.offset,
@@ -497,9 +567,8 @@ fn assign_volatile_scratch_temps(
     }
 }
 
-fn assign_private_scratch_temps(
-    routine_name: &str,
-    lifetimes: Vec<TempLifetime>,
+fn assign_private_scratch_bindings(
+    lifetimes: Vec<ScratchLifetime>,
     allocator: &mut DirectAllocator,
     out: &mut RoutineStorage,
 ) {
@@ -524,10 +593,10 @@ fn assign_private_scratch_temps(
         let slot_index = free.iter().position(|slot| slot.size >= temp.size);
         let slot = match slot_index {
             Some(index) => free.remove(index),
-            None => allocator.alloc(temp_symbol(routine_name, &temp.name), temp.size),
+            None => allocator.alloc(temp.symbol_name.clone(), temp.size),
         };
 
-        bind_direct_temp(out, &temp, &slot);
+        bind_direct_scratch(out, &temp, &slot);
         active.push(ActiveDirectSlot {
             symbol: slot.symbol,
             offset: slot.offset,
@@ -537,9 +606,9 @@ fn assign_private_scratch_temps(
     }
 }
 
-fn bind_direct_temp(out: &mut RoutineStorage, temp: &TempLifetime, slot: &AllocatedSlot) {
+fn bind_direct_scratch(out: &mut RoutineStorage, binding: &ScratchLifetime, slot: &AllocatedSlot) {
     out.bindings.insert(
-        BindingKey::Temp(temp.name.clone()),
+        binding.key.clone(),
         Location::Direct {
             symbol: slot.symbol.clone(),
             offset: slot.offset,
@@ -550,7 +619,7 @@ fn bind_direct_temp(out: &mut RoutineStorage, temp: &TempLifetime, slot: &Alloca
         symbol: slot.symbol.clone(),
         offset: slot.offset,
         size: slot.size,
-        source: BindingKey::Temp(temp.name.clone()),
+        source: binding.key.clone(),
     });
 }
 
@@ -863,6 +932,88 @@ fn temp_lifetimes(routine: &Routine) -> Vec<TempLifetime> {
         .collect()
 }
 
+fn referenced_bindings(routine: &Routine) -> BTreeSet<BindingKey> {
+    let mut out = BTreeSet::new();
+
+    for inst in &routine.body {
+        out.extend(param_uses(inst).into_iter().map(BindingKey::Param));
+        out.extend(local_uses(inst).into_iter().map(BindingKey::Local));
+        out.extend(
+            temp_uses(inst)
+                .into_iter()
+                .map(|(name, _size)| BindingKey::Temp(name)),
+        );
+    }
+
+    out
+}
+
+fn scratch_lifetimes(routine: &Routine) -> Vec<ScratchLifetime> {
+    let mut lifetimes = temp_lifetimes(routine)
+        .into_iter()
+        .map(|temp| ScratchLifetime {
+            key: BindingKey::Temp(temp.name.clone()),
+            symbol_name: temp_symbol(&routine.name, &temp.name),
+            first_use: temp.first_use,
+            last_use: temp.last_use,
+            size: temp.size,
+            crosses_call: temp.crosses_call,
+        })
+        .collect::<Vec<_>>();
+
+    lifetimes.extend(scratch_local_lifetimes(routine));
+    lifetimes
+}
+
+fn scratch_local_lifetimes(routine: &Routine) -> Vec<ScratchLifetime> {
+    let scratch_locals = routine
+        .locals
+        .iter()
+        .filter(|local| matches!(local.storage, Storage::Scratch))
+        .map(|local| (local.name.clone(), local.ty.size_bytes()))
+        .collect::<BTreeMap<_, _>>();
+    if scratch_locals.is_empty() {
+        return Vec::new();
+    }
+
+    let mut locals = scratch_locals
+        .iter()
+        .map(|(name, size)| (name.clone(), (None::<usize>, None::<usize>, *size)))
+        .collect::<BTreeMap<_, _>>();
+    let mut call_indices = Vec::new();
+
+    for (index, inst) in routine.body.iter().enumerate() {
+        if is_call_barrier(inst) {
+            call_indices.push(index);
+        }
+        for name in local_uses(inst) {
+            if let Some(entry) = locals.get_mut(&name) {
+                entry.0 = Some(entry.0.unwrap_or(index).min(index));
+                entry.1 = Some(index);
+            }
+        }
+    }
+
+    locals
+        .into_iter()
+        .filter_map(|(name, (first_use, last_use, size))| {
+            let (Some(first_use), Some(last_use)) = (first_use, last_use) else {
+                return None;
+            };
+            Some(ScratchLifetime {
+                key: BindingKey::Local(name.clone()),
+                symbol_name: local_symbol(&routine.name, &name),
+                first_use,
+                last_use,
+                size,
+                crosses_call: call_indices
+                    .iter()
+                    .any(|call| first_use < *call && *call < last_use),
+            })
+        })
+        .collect()
+}
+
 fn is_call_barrier(inst: &IrInst) -> bool {
     matches!(
         inst,
@@ -1028,11 +1179,97 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
     out
 }
 
+fn local_uses(inst: &IrInst) -> Vec<String> {
+    let mut out = Vec::new();
+
+    match inst {
+        IrInst::LoadConst { dst, .. } => collect_local_value(dst, &mut out),
+        IrInst::LoadAddress { dst, .. } => collect_local_value(dst, &mut out),
+        IrInst::Move { dst, src, .. } => {
+            collect_local_value(dst, &mut out);
+            collect_local_value(src, &mut out);
+        }
+        IrInst::Load { dst, addr, .. } => {
+            collect_local_value(dst, &mut out);
+            collect_local_address(addr, &mut out);
+        }
+        IrInst::Store { addr, src, .. } => {
+            collect_local_value(src, &mut out);
+            collect_local_address(addr, &mut out);
+        }
+        IrInst::Add {
+            width: _,
+            dst,
+            lhs,
+            rhs,
+        }
+        | IrInst::Sub {
+            width: _,
+            dst,
+            lhs,
+            rhs,
+        }
+        | IrInst::BitAnd {
+            width: _,
+            dst,
+            lhs,
+            rhs,
+        } => {
+            collect_local_value(dst, &mut out);
+            collect_local_value(lhs, &mut out);
+            collect_local_value(rhs, &mut out);
+        }
+        IrInst::Dec { value, .. } | IrInst::Inc { value, .. } => {
+            collect_local_value(value, &mut out);
+        }
+        IrInst::Compare { lhs, rhs, .. } => {
+            collect_local_value(lhs, &mut out);
+            collect_local_value(rhs, &mut out);
+        }
+        IrInst::BranchIfZero { value, .. } | IrInst::ReturnValue(value) => {
+            collect_local_value(value, &mut out);
+        }
+        IrInst::Push { value, .. } => collect_local_value(value, &mut out),
+        IrInst::CallFunction { dst, .. } => collect_local_value(dst, &mut out),
+        IrInst::CopSignature { dst } => collect_local_value(dst, &mut out),
+        IrInst::CopRegister { dst, .. } => collect_local_value(dst, &mut out),
+        IrInst::CopCall {
+            call, x, y, dst, ..
+        } => {
+            collect_local_value(call, &mut out);
+            collect_local_value(x, &mut out);
+            collect_local_value(y, &mut out);
+            collect_local_value(dst, &mut out);
+        }
+        IrInst::Label(_)
+        | IrInst::InlineAsm(_)
+        | IrInst::Branch { .. }
+        | IrInst::BranchIfEqual { .. }
+        | IrInst::BranchIfNotEqual { .. }
+        | IrInst::BranchIfCarrySet { .. }
+        | IrInst::BranchIfCarryClear { .. }
+        | IrInst::CallProcedure { .. }
+        | IrInst::CleanupStack { .. }
+        | IrInst::Return => {}
+    }
+
+    out
+}
+
 fn collect_temp_address(addr: &Address, out: &mut Vec<(String, u16)>) {
     match addr {
         Address::ValueOffset { base, .. } => collect_temp_value(base, 2, out),
         Address::NearPtr(value) => collect_temp_value(value, 2, out),
         Address::FarPtr(value) => collect_temp_value(value, 3, out),
+        _ => {}
+    }
+}
+
+fn collect_local_address(addr: &Address, out: &mut Vec<String>) {
+    match addr {
+        Address::ValueOffset { base, .. } => collect_local_value(base, out),
+        Address::NearPtr(value) => collect_local_value(value, out),
+        Address::FarPtr(value) => collect_local_value(value, out),
         _ => {}
     }
 }
@@ -1043,6 +1280,12 @@ fn collect_param_address(addr: &Address, out: &mut Vec<String>) {
         Address::NearPtr(value) => collect_param_value(value, out),
         Address::FarPtr(value) => collect_param_value(value, out),
         _ => {}
+    }
+}
+
+fn collect_local_value(value: &Value, out: &mut Vec<String>) {
+    if let Value::Local(name) = value {
+        out.push(name.clone());
     }
 }
 
@@ -1085,6 +1328,16 @@ struct ParamLifetime {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TempLifetime {
     name: String,
+    first_use: usize,
+    last_use: usize,
+    size: u16,
+    crosses_call: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScratchLifetime {
+    key: BindingKey,
+    symbol_name: String,
     first_use: usize,
     last_use: usize,
     size: u16,
@@ -1181,9 +1434,14 @@ impl fmt::Display for StorageAssignment {
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::{Const, IrInst, Local, Module, Routine, Storage, Type, Value, Width};
+    use std::collections::BTreeMap;
 
-    use super::{apply_storage, assign_storage, validate_direct_page_budget, BindingKey, Location};
+    use crate::ir::{Const, IrInst, Label, Local, Module, Routine, Storage, Type, Value, Width};
+
+    use super::{
+        apply_storage, assign_storage, validate_direct_page_budget, validate_storage_assignment,
+        BindingKey, Location, RoutineStorage, StorageAssignment,
+    };
 
     #[test]
     fn allocates_direct_params_and_locals() {
@@ -1359,6 +1617,199 @@ mod tests {
             caller.location(BindingKey::Temp("a".to_owned())),
             callee.location(BindingKey::Temp("b".to_owned()))
         );
+    }
+
+    #[test]
+    fn reuses_non_overlapping_scratch_local_slots() {
+        let module = Module::new("layout").with_routine(
+            Routine::procedure("scratch_locals")
+                .with_local(Local::new("first", Type::U16, Storage::Scratch))
+                .with_local(Local::new("second", Type::U16, Storage::Scratch))
+                .with_body(vec![
+                    IrInst::LoadConst {
+                        dst: Value::Local("first".to_owned()),
+                        value: Const::U16(1),
+                    },
+                    IrInst::Store {
+                        width: Width::Word,
+                        addr: crate::ir::Address::Direct("out".to_owned()),
+                        src: Value::Local("first".to_owned()),
+                    },
+                    IrInst::LoadConst {
+                        dst: Value::Local("second".to_owned()),
+                        value: Const::U16(2),
+                    },
+                    IrInst::Store {
+                        width: Width::Word,
+                        addr: crate::ir::Address::Direct("out".to_owned()),
+                        src: Value::Local("second".to_owned()),
+                    },
+                ]),
+        );
+
+        let assignment = assign_storage(&module);
+        let routine = assignment.routine("scratch_locals").unwrap();
+
+        assert_eq!(assignment.direct_page_bytes, 2);
+        assert_eq!(
+            routine.location(BindingKey::Local("first".to_owned())),
+            routine.location(BindingKey::Local("second".to_owned()))
+        );
+        assert!(matches!(
+            routine.location(BindingKey::Local("first".to_owned())),
+            Some(Location::Direct { symbol, .. }) if symbol == "__dp_scratch_0"
+        ));
+        validate_storage_assignment(&module, &assignment).unwrap();
+    }
+
+    #[test]
+    fn keeps_call_live_scratch_locals_private() {
+        let module = Module::new("layout")
+            .with_routine(
+                Routine::procedure("caller")
+                    .with_local(Local::new("saved", Type::U16, Storage::Scratch))
+                    .with_body(vec![
+                        IrInst::LoadConst {
+                            dst: Value::Local("saved".to_owned()),
+                            value: Const::U16(1),
+                        },
+                        IrInst::CallProcedure {
+                            name: "callee".to_owned(),
+                        },
+                        IrInst::Store {
+                            width: Width::Word,
+                            addr: crate::ir::Address::Direct("out".to_owned()),
+                            src: Value::Local("saved".to_owned()),
+                        },
+                    ]),
+            )
+            .with_routine(Routine::procedure("callee").with_body(vec![
+                IrInst::LoadConst {
+                    dst: Value::Temp("tmp".to_owned()),
+                    value: Const::U16(2),
+                },
+                IrInst::Store {
+                    width: Width::Word,
+                    addr: crate::ir::Address::Direct("out".to_owned()),
+                    src: Value::Temp("tmp".to_owned()),
+                },
+            ]));
+
+        let assignment = assign_storage(&module);
+        let caller = assignment.routine("caller").unwrap();
+        let callee = assignment.routine("callee").unwrap();
+
+        assert_eq!(assignment.direct_page_bytes, 4);
+        assert_ne!(
+            caller.location(BindingKey::Local("saved".to_owned())),
+            callee.location(BindingKey::Temp("tmp".to_owned()))
+        );
+        assert!(matches!(
+            caller.location(BindingKey::Local("saved".to_owned())),
+            Some(Location::Direct { symbol, .. }) if symbol == "__dp_caller_local_saved"
+        ));
+    }
+
+    #[test]
+    fn keeps_branch_live_scratch_locals_separate() {
+        let done = Label::new("done");
+        let module = Module::new("layout").with_routine(
+            Routine::procedure("branchy")
+                .with_local(Local::new("live", Type::U16, Storage::Scratch))
+                .with_local(Local::new("skipped", Type::U16, Storage::Scratch))
+                .with_body(vec![
+                    IrInst::LoadConst {
+                        dst: Value::Local("live".to_owned()),
+                        value: Const::U16(1),
+                    },
+                    IrInst::BranchIfZero {
+                        value: Value::Local("live".to_owned()),
+                        target: done.clone(),
+                    },
+                    IrInst::LoadConst {
+                        dst: Value::Local("skipped".to_owned()),
+                        value: Const::U16(2),
+                    },
+                    IrInst::Store {
+                        width: Width::Word,
+                        addr: crate::ir::Address::Direct("out".to_owned()),
+                        src: Value::Local("skipped".to_owned()),
+                    },
+                    IrInst::Label(done),
+                    IrInst::Store {
+                        width: Width::Word,
+                        addr: crate::ir::Address::Direct("out".to_owned()),
+                        src: Value::Local("live".to_owned()),
+                    },
+                ]),
+        );
+
+        let assignment = assign_storage(&module);
+        let routine = assignment.routine("branchy").unwrap();
+
+        assert_eq!(assignment.direct_page_bytes, 4);
+        assert_ne!(
+            routine.location(BindingKey::Local("live".to_owned())),
+            routine.location(BindingKey::Local("skipped".to_owned()))
+        );
+        validate_storage_assignment(&module, &assignment).unwrap();
+    }
+
+    #[test]
+    fn assigns_reentrant_scratch_locals_to_stack() {
+        let mut routine = Routine::procedure("parse")
+            .with_local(Local::new("scratch", Type::U16, Storage::Scratch))
+            .with_body(vec![IrInst::LoadConst {
+                dst: Value::Local("scratch".to_owned()),
+                value: Const::U16(1),
+            }]);
+        routine.abi = crate::ir::Abi::Reentrant;
+        let module = Module::new("layout").with_routine(routine);
+
+        let assignment = assign_storage(&module);
+        let routine = assignment.routine("parse").unwrap();
+
+        assert!(matches!(
+            routine.location(BindingKey::Local("scratch".to_owned())),
+            Some(Location::Stack { offset: 1, size: 2 })
+        ));
+        assert_eq!(routine.stack_frame_bytes, 2);
+        assert_eq!(assignment.direct_page_bytes, 0);
+        validate_storage_assignment(&module, &assignment).unwrap();
+    }
+
+    #[test]
+    fn rejects_incomplete_storage_assignment_for_referenced_scratch_local() {
+        let module = Module::new("layout").with_routine(
+            Routine::procedure("broken")
+                .with_local(Local::new("scratch", Type::U16, Storage::Scratch))
+                .with_body(vec![IrInst::LoadConst {
+                    dst: Value::Local("scratch".to_owned()),
+                    value: Const::U16(1),
+                }]),
+        );
+        let assignment = StorageAssignment {
+            module_name: "layout".to_owned(),
+            routines: vec![RoutineStorage {
+                name: "broken".to_owned(),
+                direct_slots: Vec::new(),
+                static_locals: Vec::new(),
+                stack_slots: Vec::new(),
+                stack_frame_bytes: 0,
+                bindings: BTreeMap::new(),
+            }],
+            direct_page_bytes: 0,
+        };
+
+        let error = validate_storage_assignment(&module, &assignment).unwrap_err();
+
+        assert_eq!(
+            error.missing[0].key,
+            BindingKey::Local("scratch".to_owned())
+        );
+        assert!(error
+            .to_string()
+            .contains("routine broken is missing storage for Local(\"scratch\")"));
     }
 
     #[test]

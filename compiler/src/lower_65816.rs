@@ -692,24 +692,25 @@ fn symbol_with_offset(name: &str, offset: u16) -> Symbol {
     }
 }
 
-fn load_operand_for_address(out: &mut Vec<AsmInst>, addr: &Address) -> Result<Operand, LowerError> {
+fn load_operand_for_address(
+    _out: &mut Vec<AsmInst>,
+    addr: &Address,
+) -> Result<Operand, LowerError> {
     match addr {
         Address::NearPtr(Value::Direct(name)) => {
-            out.push(AsmInst::Ldy(Operand::Immediate(Immediate::Word(0))));
-            Ok(Operand::IndirectDirectIndexedY(Symbol::Named(name.clone())))
+            Ok(Operand::IndirectDirect(Symbol::Named(name.clone())))
         }
         other => operand_for_address(other),
     }
 }
 
 fn store_operand_for_address(
-    out: &mut Vec<AsmInst>,
+    _out: &mut Vec<AsmInst>,
     addr: &Address,
 ) -> Result<Operand, LowerError> {
     match addr {
         Address::NearPtr(Value::Direct(name)) => {
-            out.push(AsmInst::Ldy(Operand::Immediate(Immediate::Word(0))));
-            Ok(Operand::IndirectDirectIndexedY(Symbol::Named(name.clone())))
+            Ok(Operand::IndirectDirect(Symbol::Named(name.clone())))
         }
         other => operand_for_address(other),
     }
@@ -867,7 +868,7 @@ impl std::error::Error for LowerError {}
 #[cfg(test)]
 mod tests {
     use crate::ir::{Address, IrInst, Module, Routine, Storage, Type, Value, Width};
-    use crate::target_65816::{AsmInst, Immediate, Operand, Symbol};
+    use crate::target_65816::{AsmInst, Operand, Symbol};
 
     use super::lower_module;
 
@@ -894,10 +895,37 @@ mod tests {
 
         assert!(lowered.routines[0]
             .insts
-            .contains(&AsmInst::Ldy(Operand::Immediate(Immediate::Word(0)))));
-        assert!(lowered.routines[0].insts.contains(&AsmInst::Lda(
-            Operand::IndirectDirectIndexedY(Symbol::Named("ptr".to_owned()))
-        )));
+            .contains(&AsmInst::Lda(Operand::IndirectDirect(Symbol::Named(
+                "ptr".to_owned()
+            )))));
+    }
+
+    #[test]
+    fn lowers_near_pointer_store_through_direct_slot_without_zeroing_y() {
+        let module = Module::new("near_ptr_store").with_routine(
+            Routine::procedure("near_ptr_store")
+                .with_local(crate::ir::Local::new(
+                    "ptr",
+                    Type::near_ptr(Type::U8),
+                    Storage::Direct,
+                ))
+                .with_body(vec![
+                    IrInst::Store {
+                        width: Width::Byte,
+                        addr: Address::NearPtr(Value::Direct("ptr".to_owned())),
+                        src: Value::Accumulator,
+                    },
+                    IrInst::Return,
+                ]),
+        );
+
+        let lowered = lower_module(&module).unwrap();
+
+        assert!(lowered.routines[0]
+            .insts
+            .contains(&AsmInst::Sta(Operand::IndirectDirect(Symbol::Named(
+                "ptr".to_owned()
+            )))));
     }
 
     #[test]
