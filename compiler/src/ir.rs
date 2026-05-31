@@ -4,6 +4,7 @@ use std::fmt;
 pub struct Module {
     pub name: String,
     pub globals: Vec<Global>,
+    pub static_data: Vec<StaticData>,
     pub vectors: Vec<Vector>,
     pub metadata: Vec<Metadata>,
     pub imports: Vec<Import>,
@@ -19,6 +20,7 @@ impl Module {
         Self {
             name: name.into(),
             globals: Vec::new(),
+            static_data: Vec::new(),
             vectors: Vec::new(),
             metadata: Vec::new(),
             imports: Vec::new(),
@@ -64,6 +66,12 @@ impl Module {
         self.routines.push(routine);
         self
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticData {
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,6 +378,11 @@ pub enum IrInst {
     LoadConst {
         dst: Value,
         value: Const,
+    },
+    LoadAddress {
+        dst: Value,
+        symbol: String,
+        width: Width,
     },
     Load {
         width: Width,

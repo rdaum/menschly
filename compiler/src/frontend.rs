@@ -4,7 +4,7 @@ use std::fmt;
 use crate::ir::{
     Abi, Address, Const, Entry, EntryKind, Field, Global, GlobalPlacement, Import,
     InterruptPreserve, IrInst, Label, Library, Local, Metadata, Module, Param, PointerKind,
-    Routine, RoutineKind, Storage, Type, Value, Vector, Width,
+    Routine, RoutineKind, StaticData, Storage, Type, Value, Vector, Width,
 };
 
 pub fn parse_source(source: &str) -> Result<SourceModule, FrontendError> {
@@ -150,6 +150,7 @@ pub enum CondOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Number(u32),
+    String(String),
     Name(String),
     Call { name: String, args: Vec<Expr> },
     ResultOk(Box<Expr>),
@@ -322,6 +323,7 @@ fn read_string(
                 };
                 match escaped {
                     'n' => out.push('\n'),
+                    'r' => out.push('\r'),
                     't' => out.push('\t'),
                     '"' => out.push('"'),
                     '\\' => out.push('\\'),
@@ -1029,6 +1031,9 @@ impl Parser {
         if let Some(value) = self.take_number() {
             return Ok(Expr::Number(value));
         }
+        if let Some(value) = self.take_string() {
+            return Ok(Expr::String(value));
+        }
 
         let name = self.expect_ident()?;
         if self.take(TokenKind::LParen) {
@@ -1240,6 +1245,7 @@ struct Lowerer {
     routines: BTreeMap<String, RoutineSig>,
     labels: usize,
     temps: usize,
+    strings: Vec<StaticData>,
 }
 
 struct RoutineLowerer<'a> {
@@ -1254,6 +1260,7 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
         routines: routine_sigs(&source)?,
         labels: 0,
         temps: 0,
+        strings: Vec::new(),
     };
 
     let mut module = Module::new(source.name);
@@ -1337,6 +1344,7 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
         )?);
     }
     lowerer.validate_vectors_and_entry(&module)?;
+    module.static_data = lowerer.strings;
     Ok(module)
 }
 
@@ -1443,11 +1451,19 @@ impl Lowerer {
         };
 
         let mut lowerer = RoutineLowerer::new(self, source, globals, consts)?;
-        if let Some(param) = source
-            .params
-            .iter()
-            .find(|param| !matches!(param.ty, Type::U8 | Type::I8 | Type::U16 | Type::I16))
-        {
+        if let Some(param) = source.params.iter().find(|param| {
+            !matches!(
+                param.ty,
+                Type::U8
+                    | Type::I8
+                    | Type::U16
+                    | Type::I16
+                    | Type::Pointer {
+                        kind: PointerKind::Near | PointerKind::Direct | PointerKind::Code,
+                        ..
+                    }
+            )
+        }) {
             return Err(FrontendError::Type(format!(
                 "routine {} parameter {} has unsupported type {:?}",
                 source.name, param.name, param.ty
@@ -1502,6 +1518,18 @@ impl Lowerer {
         let id = self.temps;
         self.temps += 1;
         Value::Temp(format!("__tmp{id}"))
+    }
+
+    fn intern_string(&mut self, value: &str) -> String {
+        let id = self.strings.len();
+        let name = format!("__str_{id}");
+        let mut bytes = value.as_bytes().to_vec();
+        bytes.push(0);
+        self.strings.push(StaticData {
+            name: name.clone(),
+            bytes,
+        });
+        name
     }
 }
 
@@ -1685,13 +1713,14 @@ impl<'a> RoutineLowerer<'a> {
         let lhs_ty = self.infer_expr(&cond.lhs)?;
         let rhs_ty = self.infer_expr(&cond.rhs)?;
         let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(&cond.rhs)?)?;
-        self.lower_expr_to(&cond.lhs, &lhs_ty, Value::Accumulator)?;
+        let lhs = if matches!(cond.lhs, Expr::Number(_) | Expr::String(_) | Expr::Name(_)) {
+            self.expr_value(&cond.lhs, &lhs_ty)?
+        } else {
+            self.lower_expr_to(&cond.lhs, &lhs_ty, Value::Accumulator)?;
+            Value::Accumulator
+        };
         let rhs = self.expr_value(&cond.rhs, &lhs_ty)?;
-        self.body.push(IrInst::Compare {
-            width,
-            lhs: Value::Accumulator,
-            rhs,
-        });
+        self.body.push(IrInst::Compare { width, lhs, rhs });
         self.body.push(match cond.op {
             CondOp::Eq => IrInst::BranchIfNotEqual {
                 target: false_target,
@@ -1714,6 +1743,16 @@ impl<'a> RoutineLowerer<'a> {
                 self.body.push(IrInst::LoadConst {
                     dst,
                     value: const_for_type(*value, expected)?,
+                });
+                Ok(())
+            }
+            Expr::String(value) => {
+                ensure_assignable(expected, &string_literal_type())?;
+                let symbol = self.parent.intern_string(value);
+                self.body.push(IrInst::LoadAddress {
+                    dst,
+                    symbol,
+                    width: width_for_type(expected)?,
                 });
                 Ok(())
             }
@@ -1776,12 +1815,12 @@ impl<'a> RoutineLowerer<'a> {
                 let rhs_ty = self.infer_expr(rhs)?;
                 let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
                 ensure_assignable(expected, &lhs_ty)?;
-                self.lower_expr_to(lhs, &lhs_ty, Value::Accumulator)?;
+                let lhs = self.expr_value(lhs, &lhs_ty)?;
                 let rhs = self.expr_value(rhs, &lhs_ty)?;
                 self.body.push(IrInst::Add {
                     width,
                     dst,
-                    lhs: Value::Accumulator,
+                    lhs,
                     rhs,
                 });
                 Ok(())
@@ -1791,12 +1830,12 @@ impl<'a> RoutineLowerer<'a> {
                 let rhs_ty = self.infer_expr(rhs)?;
                 let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
                 ensure_assignable(expected, &lhs_ty)?;
-                self.lower_expr_to(lhs, &lhs_ty, Value::Accumulator)?;
+                let lhs = self.expr_value(lhs, &lhs_ty)?;
                 let rhs = self.expr_value(rhs, &lhs_ty)?;
                 self.body.push(IrInst::Sub {
                     width,
                     dst,
-                    lhs: Value::Accumulator,
+                    lhs,
                     rhs,
                 });
                 Ok(())
@@ -1806,12 +1845,12 @@ impl<'a> RoutineLowerer<'a> {
                 let rhs_ty = self.infer_expr(rhs)?;
                 let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
                 ensure_assignable(expected, &lhs_ty)?;
-                self.lower_expr_to(lhs, &lhs_ty, Value::Accumulator)?;
+                let lhs = self.expr_value(lhs, &lhs_ty)?;
                 let rhs = self.expr_value(rhs, &lhs_ty)?;
                 self.body.push(IrInst::BitAnd {
                     width,
                     dst,
-                    lhs: Value::Accumulator,
+                    lhs,
                     rhs,
                 });
                 Ok(())
@@ -1842,6 +1881,17 @@ impl<'a> RoutineLowerer<'a> {
     fn expr_value(&mut self, expr: &Expr, expected: &Type) -> Result<Value, FrontendError> {
         match expr {
             Expr::Number(value) => Ok(Value::Const(const_for_type(*value, expected)?)),
+            Expr::String(value) => {
+                ensure_assignable(expected, &string_literal_type())?;
+                let symbol = self.parent.intern_string(value);
+                let temp = self.parent.temp();
+                self.body.push(IrInst::LoadAddress {
+                    dst: temp.clone(),
+                    symbol,
+                    width: width_for_type(expected)?,
+                });
+                Ok(temp)
+            }
             Expr::Name(name) => {
                 let binding = self.binding(name)?;
                 if let Value::Const(value) = binding.value {
@@ -1928,6 +1978,7 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Number(value) if *value <= 0xff => Ok(Type::U8),
             Expr::Number(value) if *value <= 0xffff => Ok(Type::U16),
             Expr::Number(_) => Ok(Type::U24),
+            Expr::String(_) => Ok(string_literal_type()),
             Expr::Name(name) => Ok(self.binding(name)?.ty.clone()),
             Expr::Call { name, args } => self.check_call(name, args, false)?.result_type(name),
             Expr::ResultOk(value) => Ok(Type::Result {
@@ -2124,6 +2175,7 @@ impl<'a> RoutineLowerer<'a> {
     fn is_const_expr(&self, expr: &Expr) -> Result<bool, FrontendError> {
         match expr {
             Expr::Number(_) => Ok(true),
+            Expr::String(_) => Ok(false),
             Expr::Name(name) => Ok(matches!(self.binding(name)?.value, Value::Const(_))),
             _ => Ok(false),
         }
@@ -2132,6 +2184,9 @@ impl<'a> RoutineLowerer<'a> {
     fn const_expr_value(&self, expr: &Expr) -> Result<u32, FrontendError> {
         match expr {
             Expr::Number(value) => Ok(*value),
+            Expr::String(_) => Err(FrontendError::Type(
+                "string literal is not a numeric constant".to_owned(),
+            )),
             Expr::Name(name) => {
                 let binding = self.binding(name)?;
                 match binding.value {
@@ -2243,6 +2298,10 @@ fn width_for_type(ty: &Type) -> Result<Width, FrontendError> {
         ))),
         _ => Err(FrontendError::Type(format!("unsupported type {ty:?}"))),
     }
+}
+
+fn string_literal_type() -> Type {
+    Type::near_ptr(Type::U8)
 }
 
 fn const_type(value: u32) -> Type {
@@ -2361,12 +2420,9 @@ mod tests {
         let module = compile_source(source).unwrap();
         let body = &module.routines[0].body;
 
-        assert!(body.contains(&IrInst::LoadConst {
-            dst: Value::Accumulator,
-            value: Const::U8(b'H'),
-        }));
         assert!(body.iter().any(|inst| matches!(inst, IrInst::BitAnd {
             dst: Value::Local(name),
+            lhs: Value::Const(Const::U8(b'H')),
             rhs: Value::Const(Const::U8(0xff)),
             ..
         } if name == "letter")));
@@ -2717,6 +2773,31 @@ mod tests {
         assert!(!asm.contains(".proc serial_init\n"));
         assert!(!asm.contains(".proc serial_write\n"));
         assert!(!asm.contains(".proc serial_has_data\n"));
+    }
+
+    #[test]
+    fn compiles_string_literal_as_near_pointer_static_data() {
+        let source = "
+            module Strings
+            external procedure write_text(text: near ^u8)
+
+            procedure main()
+                write_text(\"OK\\r\\n\")
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        assert_eq!(module.static_data[0].bytes, b"OK\r\n\0");
+
+        let (lowered, _assignment) =
+            crate::lower_65816::lower_module_with_storage(&module).unwrap();
+        let asm = crate::ca65::emit_module(&lowered);
+
+        assert!(asm.contains("__str_0:\n"));
+        assert!(asm.contains("\t.byte $4f, $4b, $0d, $0a, $00\n"));
+        assert!(asm.contains("\tlda #__str_0\n"));
+        assert!(asm.contains("\tsta __dp_write_text_param_text\n"));
     }
 
     #[test]

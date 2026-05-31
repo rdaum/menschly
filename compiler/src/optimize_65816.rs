@@ -15,6 +15,7 @@ pub fn optimize_module(module: &AsmModule) -> AsmModule {
         name: module.name.clone(),
         direct_symbols: module.direct_symbols.clone(),
         static_symbols: module.static_symbols.clone(),
+        static_data: module.static_data.clone(),
         fixed_symbols: module.fixed_symbols.clone(),
         banked_symbols: module.banked_symbols.clone(),
         vectors: module.vectors.clone(),
@@ -237,8 +238,8 @@ fn immediate_is_one(value: Immediate) -> bool {
 fn stz_operand(operand: &Operand) -> bool {
     matches!(
         operand,
-        Operand::Absolute(_)
-            | Operand::AbsoluteIndexedX(_)
+        Operand::Absolute(Symbol::Address(0..=0xffff))
+            | Operand::AbsoluteIndexedX(Symbol::Address(0..=0xffff))
             | Operand::Direct(_)
             | Operand::DirectIndexedX(_)
     )
@@ -247,8 +248,8 @@ fn stz_operand(operand: &Operand) -> bool {
 fn inc_dec_operand(operand: &Operand) -> bool {
     matches!(
         operand,
-        Operand::Absolute(_)
-            | Operand::AbsoluteIndexedX(_)
+        Operand::Absolute(Symbol::Address(0..=0xffff))
+            | Operand::AbsoluteIndexedX(Symbol::Address(0..=0xffff))
             | Operand::Direct(_)
             | Operand::DirectIndexedX(_)
     )

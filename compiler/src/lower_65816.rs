@@ -49,6 +49,14 @@ fn lower_module_declarations(module: &Module, out: &mut AsmModule) {
             }
         }
     }
+    out.static_data = module
+        .static_data
+        .iter()
+        .map(|data| crate::target_65816::StaticData {
+            name: data.name.clone(),
+            bytes: data.bytes.clone(),
+        })
+        .collect();
 
     out.vectors = module
         .vectors
@@ -216,9 +224,16 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                 other => return Err(LowerError::UnsupportedValue(other.clone())),
             }
         }
+        IrInst::LoadAddress { dst, symbol, width } => {
+            set_mode_for_width(out, *width);
+            out.push(AsmInst::Lda(Operand::ImmediateSymbol(Symbol::Named(
+                symbol.clone(),
+            ))));
+            store_a_to_value(out, dst)?;
+        }
         IrInst::Load { width, dst, addr } => {
             set_mode_for_width(out, *width);
-            let operand = operand_for_address(addr)?;
+            let operand = load_operand_for_address(out, addr)?;
             match dst {
                 Value::Accumulator => out.push(AsmInst::Lda(operand)),
                 Value::IndexX => out.push(AsmInst::Ldx(operand)),
@@ -239,7 +254,8 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             if !matches!(src, Value::Accumulator) {
                 load_value_to_a(out, src)?;
             }
-            out.push(AsmInst::Sta(operand_for_address(addr)?));
+            let operand = store_operand_for_address(out, addr)?;
+            out.push(AsmInst::Sta(operand));
         }
         IrInst::Add {
             width,
@@ -514,6 +530,29 @@ fn operand_for_address(addr: &Address) -> Result<Operand, LowerError> {
     }
 }
 
+fn load_operand_for_address(out: &mut Vec<AsmInst>, addr: &Address) -> Result<Operand, LowerError> {
+    match addr {
+        Address::NearPtr(Value::Direct(name)) => {
+            out.push(AsmInst::Ldy(Operand::Immediate(Immediate::Word(0))));
+            Ok(Operand::IndirectDirectIndexedY(Symbol::Named(name.clone())))
+        }
+        other => operand_for_address(other),
+    }
+}
+
+fn store_operand_for_address(
+    out: &mut Vec<AsmInst>,
+    addr: &Address,
+) -> Result<Operand, LowerError> {
+    match addr {
+        Address::NearPtr(Value::Direct(name)) => {
+            out.push(AsmInst::Ldy(Operand::Immediate(Immediate::Word(0))));
+            Ok(Operand::IndirectDirectIndexedY(Symbol::Named(name.clone())))
+        }
+        other => operand_for_address(other),
+    }
+}
+
 fn operand_for_value(value: &Value) -> Result<Operand, LowerError> {
     match value {
         Value::Const(value) => Ok(Operand::Immediate(immediate(*value))),
@@ -612,7 +651,7 @@ impl std::error::Error for LowerError {}
 #[cfg(test)]
 mod tests {
     use crate::ir::{Address, IrInst, Module, Routine, Storage, Type, Value, Width};
-    use crate::target_65816::{AsmInst, Operand, Symbol};
+    use crate::target_65816::{AsmInst, Immediate, Operand, Symbol};
 
     use super::lower_module;
 
@@ -639,9 +678,10 @@ mod tests {
 
         assert!(lowered.routines[0]
             .insts
-            .contains(&AsmInst::Lda(Operand::IndirectDirect(Symbol::Named(
-                "ptr".to_owned()
-            )))));
+            .contains(&AsmInst::Ldy(Operand::Immediate(Immediate::Word(0)))));
+        assert!(lowered.routines[0].insts.contains(&AsmInst::Lda(
+            Operand::IndirectDirectIndexedY(Symbol::Named("ptr".to_owned()))
+        )));
     }
 
     #[test]

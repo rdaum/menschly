@@ -60,6 +60,16 @@ pub fn emit_module(module: &AsmModule) -> String {
         out.push('\n');
     }
 
+    if !module.static_data.is_empty() {
+        out.push_str(".segment \"CODE\"\n");
+        for data in &module.static_data {
+            out.push_str(&data.name);
+            out.push_str(":\n");
+            emit_bytes(&mut out, &data.bytes);
+        }
+        out.push('\n');
+    }
+
     for symbol in &module.banked_symbols {
         out.push_str(".segment \"BANK");
         out.push_str(&symbol.bank.to_string());
@@ -134,6 +144,19 @@ fn emit_metadata(out: &mut String, value: &str) {
     out.push_str("\t.asciiz ");
     out.push_str(&quoted(value));
     out.push('\n');
+}
+
+fn emit_bytes(out: &mut String, bytes: &[u8]) {
+    for chunk in bytes.chunks(16) {
+        out.push_str("\t.byte ");
+        for (idx, byte) in chunk.iter().enumerate() {
+            if idx > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("${byte:02x}"));
+        }
+        out.push('\n');
+    }
 }
 
 fn quoted(value: &str) -> String {
@@ -244,6 +267,7 @@ fn branch(opcode: &str, label: &str) -> String {
 fn emit_operand(operand: &Operand) -> String {
     match operand {
         Operand::Immediate(value) => emit_immediate(*value),
+        Operand::ImmediateSymbol(symbol) => format!("#{}", emit_symbol(symbol)),
         Operand::Absolute(symbol) => emit_symbol(symbol),
         Operand::AbsoluteIndexedX(symbol) => format!("{},x", emit_symbol(symbol)),
         Operand::AbsoluteLong(symbol) => format!("f:{}", emit_symbol(symbol)),

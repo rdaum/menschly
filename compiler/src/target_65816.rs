@@ -5,6 +5,7 @@ pub struct AsmModule {
     pub name: String,
     pub direct_symbols: Vec<DirectSymbol>,
     pub static_symbols: Vec<StaticSymbol>,
+    pub static_data: Vec<StaticData>,
     pub fixed_symbols: Vec<FixedSymbol>,
     pub banked_symbols: Vec<BankedSymbol>,
     pub vectors: Vec<VectorEntry>,
@@ -23,6 +24,7 @@ impl AsmModule {
             name: name.into(),
             direct_symbols: Vec::new(),
             static_symbols: Vec::new(),
+            static_data: Vec::new(),
             fixed_symbols: Vec::new(),
             banked_symbols: Vec::new(),
             vectors: Vec::new(),
@@ -40,6 +42,12 @@ impl AsmModule {
         self.routines.push(routine);
         self
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticData {
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +217,7 @@ impl Mode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operand {
     Immediate(Immediate),
+    ImmediateSymbol(Symbol),
     Absolute(Symbol),
     AbsoluteIndexedX(Symbol),
     AbsoluteLong(Symbol),

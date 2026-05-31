@@ -155,6 +155,7 @@ pub fn apply_storage(module: &Module, assignment: &StorageAssignment) -> Module 
     Module {
         name: module.name.clone(),
         globals: module.globals.clone(),
+        static_data: module.static_data.clone(),
         vectors: module.vectors.clone(),
         metadata: module.metadata.clone(),
         imports: module.imports.clone(),
@@ -388,6 +389,11 @@ fn rewrite_inst(inst: &IrInst, layout: &RoutineStorage) -> IrInst {
             dst: rewrite_value(dst, layout),
             value: *value,
         },
+        IrInst::LoadAddress { dst, symbol, width } => IrInst::LoadAddress {
+            dst: rewrite_value(dst, layout),
+            symbol: symbol.clone(),
+            width: *width,
+        },
         IrInst::Load { width, dst, addr } => IrInst::Load {
             width: *width,
             dst: rewrite_value(dst, layout),
@@ -523,6 +529,9 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
 
     match inst {
         IrInst::LoadConst { dst, value } => collect_temp_value(dst, const_size(*value), &mut out),
+        IrInst::LoadAddress { dst, width, .. } => {
+            collect_temp_value(dst, width.size_bytes(), &mut out)
+        }
         IrInst::Move { dst, src } => {
             collect_temp_value(dst, 2, &mut out);
             collect_temp_value(src, 2, &mut out);
