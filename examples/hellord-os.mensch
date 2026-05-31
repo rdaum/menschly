@@ -9,6 +9,8 @@ external function serial_has_data(): u8
 external function serial_read(): u8
 
 export procedure main()
+    serial_init()
+
     serial_write('H')
     serial_write('e')
     serial_write('l')
@@ -19,8 +21,6 @@ export procedure main()
     serial_write('!')
     serial_write('\r')
     serial_write('\n')
-
-    serial_init()
 
     while 1 != 0
         while serial_has_data() == 0

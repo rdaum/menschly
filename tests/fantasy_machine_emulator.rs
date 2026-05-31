@@ -5,10 +5,12 @@ use mensch_systems_tests::{ca65, frontend, lower_65816, x65_runner};
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
 use x65alike_emul::{
     Machine, RAMBLOCK_REG, ROMBLOCK_REG, USB_UART_CTRL, USB_UART_CTRL_IRQ_RX_NOT_EMPTY,
-    USB_UART_DATA, USB_UART_STAT,
+    USB_UART_CTRL_IRQ_TX_NOT_FULL, USB_UART_DATA, USB_UART_STAT,
 };
 
-use x65_runner::{build_mensch_xex_sources, run_image_until_output, temp_dir};
+use x65_runner::{
+    build_mensch_xex_sources, machine_with_loaded_image, run_image_until_output, temp_dir,
+};
 
 const ROUTINE_ADDR: usize = 0x020000;
 const IRQ_ROUTINE_ADDR: usize = 0x008000;
@@ -17,6 +19,8 @@ const RETURN_ADDR: u16 = 0x1234;
 const NATIVE_IRQ_VECTOR: usize = 0x00ffee;
 const DEFAULT_ROMBLOCK_IRQ_VECTOR_PHYSICAL: u32 = 0x083fee;
 const HELLORD_OVERFLOW_ADDR: u32 = 0x000280;
+const HELLORD_TX_OVERFLOW_ADDR: u32 = 0x000282;
+const TX_BUFFERED_MARKER_ADDR: u32 = 0x000290;
 
 struct BusMachine(Machine);
 
@@ -310,6 +314,7 @@ fn hellord_example_boots_as_interrupt_driven_xex() {
 
     assert_eq!(run.output, expected);
     assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
+    assert_eq!(run.machine.byte(HELLORD_TX_OVERFLOW_ADDR), 0);
 }
 
 #[test]
@@ -322,6 +327,99 @@ fn hellord_example_flags_full_rx_ring_and_drops_input() {
         .expect("Hellord image should produce overflow test output");
 
     assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 1);
+}
+
+#[test]
+fn serial_write_buffers_until_tx_irq_drains_output() {
+    let dir = temp_dir("buffered-tx-irq");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let main_path = dir.join("buffered-tx.mensch");
+    let cfg_path = dir.join("image.cfg");
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    fs::write(
+        &main_path,
+        "
+        module BufferedTxDemo
+        application main
+        vector irq = serial_irq
+        fixed($000290) volatile var tx_marker: u8
+
+        external interrupt procedure serial_irq()
+        external procedure serial_init()
+        external procedure serial_write(value: u8)
+
+        export procedure main()
+            serial_init()
+            asm \"sei\"
+            serial_write('B')
+            serial_write('U')
+            serial_write('F')
+            serial_write('F')
+            serial_write('E')
+            serial_write('R')
+            tx_marker = 1
+            while tx_marker == 1
+            end
+            asm \"cli\"
+            while 1 != 0
+            end
+        end
+        ",
+    )
+    .expect("buffered TX demo should be written");
+    fs::write(&cfg_path, xex_linker_config()).expect("linker config should be written");
+
+    let build = build_mensch_xex_sources(
+        "buffered-tx-irq",
+        &[main_path, repo_root.join("examples/serial-ring.mensch")],
+        &cfg_path,
+    )
+    .expect("buffered TX demo should build");
+
+    let mut bus = BusMachine::new(machine_with_loaded_image(&build.image));
+    let mut cpu = Processor::new();
+    let entry = build.image.entry.expect("XEX should include a run address");
+    cpu.p = StatusRegister::from_byte(0x00, false);
+    cpu.pbr = entry.pbr;
+    cpu.dbr = 0;
+    cpu.pc = entry.pc;
+    cpu.s = 0x01fc;
+
+    for _ in 0..20_000 {
+        if bus.0.byte(TX_BUFFERED_MARKER_ADDR) == 1 {
+            break;
+        }
+        if !cpu.p.i && bus.0.irq_pending() {
+            service_irq(&mut cpu, &mut bus);
+        }
+        cpu.step(&mut bus);
+    }
+
+    assert_eq!(bus.0.byte(TX_BUFFERED_MARKER_ADDR), 1);
+    assert_eq!(bus.0.serial_output(), b"");
+    assert_eq!(
+        bus.0.read(USB_UART_CTRL),
+        USB_UART_CTRL_IRQ_RX_NOT_EMPTY | USB_UART_CTRL_IRQ_TX_NOT_FULL
+    );
+    assert!(bus.0.irq_pending());
+
+    bus.0.write(TX_BUFFERED_MARKER_ADDR, 0);
+    for _ in 0..50_000 {
+        if !cpu.p.i && bus.0.irq_pending() {
+            service_irq(&mut cpu, &mut bus);
+        }
+        cpu.step(&mut bus);
+        if bus.0.serial_output() == b"BUFFER"
+            && bus.0.read(USB_UART_CTRL) == USB_UART_CTRL_IRQ_RX_NOT_EMPTY
+        {
+            break;
+        }
+    }
+
+    assert_eq!(bus.0.serial_output(), b"BUFFER");
+    assert_eq!(bus.0.read(USB_UART_CTRL), USB_UART_CTRL_IRQ_RX_NOT_EMPTY);
+    assert!(!bus.0.irq_pending());
 }
 
 fn build_hellord_example() -> x65_runner::BuildOutput {
