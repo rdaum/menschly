@@ -8,6 +8,7 @@ pub struct Module {
     pub metadata: Vec<Metadata>,
     pub imports: Vec<Import>,
     pub libraries: Vec<Library>,
+    pub external_routines: Vec<String>,
     pub entry: Option<Entry>,
     pub routines: Vec<Routine>,
 }
@@ -21,6 +22,7 @@ impl Module {
             metadata: Vec::new(),
             imports: Vec::new(),
             libraries: Vec::new(),
+            external_routines: Vec::new(),
             entry: None,
             routines: Vec::new(),
         }

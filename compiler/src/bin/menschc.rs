@@ -1,8 +1,9 @@
-use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process;
 
+use clap::Parser;
 use mensch_systems_tests::{ca65, frontend, lower_65816};
 
 fn main() {
@@ -13,24 +14,38 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let config = Config::parse(env::args().skip(1))?;
-    let mut source = String::new();
-    if config.input == "-" {
-        io::stdin()
-            .read_to_string(&mut source)
-            .map_err(|error| format!("failed to read stdin: {error}"))?;
-    } else {
-        source = fs::read_to_string(&config.input)
-            .map_err(|error| format!("failed to read {}: {error}", config.input))?;
+    let mut config = Config::parse();
+    if config.sources.is_empty() {
+        config.sources.push(PathBuf::from("-"));
     }
 
-    let module = frontend::compile_source(&source).map_err(|error| error.to_string())?;
-    let (lowered, _assignment) =
-        lower_65816::lower_module_with_storage(&module).map_err(|error| error.to_string())?;
-    let asm = ca65::emit_module(&lowered);
+    if config.sources.len() > 1 {
+        let Some(output_dir) = &config.output else {
+            return Err("multiple input paths require --output DIR".to_owned());
+        };
+        fs::create_dir_all(output_dir)
+            .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
+        for source_path in &config.sources {
+            if source_path == Path::new("-") {
+                return Err("stdin cannot be used with multiple input paths".to_owned());
+            }
+            let asm = compile_path(source_path)?;
+            let stem = source_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("source");
+            let output_path = output_dir.join(format!("{stem}.a65"));
+            fs::write(&output_path, asm)
+                .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
+        }
+        return Ok(());
+    }
+
+    let asm = compile_path(&config.sources[0])?;
 
     if let Some(output) = config.output {
-        fs::write(&output, asm).map_err(|error| format!("failed to write {output}: {error}"))?;
+        fs::write(&output, asm)
+            .map_err(|error| format!("failed to write {}: {error}", output.display()))?;
     } else {
         io::stdout()
             .write_all(asm.as_bytes())
@@ -40,50 +55,30 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-struct Config {
-    input: String,
-    output: Option<String>,
-}
-
-impl Config {
-    fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
-        let mut input = None;
-        let mut output = None;
-        let mut args = args.into_iter();
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "-h" | "--help" => return Err(usage()),
-                "-o" | "--output" => {
-                    let value = args
-                        .next()
-                        .ok_or_else(|| format!("{arg} requires a value\n\n{}", usage()))?;
-                    output = Some(value);
-                }
-                option if option.starts_with('-') && option != "-" => {
-                    return Err(format!("unknown option {option}\n\n{}", usage()));
-                }
-                path => {
-                    if input.replace(path.to_owned()).is_some() {
-                        return Err(format!("multiple input paths supplied\n\n{}", usage()));
-                    }
-                }
-            }
-        }
-
-        Ok(Self {
-            input: input.unwrap_or_else(|| "-".to_owned()),
-            output,
-        })
+fn compile_path(path: &Path) -> Result<String, String> {
+    let mut source = String::new();
+    if path == Path::new("-") {
+        io::stdin()
+            .read_to_string(&mut source)
+            .map_err(|error| format!("failed to read stdin: {error}"))?;
+    } else {
+        source = fs::read_to_string(path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     }
+
+    let module = frontend::compile_source(&source).map_err(|error| error.to_string())?;
+    let (lowered, _assignment) =
+        lower_65816::lower_module_with_storage(&module).map_err(|error| error.to_string())?;
+    Ok(ca65::emit_module(&lowered))
 }
 
-fn usage() -> String {
-    "usage: menschc [options] [source.mensch]\n\
-     \n\
-     Options:\n\
-       -o, --output PATH    Write ca65 assembly to PATH instead of stdout\n\
-     \n\
-     Reads source from stdin when no source path is supplied."
-        .to_owned()
+#[derive(Debug, Parser)]
+#[command(about = "Compile Mensch source to ca65 assembly")]
+struct Config {
+    /// Mensch source files. Reads stdin when omitted.
+    sources: Vec<PathBuf>,
+
+    /// Write ca65 assembly to a file, or to a directory when compiling multiple sources.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
 }

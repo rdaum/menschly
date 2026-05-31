@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use clap::Parser;
-use mensch_systems_tests::x65_runner::{build_mensch_xex, run_image, RunConfig};
+use mensch_systems_tests::x65_runner::{build_mensch_xex_sources, run_image, RunConfig};
 
 const DEFAULT_STEPS: usize = 1_000_000;
 
@@ -19,11 +19,12 @@ fn main() {
 fn run() -> Result<(), String> {
     let config = Config::parse();
     let build_name = config
-        .source
-        .file_stem()
+        .sources
+        .first()
+        .and_then(|source| source.file_stem())
         .and_then(|stem| stem.to_str())
         .unwrap_or("mensch-image");
-    let build = build_mensch_xex(build_name, &config.source, &config.linker_config)?;
+    let build = build_mensch_xex_sources(build_name, &config.sources, &config.linker_config)?;
 
     let mut serial_input = Vec::new();
     let mut stdin = io::stdin();
@@ -70,8 +71,9 @@ fn spawn_stdin_reader() -> Receiver<u8> {
     about = "Compile a Mensch source file, link it as an X65-style XEX, and boot it in x65alike-emul"
 )]
 struct Config {
-    /// Mensch source file to compile and boot.
-    source: PathBuf,
+    /// Mensch source files to compile and boot.
+    #[arg(required = true)]
+    sources: Vec<PathBuf>,
 
     /// ld65 linker config used to produce an Atari/XEX image.
     #[arg(short = 'C', long = "config")]

@@ -24,6 +24,7 @@ pub struct SourceModule {
     pub globals: Vec<GlobalDecl>,
     pub vectors: Vec<VectorDecl>,
     pub metadata: Vec<MetadataDecl>,
+    pub externals: Vec<ExternalDecl>,
     pub routines: Vec<RoutineDecl>,
 }
 
@@ -64,6 +65,14 @@ pub struct VectorDecl {
 pub struct MetadataDecl {
     pub key: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalDecl {
+    pub name: String,
+    pub kind: RoutineDeclKind,
+    pub abi: Abi,
+    pub params: Vec<VarDecl>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -450,6 +459,7 @@ impl Parser {
         let mut globals = Vec::new();
         let mut vectors = Vec::new();
         let mut metadata = Vec::new();
+        let mut externals = Vec::new();
         let mut routines = Vec::new();
 
         while !self.at_eof() {
@@ -471,6 +481,8 @@ impl Parser {
                 metadata.push(self.parse_metadata_decl()?);
             } else if self.take_keyword("vector") {
                 vectors.push(self.parse_vector_decl()?);
+            } else if self.take_keyword("external") {
+                externals.push(self.parse_external_decl()?);
             } else if self.starts_global_decl() {
                 globals.push(self.parse_global_decl()?);
             } else {
@@ -486,6 +498,7 @@ impl Parser {
             globals,
             vectors,
             metadata,
+            externals,
             routines,
         })
     }
@@ -524,6 +537,16 @@ impl Parser {
         self.expect(TokenKind::Equal)?;
         let routine = self.expect_ident()?;
         Ok(VectorDecl { name, routine })
+    }
+
+    fn parse_external_decl(&mut self) -> Result<ExternalDecl, FrontendError> {
+        let (abi, kind, name, params) = self.parse_routine_header(Abi::Internal)?;
+        Ok(ExternalDecl {
+            name,
+            kind,
+            abi,
+            params,
+        })
     }
 
     fn parse_global_decl(&mut self) -> Result<GlobalDecl, FrontendError> {
@@ -570,9 +593,38 @@ impl Parser {
     }
 
     fn parse_routine(&mut self) -> Result<RoutineDecl, FrontendError> {
+        let (abi, kind, name, params) = self.parse_routine_header(Abi::Exported)?;
+
+        let mut locals = Vec::new();
+        let mut body = Vec::new();
+        while !self.take_keyword("end") {
+            if self.at_eof() {
+                return Err(self.parse_error("unterminated routine"));
+            }
+            if self.starts_var_decl() {
+                locals.push(self.parse_var_decl()?);
+            } else {
+                body.push(self.parse_stmt()?);
+            }
+        }
+
+        Ok(RoutineDecl {
+            name,
+            kind,
+            abi,
+            params,
+            locals,
+            body,
+        })
+    }
+
+    fn parse_routine_header(
+        &mut self,
+        export_abi: Abi,
+    ) -> Result<(Abi, RoutineDeclKind, String, Vec<VarDecl>), FrontendError> {
         let mut abi = Abi::Internal;
         if self.take_keyword("export") {
-            abi = Abi::Exported;
+            abi = export_abi;
         }
         if self.take_keyword("far") {
             abi = Abi::Far;
@@ -602,27 +654,7 @@ impl Parser {
             }
         };
 
-        let mut locals = Vec::new();
-        let mut body = Vec::new();
-        while !self.take_keyword("end") {
-            if self.at_eof() {
-                return Err(self.parse_error("unterminated routine"));
-            }
-            if self.starts_var_decl() {
-                locals.push(self.parse_var_decl()?);
-            } else {
-                body.push(self.parse_stmt()?);
-            }
-        }
-
-        Ok(RoutineDecl {
-            name,
-            kind,
-            abi,
-            params,
-            locals,
-            body,
-        })
+        Ok((abi, kind, name, params))
     }
 
     fn parse_params(&mut self) -> Result<Vec<VarDecl>, FrontendError> {
@@ -1039,6 +1071,7 @@ impl Parser {
 #[derive(Debug, Clone)]
 struct RoutineSig {
     kind: RoutineDeclKind,
+    abi: Abi,
     params: Vec<Type>,
 }
 
@@ -1083,6 +1116,11 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
         .map(|library| Library {
             name: library.name.clone(),
         })
+        .collect();
+    module.external_routines = source
+        .externals
+        .iter()
+        .map(|external| external.name.clone())
         .collect();
     module.entry = source.entry.as_ref().map(|entry| Entry {
         kind: entry.kind,
@@ -1137,28 +1175,49 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
 
 fn routine_sigs(source: &SourceModule) -> Result<BTreeMap<String, RoutineSig>, FrontendError> {
     let mut out = BTreeMap::new();
+    for external in &source.externals {
+        insert_routine_sig(
+            &mut out,
+            &external.name,
+            RoutineSig {
+                kind: external.kind.clone(),
+                abi: external.abi,
+                params: external
+                    .params
+                    .iter()
+                    .map(|param| param.ty.clone())
+                    .collect(),
+            },
+        )?;
+    }
     for routine in &source.routines {
-        if out
-            .insert(
-                routine.name.clone(),
-                RoutineSig {
-                    kind: routine.kind.clone(),
-                    params: routine
-                        .params
-                        .iter()
-                        .map(|param| param.ty.clone())
-                        .collect(),
-                },
-            )
-            .is_some()
-        {
-            return Err(FrontendError::Type(format!(
-                "duplicate routine {}",
-                routine.name
-            )));
-        }
+        insert_routine_sig(
+            &mut out,
+            &routine.name,
+            RoutineSig {
+                kind: routine.kind.clone(),
+                abi: routine.abi,
+                params: routine
+                    .params
+                    .iter()
+                    .map(|param| param.ty.clone())
+                    .collect(),
+            },
+        )?;
     }
     Ok(out)
+}
+
+fn insert_routine_sig(
+    out: &mut BTreeMap<String, RoutineSig>,
+    name: &str,
+    sig: RoutineSig,
+) -> Result<(), FrontendError> {
+    if out.insert(name.to_owned(), sig).is_some() {
+        Err(FrontendError::Type(format!("duplicate routine {name}")))
+    } else {
+        Ok(())
+    }
 }
 
 impl Lowerer {
@@ -1221,17 +1280,13 @@ impl Lowerer {
 
     fn validate_vectors_and_entry(&self, module: &Module) -> Result<(), FrontendError> {
         for vector in &module.vectors {
-            let Some(routine) = module
-                .routines
-                .iter()
-                .find(|routine| routine.name == vector.routine)
-            else {
+            let Some(sig) = self.routines.get(&vector.routine) else {
                 return Err(FrontendError::Type(format!(
                     "vector {} references unknown routine {}",
                     vector.name, vector.routine
                 )));
             };
-            if !matches!(routine.abi, Abi::Interrupt) {
+            if !matches!(sig.abi, Abi::Interrupt) {
                 return Err(FrontendError::Type(format!(
                     "vector {} references non-interrupt routine {}",
                     vector.name, vector.routine
@@ -1239,17 +1294,13 @@ impl Lowerer {
             }
         }
         if let Some(entry) = &module.entry {
-            let Some(routine) = module
-                .routines
-                .iter()
-                .find(|routine| routine.name == entry.routine)
-            else {
+            let Some(sig) = self.routines.get(&entry.routine) else {
                 return Err(FrontendError::Type(format!(
                     "entry references unknown routine {}",
                     entry.routine
                 )));
             };
-            if matches!(routine.abi, Abi::Interrupt) {
+            if matches!(sig.abi, Abi::Interrupt) {
                 return Err(FrontendError::Type(format!(
                     "entry references interrupt routine {}",
                     entry.routine
@@ -2098,6 +2149,46 @@ mod tests {
         assert!(asm.contains("\t.asciiz \"platform=c256\"\n"));
         assert!(asm.contains("\tnop\n"));
         assert!(asm.contains("\trti\n"));
+    }
+
+    #[test]
+    fn compiles_external_routine_declarations_for_calls_and_vectors() {
+        let source = "
+            module UsesExternal
+            vector irq = serial_irq
+            fixed($009f57) volatile var serial_data: u8
+
+            external interrupt procedure serial_irq()
+            external procedure serial_init()
+            external function serial_has_data(): u8
+
+            export procedure main()
+                serial_init()
+                if serial_has_data() != 0
+                    serial_data = serial_has_data()
+                end
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+
+        assert_eq!(module.routines.len(), 1);
+        assert_eq!(module.routines[0].name, "main");
+
+        let (lowered, _assignment) =
+            crate::lower_65816::lower_module_with_storage(&module).unwrap();
+        let asm = crate::ca65::emit_module(&lowered);
+
+        assert!(asm.contains(".import serial_irq\n"));
+        assert!(asm.contains(".import serial_init\n"));
+        assert!(asm.contains(".import serial_has_data\n"));
+        assert!(asm.contains("__vector_irq: .addr serial_irq\n"));
+        assert!(asm.contains("\tjsr serial_init\n"));
+        assert!(asm.contains("\tjsr serial_has_data\n"));
+        assert!(!asm.contains(".proc serial_irq\n"));
+        assert!(!asm.contains(".proc serial_init\n"));
+        assert!(!asm.contains(".proc serial_has_data\n"));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use x65alike_emul::{
     USB_UART_DATA, USB_UART_STAT,
 };
 
-use x65_runner::{build_mensch_xex, run_image_until_output, temp_dir};
+use x65_runner::{build_mensch_xex_sources, run_image_until_output, temp_dir};
 
 const ROUTINE_ADDR: usize = 0x020000;
 const IRQ_ROUTINE_ADDR: usize = 0x008000;
@@ -326,9 +326,12 @@ fn hellord_example_flags_full_rx_ring_and_drops_input() {
 
 fn build_hellord_example() -> x65_runner::BuildOutput {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    build_mensch_xex(
+    build_mensch_xex_sources(
         "hellord-os",
-        repo_root.join("examples/hellord-os.mensch"),
+        &[
+            repo_root.join("examples/hellord-os.mensch"),
+            repo_root.join("examples/serial-ring.mensch"),
+        ],
         repo_root.join("examples/hellord-os-x65.cfg"),
     )
     .expect("Hellord example should build")

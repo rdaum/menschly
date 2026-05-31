@@ -81,6 +81,7 @@ fn lower_module_declarations(module: &Module, out: &mut AsmModule) {
             name: library.name.clone(),
         })
         .collect();
+    out.external_routines = module.external_routines.clone();
     out.entry = module
         .entry
         .as_ref()
@@ -136,9 +137,7 @@ pub fn lower_module_with_storage(
 
 fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
     let mut out = AsmRoutine::new(routine.name.clone());
-    if matches!(routine.abi, Abi::Exported) {
-        out.export = true;
-    }
+    out.export = true;
 
     for inst in &routine.body {
         lower_inst(routine, inst, &mut out.insts)?;

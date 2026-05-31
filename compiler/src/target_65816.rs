@@ -11,6 +11,7 @@ pub struct AsmModule {
     pub metadata: Vec<ModuleMetadata>,
     pub imports: Vec<ModuleImport>,
     pub libraries: Vec<ModuleLibrary>,
+    pub external_routines: Vec<String>,
     pub entry: Option<ModuleEntry>,
     pub routines: Vec<AsmRoutine>,
 }
@@ -27,6 +28,7 @@ impl AsmModule {
             metadata: Vec::new(),
             imports: Vec::new(),
             libraries: Vec::new(),
+            external_routines: Vec::new(),
             entry: None,
             routines: Vec::new(),
         }

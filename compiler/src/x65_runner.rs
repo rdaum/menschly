@@ -55,38 +55,58 @@ pub fn build_mensch_xex(
     source_path: impl AsRef<Path>,
     cfg_path: impl AsRef<Path>,
 ) -> Result<BuildOutput, String> {
+    build_mensch_xex_sources(name, &[source_path.as_ref().to_path_buf()], cfg_path)
+}
+
+pub fn build_mensch_xex_sources(
+    name: &str,
+    source_paths: &[PathBuf],
+    cfg_path: impl AsRef<Path>,
+) -> Result<BuildOutput, String> {
+    if source_paths.is_empty() {
+        return Err("at least one Mensch source path is required".to_owned());
+    }
+
     let dir = temp_dir(name);
     fs::create_dir_all(&dir).map_err(|error| format!("failed to create build dir: {error}"))?;
-
-    let asm_path = dir.join(format!("{name}.a65"));
-    let obj_path = dir.join(format!("{name}.o"));
     let xex_path = dir.join(format!("{name}.xex"));
+    let mut obj_paths = Vec::new();
 
-    let source = fs::read_to_string(source_path.as_ref())
-        .map_err(|error| format!("failed to read {}: {error}", source_path.as_ref().display()))?;
-    let module = frontend::compile_source(&source).map_err(|error| error.to_string())?;
-    let (lowered, _assignment) =
-        lower_65816::lower_module_with_storage(&module).map_err(|error| error.to_string())?;
-    fs::write(&asm_path, ca65::emit_module(&lowered))
-        .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
+    for (index, source_path) in source_paths.iter().enumerate() {
+        let stem = source_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("source");
+        let asm_path = dir.join(format!("{index}-{stem}.a65"));
+        let obj_path = dir.join(format!("{index}-{stem}.o"));
 
-    run_command(
-        Command::new("ca65")
-            .arg("-g")
-            .arg("--cpu")
-            .arg("65816")
-            .arg(&asm_path)
-            .arg("-o")
-            .arg(&obj_path),
-    )?;
-    run_command(
-        Command::new("ld65")
-            .arg("-C")
-            .arg(cfg_path.as_ref())
-            .arg(&obj_path)
-            .arg("-o")
-            .arg(&xex_path),
-    )?;
+        let source = fs::read_to_string(source_path)
+            .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
+        let module = frontend::compile_source(&source).map_err(|error| error.to_string())?;
+        let (lowered, _assignment) =
+            lower_65816::lower_module_with_storage(&module).map_err(|error| error.to_string())?;
+        fs::write(&asm_path, ca65::emit_module(&lowered))
+            .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
+
+        run_command(
+            Command::new("ca65")
+                .arg("-g")
+                .arg("--cpu")
+                .arg("65816")
+                .arg(&asm_path)
+                .arg("-o")
+                .arg(&obj_path),
+        )?;
+        obj_paths.push(obj_path);
+    }
+
+    let mut ld65 = Command::new("ld65");
+    ld65.arg("-C").arg(cfg_path.as_ref());
+    for obj_path in &obj_paths {
+        ld65.arg(obj_path);
+    }
+    ld65.arg("-o").arg(&xex_path);
+    run_command(&mut ld65)?;
 
     let xex = fs::read(&xex_path)
         .map_err(|error| format!("failed to read {}: {error}", xex_path.display()))?;

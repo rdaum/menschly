@@ -1,22 +1,14 @@
 module HellordOs
 application main
 vector irq = serial_irq
-fixed($009f55) volatile var serial_ctrl: u8
-fixed($009f56) volatile var serial_status: u8
 fixed($009f57) volatile var serial_data: u8
-var rx_head: u16
-var rx_tail: u16
-var rx_next: u16
-var rx_buffer: [16]u8
-fixed($000280) volatile var rx_overflow: u8
-fixed($000281) volatile var rx_drop: u8
+
+external interrupt procedure serial_irq()
+external procedure serial_init()
+external function serial_has_data(): u8
+external function serial_read(): u8
 
 export procedure main()
-    rx_head = 0
-    rx_tail = 0
-    rx_next = 0
-    rx_overflow = 0
-
     serial_data = 'H'
     serial_data = 'e'
     serial_data = 'l'
@@ -27,24 +19,12 @@ export procedure main()
     serial_data = '!'
     serial_data = '\r'
     serial_data = '\n'
-    serial_ctrl = $40
+
+    serial_init()
 
     while 1 != 0
-        while rx_head == rx_tail
+        while serial_has_data() == 0
         end
-        serial_data = rx_buffer[rx_tail]
-        rx_tail = rx_tail + 1 & 15
+        serial_data = serial_read()
     end
-end
-
-interrupt procedure serial_irq()
-    rx_next = rx_head + 1 & 15
-    if rx_next == rx_tail
-        rx_drop = serial_data
-        rx_overflow = 1
-    else
-        rx_buffer[rx_head] = serial_data
-        rx_head = rx_next
-    end
-    return
 end

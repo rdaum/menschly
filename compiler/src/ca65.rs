@@ -4,6 +4,15 @@ pub fn emit_module(module: &AsmModule) -> String {
     let mut out = String::new();
     out.push_str(".p816\n");
 
+    for routine in &module.external_routines {
+        out.push_str(".import ");
+        out.push_str(routine);
+        out.push('\n');
+    }
+    if !module.external_routines.is_empty() {
+        out.push('\n');
+    }
+
     for symbol in &module.fixed_symbols {
         if symbol.export {
             out.push_str(".export ");
