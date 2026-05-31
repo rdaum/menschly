@@ -2,12 +2,17 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, EntryKind, GlobalPlacement, InterruptPreserve, IrInst, Label, Module,
-    Routine, RoutineKind, Type, Value, Width,
+    Abi, Address, Const, CopRegister, EntryKind, GlobalPlacement, InterruptPreserve, IrInst, Label,
+    Module, Routine, RoutineKind, Type, Value, Width,
 };
 use crate::optimize_65816::optimize_module;
 use crate::storage::{apply_storage, assign_storage, StorageAssignment};
 use crate::target_65816::{AsmInst, AsmModule, AsmRoutine, Immediate, Mode, Operand, Symbol};
+
+const COP_SIGNATURE_SYMBOL: &str = "__mensch_cop_signature";
+const COP_A_SYMBOL: &str = "__mensch_cop_a";
+const COP_X_SYMBOL: &str = "__mensch_cop_x";
+const COP_Y_SYMBOL: &str = "__mensch_cop_y";
 
 pub fn lower_module(module: &Module) -> Result<AsmModule, LowerError> {
     Ok(optimize_module(&lower_module_unoptimized(module)?))
@@ -47,6 +52,18 @@ fn lower_module_declarations(module: &Module, out: &mut AsmModule) {
                     export: global.export,
                 });
             }
+        }
+    }
+    if module.routines.iter().any(|routine| routine.interrupt_cop) {
+        out.static_symbols.push(crate::target_65816::StaticSymbol {
+            name: COP_SIGNATURE_SYMBOL.to_owned(),
+            size: 1,
+        });
+        for name in [COP_A_SYMBOL, COP_X_SYMBOL, COP_Y_SYMBOL] {
+            out.static_symbols.push(crate::target_65816::StaticSymbol {
+                name: name.to_owned(),
+                size: 2,
+            });
         }
     }
     out.static_data = module
@@ -178,6 +195,9 @@ fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
         out.insts.push(AsmInst::Plb);
         out.insts.push(AsmInst::Mode(Mode::Acc8Index16));
     }
+    if routine.interrupt_cop && !routine.interrupt_raw {
+        emit_cop_signature_capture(&mut out.insts, routine);
+    }
     emit_stack_frame_adjust(
         &mut out.insts,
         routine.stack_frame_bytes,
@@ -197,7 +217,7 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
         IrInst::InlineAsm(line) => out.push(AsmInst::Raw(line.clone())),
         IrInst::Move { width, dst, src } => {
             set_mode_for_width(out, *width);
-            load_value_to_a(out, src)?;
+            load_value_to_a_as_width(out, src, *width)?;
             if matches!(dst, Value::IndexX) {
                 out.push(AsmInst::Tax);
             } else {
@@ -368,6 +388,36 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                 out.push(AsmInst::Tcs);
             }
         }
+        IrInst::CopSignature { dst } => {
+            set_mode_for_width(out, Width::Byte);
+            out.push(AsmInst::Lda(Operand::Absolute(Symbol::Named(
+                COP_SIGNATURE_SYMBOL.to_owned(),
+            ))));
+            store_a_to_value(out, dst)?;
+        }
+        IrInst::CopRegister { register, dst } => {
+            set_mode_for_width(out, Width::Word);
+            out.push(AsmInst::Lda(Operand::Absolute(Symbol::Named(
+                cop_register_symbol(*register).to_owned(),
+            ))));
+            store_a_to_value(out, dst)?;
+        }
+        IrInst::CopCall {
+            family,
+            call,
+            x,
+            y,
+            dst,
+        } => {
+            set_mode_for_width(out, Width::Word);
+            load_value_to_a(out, y)?;
+            out.push(AsmInst::Tay);
+            load_value_to_a(out, x)?;
+            out.push(AsmInst::Tax);
+            load_value_to_a(out, call)?;
+            out.push(AsmInst::Raw(format!("cop ${family:02x}")));
+            store_a_to_value(out, dst)?;
+        }
         IrInst::Return => {
             emit_return_sequence(routine, out);
         }
@@ -421,6 +471,63 @@ fn emit_stack_frame_adjust(out: &mut Vec<AsmInst>, bytes: u16, op: StackFrameOp)
         }
     }
     out.push(AsmInst::Tcs);
+}
+
+fn emit_cop_signature_capture(out: &mut Vec<AsmInst>, routine: &Routine) {
+    let pcl_offset = interrupt_frame_pcl_offset(routine.interrupt_preserve);
+    let pbr_offset = pcl_offset + 2;
+    let load_label = format!("__{}_cop_signature_load", routine.name);
+
+    out.push(AsmInst::Mode(Mode::Acc16Index16));
+    out.push(AsmInst::Sta(Operand::Absolute(Symbol::Named(
+        COP_A_SYMBOL.to_owned(),
+    ))));
+    out.push(AsmInst::Stx(Operand::Absolute(Symbol::Named(
+        COP_X_SYMBOL.to_owned(),
+    ))));
+    out.push(AsmInst::Sty(Operand::Absolute(Symbol::Named(
+        COP_Y_SYMBOL.to_owned(),
+    ))));
+    out.push(AsmInst::Lda(
+        stack_operand(pcl_offset).expect("COP frame offset fits in one byte"),
+    ));
+    out.push(AsmInst::Raw("dec a".to_owned()));
+    out.push(AsmInst::Sta(Operand::Absolute(Symbol::Named(format!(
+        "{load_label}+1"
+    )))));
+    out.push(AsmInst::Mode(Mode::Acc8Index16));
+    out.push(AsmInst::Lda(
+        stack_operand(pbr_offset).expect("COP frame offset fits in one byte"),
+    ));
+    out.push(AsmInst::Sta(Operand::Absolute(Symbol::Named(format!(
+        "{load_label}+3"
+    )))));
+    out.push(AsmInst::Label(load_label));
+    out.push(AsmInst::Raw("lda f:$000000".to_owned()));
+    out.push(AsmInst::Sta(Operand::Absolute(Symbol::Named(
+        COP_SIGNATURE_SYMBOL.to_owned(),
+    ))));
+    out.push(AsmInst::Mode(Mode::Acc16Index16));
+}
+
+fn interrupt_frame_pcl_offset(preserve: InterruptPreserve) -> u16 {
+    2 + interrupt_preserve_bytes(preserve)
+}
+
+fn interrupt_preserve_bytes(preserve: InterruptPreserve) -> u16 {
+    u16::from(preserve.p)
+        + u16::from(preserve.dbr)
+        + if preserve.a { 2 } else { 0 }
+        + if preserve.x { 2 } else { 0 }
+        + if preserve.y { 2 } else { 0 }
+}
+
+fn cop_register_symbol(register: CopRegister) -> &'static str {
+    match register {
+        CopRegister::A => COP_A_SYMBOL,
+        CopRegister::X => COP_X_SYMBOL,
+        CopRegister::Y => COP_Y_SYMBOL,
+    }
 }
 
 fn return_inst(routine: &Routine) -> AsmInst {
@@ -642,6 +749,45 @@ fn load_value_to_a(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerErr
         }
         Value::Stack { offset, size } => {
             set_mode_for_width(out, width_for_size(*size)?);
+            out.push(AsmInst::Lda(stack_operand(*offset)?));
+            Ok(())
+        }
+        Value::Temp(name) | Value::Local(name) | Value::Param(name) => {
+            out.push(AsmInst::Lda(Operand::Absolute(Symbol::Named(name.clone()))));
+            Ok(())
+        }
+        Value::Global(name) => {
+            out.push(AsmInst::Lda(Operand::Absolute(Symbol::Named(name.clone()))));
+            Ok(())
+        }
+    }
+}
+
+fn load_value_to_a_as_width(
+    out: &mut Vec<AsmInst>,
+    value: &Value,
+    width: Width,
+) -> Result<(), LowerError> {
+    set_mode_for_width(out, width);
+    match value {
+        Value::Accumulator => Ok(()),
+        Value::IndexX => {
+            out.push(AsmInst::Txa);
+            Ok(())
+        }
+        Value::IndexY => {
+            out.push(AsmInst::Tya);
+            Ok(())
+        }
+        Value::Const(value) => {
+            out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
+            Ok(())
+        }
+        Value::Direct(name) => {
+            out.push(AsmInst::Lda(Operand::Direct(Symbol::Named(name.clone()))));
+            Ok(())
+        }
+        Value::Stack { offset, .. } => {
             out.push(AsmInst::Lda(stack_operand(*offset)?));
             Ok(())
         }

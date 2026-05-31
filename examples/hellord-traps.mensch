@@ -1,0 +1,32 @@
+module HellordTraps
+
+vector cop = cop_dispatch
+
+external reentrant function bios_trap_dispatch(call: u16, arg0: u16, arg1: u16): u16
+external reentrant function gemdos_trap_dispatch(call: u16, arg0: u16, arg1: u16): u16
+
+const COP_FAMILY_GEMDOS = $01
+const COP_FAMILY_BIOS = $0d
+
+interrupt(cop, preserve = x, y, p, dbr) function cop_dispatch(): u16
+    var family: u8
+    var call: u16
+    var arg0: u16
+    var arg1: u16
+    var status: u16
+
+    family = cop_signature()
+    call = cop_a()
+    arg0 = cop_x()
+    arg1 = cop_y()
+
+    if family == COP_FAMILY_BIOS
+        status = bios_trap_dispatch(call, arg0, arg1)
+    elsif family == COP_FAMILY_GEMDOS
+        status = gemdos_trap_dispatch(call, arg0, arg1)
+    else
+        status = $ffff
+    end
+
+    return status
+end

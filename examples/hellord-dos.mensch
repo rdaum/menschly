@@ -583,7 +583,7 @@ procedure erase_char()
 end
 
 procedure dispatch_line()
-    direct var code: u8
+    var code: u8
     code = command_code()
     if code == COMMAND_EMPTY
         return
@@ -1159,21 +1159,21 @@ procedure run_program_code_value(code: u8)
 end
 
 procedure run_program()
-    direct var code: u8
+    var code: u8
     code = run_program_code()
     run_program_code_value(code)
     return
 end
 
 procedure run_bare_program()
-    direct var code: u8
+    var code: u8
     code = bare_program_code()
     run_program_code_value(code)
     return
 end
 
 procedure type_file()
-    direct var code: u8
+    var code: u8
     code = type_file_code()
     if code == FILE_README
         files_type_readme()

@@ -116,11 +116,12 @@ X   word argument 0
 Y   word argument 1
 ```
 
-Call stubs must be `reentrant` routines. They receive ordinary Mensch stack
-parameters, load the syscall registers, execute `COP`, and return. The kernel
-side syscall handlers must also be interrupt handlers that avoid caller-specific
-direct-page parameter slots. This keeps the syscall path safe if it is entered
-while foreground code or an interrupt handler is using non-reentrant routines.
+Call stubs receive ordinary Mensch parameters, load the syscall registers,
+execute `COP`, and return. Most stubs are `reentrant`; small hot-path veneers
+may use direct-page parameters when the call site needs the compact non-stack
+ABI. The kernel side enters through one native COP-vector dispatcher. That
+dispatcher decodes the COP signature byte, saves the original `A`/`X`/`Y`
+register arguments, and routes family `$0d` to BIOS or family `$01` to GEMDOS.
 
 The first BIOS calls are TOS-shaped console calls:
 
@@ -178,21 +179,29 @@ The initial device tree has a single root/list node: device `2`, kind
 `$0001` for the x65-alike serial UART. Parent, first child, and next sibling
 are all `0` until more devices are registered.
 
-The current Hellord GEMDOS layer is a Mensch module over these BIOS calls. It
-owns the standard stream bindings instead of hardcoding a console device in
-callers: at boot it walks the BIOS device registry, chooses the first character
-device with both read and write flags, and binds stdin, stdout, and stderr to
-that device. Its console entry points then delegate to BIOS:
+The Hellord GEMDOS layer owns the standard stream bindings instead of hardcoding
+a console device in callers: at boot it walks the BIOS device registry, chooses
+the first character device with both read and write flags, and binds stdin,
+stdout, and stderr to that device. Its public console entry points are `COP
+#$01` stubs that dispatch to GEMDOS and then delegate to BIOS:
 
 ```text
-gemdos_cconis()        ; stdin status
-gemdos_cconin()        ; stdin input byte
-gemdos_cconos()        ; stdout output-ready status
-gemdos_cconout(ch)     ; stdout output byte
-gemdos_get_stddev(n)   ; stdin=0, stdout=1, stderr=2
-gemdos_set_stddev(n,d) ; update one standard stream binding
-```
+COP #$01
+A = $000b       ; Cconis, stdin status
 
-These are module calls today, not `COP #$01` entries yet. Adding real GEMDOS
-software interrupts needs a shared COP-family dispatcher so BIOS `COP #$0d` and
-GEMDOS `COP #$01` can coexist on the single native COP vector.
+COP #$01
+A = $0001       ; Cconin, returns stdin byte in low A
+
+COP #$01
+A = $0010       ; Cconos, stdout output-ready status
+
+COP #$01
+A = $0002       ; Cconout
+X = character   ; low byte is written to stdout
+
+COP #$01
+A = $0100       ; get stddev, X = stdin=0/stdout=1/stderr=2
+
+COP #$01
+A = $0101       ; set stddev, X = stream, Y = BIOS device id
+```

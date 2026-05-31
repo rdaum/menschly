@@ -2,7 +2,7 @@ module HellordGemdos
 
 external reentrant function bios_bconstat(dev: u16): u16
 external reentrant function bios_bconin(dev: u16): u8
-external reentrant procedure bios_bconout(dev: u16, ch: u8)
+external procedure bios_bconout(dev: u16, ch: u16)
 external reentrant function bios_bcostat(dev: u16): u16
 external reentrant function bios_device_first(): u16
 external reentrant function bios_device_next(dev: u16): u16
@@ -15,11 +15,50 @@ const DEVICE_FLAG_WRITE = $0002
 const GEMDOS_STDIN = $0000
 const GEMDOS_STDOUT = $0001
 const GEMDOS_STDERR = $0002
+const GEMDOS_FAMILY = $01
+const GEMDOS_CCONIN = $0001
+const GEMDOS_CCONOUT = $0002
+const GEMDOS_CCONIS = $000b
+const GEMDOS_CCONOS = $0010
+const GEMDOS_GET_STDDEV = $0100
+const GEMDOS_SET_STDDEV = $0101
 
 var gemdos_initialized: u8
 var gemdos_stdin_device: u16
 var gemdos_stdout_device: u16
 var gemdos_stderr_device: u16
+var gemdos_arg_byte: u8
+var gemdos_arg_word: u16
+
+export reentrant function gemdos_cconis(): u16
+    return cop_call(GEMDOS_FAMILY, GEMDOS_CCONIS, 0, 0)
+end
+
+export reentrant function gemdos_cconin(): u8
+    return u8(cop_call(GEMDOS_FAMILY, GEMDOS_CCONIN, 0, 0))
+end
+
+export reentrant function gemdos_cconos(): u16
+    return cop_call(GEMDOS_FAMILY, GEMDOS_CCONOS, 0, 0)
+end
+
+export reentrant procedure gemdos_cconout(ch: u8)
+    var status: u16
+    gemdos_arg_byte = ch
+    gemdos_arg_word = u16(gemdos_arg_byte)
+    status = cop_call(GEMDOS_FAMILY, GEMDOS_CCONOUT, gemdos_arg_word, 0)
+    return
+end
+
+export reentrant function gemdos_get_stddev(stream: u16): u16
+    return cop_call(GEMDOS_FAMILY, GEMDOS_GET_STDDEV, stream, 0)
+end
+
+export reentrant procedure gemdos_set_stddev(stream: u16, dev: u16)
+    var status: u16
+    status = cop_call(GEMDOS_FAMILY, GEMDOS_SET_STDDEV, stream, dev)
+    return
+end
 
 export reentrant procedure gemdos_init()
     var dev: u16
@@ -56,7 +95,7 @@ reentrant function gemdos_find_default_console(): u16
     return 0
 end
 
-export reentrant function gemdos_get_stddev(stream: u16): u16
+reentrant function gemdos_impl_get_stddev(stream: u16): u16
     gemdos_ensure_init()
     if stream == GEMDOS_STDIN
         return gemdos_stdin_device
@@ -69,7 +108,7 @@ export reentrant function gemdos_get_stddev(stream: u16): u16
     end
 end
 
-export reentrant procedure gemdos_set_stddev(stream: u16, dev: u16)
+reentrant procedure gemdos_impl_set_stddev(stream: u16, dev: u16)
     gemdos_ensure_init()
     if stream == GEMDOS_STDIN
         gemdos_stdin_device = dev
@@ -81,23 +120,45 @@ export reentrant procedure gemdos_set_stddev(stream: u16, dev: u16)
     return
 end
 
-export reentrant function gemdos_cconis(): u16
+reentrant function gemdos_impl_cconis(): u16
     gemdos_ensure_init()
     return bios_bconstat(gemdos_stdin_device)
 end
 
-export reentrant function gemdos_cconin(): u8
+reentrant function gemdos_impl_cconin(): u8
     gemdos_ensure_init()
     return bios_bconin(gemdos_stdin_device)
 end
 
-export reentrant function gemdos_cconos(): u16
+reentrant function gemdos_impl_cconos(): u16
     gemdos_ensure_init()
     return bios_bcostat(gemdos_stdout_device)
 end
 
-export reentrant procedure gemdos_cconout(ch: u8)
+reentrant procedure gemdos_impl_cconout(ch: u8)
     gemdos_ensure_init()
-    bios_bconout(gemdos_stdout_device, ch)
+    gemdos_arg_byte = ch
+    gemdos_arg_word = u16(gemdos_arg_byte)
+    bios_bconout(gemdos_stdout_device, gemdos_arg_word)
     return
+end
+
+export reentrant function gemdos_trap_dispatch(call: u16, arg0: u16, arg1: u16): u16
+    if call == GEMDOS_CCONIS
+        return gemdos_impl_cconis()
+    elsif call == GEMDOS_CCONIN
+        return u16(gemdos_impl_cconin())
+    elsif call == GEMDOS_CCONOS
+        return gemdos_impl_cconos()
+    elsif call == GEMDOS_CCONOUT
+        gemdos_impl_cconout(u8(arg0))
+        return 0
+    elsif call == GEMDOS_GET_STDDEV
+        return gemdos_impl_get_stddev(arg0)
+    elsif call == GEMDOS_SET_STDDEV
+        gemdos_impl_set_stddev(arg0, arg1)
+        return 0
+    else
+        return $ffff
+    end
 end

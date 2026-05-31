@@ -282,7 +282,7 @@ fn language_bios_bconout_runs_through_cop_syscall() {
         external procedure serial_init()
         external reentrant function bios_bconstat(dev: u16): u16
         external reentrant function bios_bconin(dev: u16): u8
-        external reentrant procedure bios_bconout(dev: u16, ch: u8)
+        external procedure bios_bconout(dev: u16, ch: u16)
         external reentrant function bios_bcostat(dev: u16): u16
         external reentrant function bios_device_first(): u16
         external reentrant function bios_device_next(dev: u16): u16
@@ -320,6 +320,8 @@ fn language_bios_bconout_runs_through_cop_syscall() {
         &[
             caller_path,
             repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/hellord-gemdos.mensch"),
+            repo_root.join("examples/hellord-traps.mensch"),
             repo_root.join("examples/serial-ring.mensch"),
         ],
         &cfg_path,
@@ -401,6 +403,7 @@ fn language_gemdos_console_discovers_bios_device() {
             caller_path,
             repo_root.join("examples/hellord-bios.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
+            repo_root.join("examples/hellord-traps.mensch"),
             repo_root.join("examples/serial-ring.mensch"),
         ],
         &cfg_path,
@@ -938,7 +941,7 @@ fn serial_write_buffers_until_tx_irq_drains_output() {
 
         external interrupt procedure serial_irq()
         external procedure serial_init()
-        external reentrant procedure serial_write(value: u8)
+        external procedure serial_write(value: u16)
 
         export procedure main()
             serial_init()
@@ -1025,6 +1028,7 @@ fn build_hellord_example() -> x65_runner::BuildOutput {
             repo_root.join("examples/serial-ring.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
+            repo_root.join("examples/hellord-traps.mensch"),
         ],
         repo_root.join("examples/hellord-os-x65.cfg"),
     )

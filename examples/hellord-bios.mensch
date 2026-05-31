@@ -1,8 +1,6 @@
 module HellordBios
 
-vector cop = bios_trap
-
-external reentrant procedure serial_write(value: u8)
+external procedure serial_write(value: u16)
 external function serial_has_data(): u8
 external function serial_read(): u8
 
@@ -47,148 +45,49 @@ var bios_arg_byte: u8
 var bios_status: u16
 
 export reentrant function bios_bconstat(dev: u16): u16
-    var status: u16
-    asm "rep #$30"
-    asm ".a16"
-    asm ".i16"
-    asm "lda $05,s"
-    asm "tax"
-    asm "lda #$0001"
-    asm "cop $0d"
-    asm "sta $01,s"
-    return status
+    return cop_call(BIOS_FAMILY, BIOS_BCONSTAT, dev, 0)
 end
 
 export reentrant function bios_bconin(dev: u16): u8
-    var status: u8
-    asm "rep #$30"
-    asm ".a16"
-    asm ".i16"
-    asm "lda $04,s"
-    asm "tax"
-    asm "lda #$0002"
-    asm "cop $0d"
-    asm "sep #$20"
-    asm ".a8"
-    asm "sta $01,s"
-    asm "rep #$20"
-    asm ".a16"
-    return status
+    return u8(cop_call(BIOS_FAMILY, BIOS_BCONIN, dev, 0))
 end
 
-export reentrant procedure bios_bconout(dev: u16, ch: u8)
-    asm "rep #$30"
-    asm ".a16"
-    asm ".i16"
-    asm "lda $03,s"
-    asm "tax"
-    asm "lda $05,s"
-    asm "tay"
-    asm "lda #$0003"
-    asm "cop $0d"
+export procedure bios_bconout(dev: u16, ch: u16)
+    var status: u16
+    status = cop_call(BIOS_FAMILY, BIOS_BCONOUT, dev, ch)
     return
 end
 
 export reentrant function bios_bcostat(dev: u16): u16
-    var status: u16
-    asm "rep #$30"
-    asm ".a16"
-    asm ".i16"
-    asm "lda $05,s"
-    asm "tax"
-    asm "lda #$0008"
-    asm "cop $0d"
-    asm "sta $01,s"
-    return status
+    return cop_call(BIOS_FAMILY, BIOS_BCOSTAT, dev, 0)
 end
 
 export reentrant function bios_device_first(): u16
-    var status: u16
-    asm "rep #$30"
-    asm ".a16"
-    asm ".i16"
-    asm "lda #$0100"
-    asm "cop $0d"
-    asm "sta $01,s"
-    return status
+    return cop_call(BIOS_FAMILY, BIOS_DEV_FIRST, 0, 0)
 end
 
 export reentrant function bios_device_next(dev: u16): u16
-    var status: u16
-    asm "rep #$30"
-    asm ".a16"
-    asm ".i16"
-    asm "lda $05,s"
-    asm "tax"
-    asm "lda #$0101"
-    asm "cop $0d"
-    asm "sta $01,s"
-    return status
+    return cop_call(BIOS_FAMILY, BIOS_DEV_NEXT, dev, 0)
 end
 
 export reentrant function bios_device_parent(dev: u16): u16
-    var status: u16
-    asm "rep #$30"
-    asm ".a16"
-    asm ".i16"
-    asm "lda $05,s"
-    asm "tax"
-    asm "lda #$0102"
-    asm "cop $0d"
-    asm "sta $01,s"
-    return status
+    return cop_call(BIOS_FAMILY, BIOS_DEV_PARENT, dev, 0)
 end
 
 export reentrant function bios_device_child(dev: u16): u16
-    var status: u16
-    asm "rep #$30"
-    asm ".a16"
-    asm ".i16"
-    asm "lda $05,s"
-    asm "tax"
-    asm "lda #$0103"
-    asm "cop $0d"
-    asm "sta $01,s"
-    return status
+    return cop_call(BIOS_FAMILY, BIOS_DEV_CHILD, dev, 0)
 end
 
 export reentrant function bios_device_kind(dev: u16): u16
-    var status: u16
-    asm "rep #$30"
-    asm ".a16"
-    asm ".i16"
-    asm "lda $05,s"
-    asm "tax"
-    asm "lda #$0104"
-    asm "cop $0d"
-    asm "sta $01,s"
-    return status
+    return cop_call(BIOS_FAMILY, BIOS_DEV_KIND, dev, 0)
 end
 
 export reentrant function bios_device_flags(dev: u16): u16
-    var status: u16
-    asm "rep #$30"
-    asm ".a16"
-    asm ".i16"
-    asm "lda $05,s"
-    asm "tax"
-    asm "lda #$0105"
-    asm "cop $0d"
-    asm "sta $01,s"
-    return status
+    return cop_call(BIOS_FAMILY, BIOS_DEV_FLAGS, dev, 0)
 end
 
 export reentrant function bios_device_driver(dev: u16): u16
-    var status: u16
-    asm "rep #$30"
-    asm ".a16"
-    asm ".i16"
-    asm "lda $05,s"
-    asm "tax"
-    asm "lda #$0106"
-    asm "cop $0d"
-    asm "sta $01,s"
-    return status
+    return cop_call(BIOS_FAMILY, BIOS_DEV_DRIVER, dev, 0)
 end
 
 export procedure bios_init_registry()
@@ -291,7 +190,7 @@ reentrant function bios_dispatch_bconout(): u16
             driver = serial_device.driver
             if driver == DEVICE_DRIVER_SERIAL
                 if serial_device.flags & DEVICE_FLAG_WRITE != 0
-                    serial_write(bios_arg_byte)
+                    serial_write(bios_arg)
                     return 0
                 else
                     return $ffff
@@ -377,47 +276,35 @@ reentrant function bios_dispatch_device_driver(): u16
     end
 end
 
-interrupt(preserve = p, dbr) procedure bios_trap()
-    asm "rep #$30"
-    asm ".a16"
-    asm ".i16"
-    asm "sta bios_call"
-    asm "stx bios_device"
-    asm "sty bios_arg"
-    asm "sep #$20"
-    asm ".a8"
-    asm "lda bios_arg"
-    asm "sta bios_arg_byte"
-    asm "rep #$20"
-    asm ".a16"
+export reentrant function bios_trap_dispatch(call: u16, dev: u16, arg: u16): u16
+    bios_call = call
+    bios_device = dev
+    bios_arg = arg
+    bios_arg_byte = u8(arg)
     if bios_call == BIOS_BCONSTAT
-        bios_status = bios_dispatch_bconstat()
+        return bios_dispatch_bconstat()
     elsif bios_call == BIOS_BCONIN
-        bios_status = bios_dispatch_bconin()
+        return bios_dispatch_bconin()
     elsif bios_call == BIOS_BCONOUT
-        bios_status = bios_dispatch_bconout()
+        return bios_dispatch_bconout()
     elsif bios_call == BIOS_BCOSTAT
-        bios_status = bios_dispatch_bcostat()
+        return bios_dispatch_bcostat()
     elsif bios_call == BIOS_DEV_FIRST
         bios_ensure_registry()
-        bios_status = bios_first_device
+        return bios_first_device
     elsif bios_call == BIOS_DEV_NEXT
-        bios_status = bios_dispatch_device_next()
+        return bios_dispatch_device_next()
     elsif bios_call == BIOS_DEV_PARENT
-        bios_status = bios_dispatch_device_parent()
+        return bios_dispatch_device_parent()
     elsif bios_call == BIOS_DEV_CHILD
-        bios_status = bios_dispatch_device_child()
+        return bios_dispatch_device_child()
     elsif bios_call == BIOS_DEV_KIND
-        bios_status = bios_dispatch_device_kind()
+        return bios_dispatch_device_kind()
     elsif bios_call == BIOS_DEV_FLAGS
-        bios_status = bios_dispatch_device_flags()
+        return bios_dispatch_device_flags()
     elsif bios_call == BIOS_DEV_DRIVER
-        bios_status = bios_dispatch_device_driver()
+        return bios_dispatch_device_driver()
     else
-        bios_status = $ffff
+        return $ffff
     end
-    asm "rep #$20"
-    asm ".a16"
-    asm "lda bios_status"
-    return
 end

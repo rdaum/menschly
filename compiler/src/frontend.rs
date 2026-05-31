@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, Entry, EntryKind, Field, Global, GlobalPlacement, Import,
+    Abi, Address, Const, CopRegister, Entry, EntryKind, Field, Global, GlobalPlacement, Import,
     InterruptPreserve, IrInst, Label, Library, Local, Metadata, Module, Param, PointerKind,
     Routine, RoutineKind, StaticData, Storage, Type, Value, Vector, Width,
 };
@@ -89,6 +89,7 @@ pub struct ExternalDecl {
     pub abi: Abi,
     pub interrupt_preserve: InterruptPreserve,
     pub interrupt_raw: bool,
+    pub interrupt_cop: bool,
     pub params: Vec<VarDecl>,
 }
 
@@ -99,6 +100,7 @@ pub struct RoutineDecl {
     pub abi: Abi,
     pub interrupt_preserve: InterruptPreserve,
     pub interrupt_raw: bool,
+    pub interrupt_cop: bool,
     pub export: bool,
     pub params: Vec<VarDecl>,
     pub locals: Vec<VarDecl>,
@@ -674,7 +676,7 @@ impl Parser {
     }
 
     fn parse_external_decl(&mut self) -> Result<ExternalDecl, FrontendError> {
-        let (_export, abi, interrupt_preserve, interrupt_raw, kind, name, params) =
+        let (_export, abi, interrupt_preserve, interrupt_raw, interrupt_cop, kind, name, params) =
             self.parse_routine_header()?;
         Ok(ExternalDecl {
             name,
@@ -682,6 +684,7 @@ impl Parser {
             abi,
             interrupt_preserve,
             interrupt_raw,
+            interrupt_cop,
             params,
         })
     }
@@ -730,7 +733,7 @@ impl Parser {
     }
 
     fn parse_routine(&mut self) -> Result<RoutineDecl, FrontendError> {
-        let (export, abi, interrupt_preserve, interrupt_raw, kind, name, params) =
+        let (export, abi, interrupt_preserve, interrupt_raw, interrupt_cop, kind, name, params) =
             self.parse_routine_header()?;
 
         let mut locals = Vec::new();
@@ -752,6 +755,7 @@ impl Parser {
             abi,
             interrupt_preserve,
             interrupt_raw,
+            interrupt_cop,
             export,
             params,
             locals,
@@ -767,6 +771,7 @@ impl Parser {
             Abi,
             InterruptPreserve,
             bool,
+            bool,
             RoutineDeclKind,
             String,
             Vec<VarDecl>,
@@ -777,6 +782,7 @@ impl Parser {
         let mut abi = Abi::Internal;
         let mut interrupt_preserve = InterruptPreserve::NONE;
         let mut interrupt_raw = false;
+        let mut interrupt_cop = false;
         if self.take_keyword("far") {
             abi = Abi::Far;
         } else if self.take_keyword("interrupt") {
@@ -784,6 +790,7 @@ impl Parser {
             let interrupt_attr = self.parse_interrupt_attr()?;
             interrupt_preserve = interrupt_attr.preserve;
             interrupt_raw = interrupt_attr.raw;
+            interrupt_cop = interrupt_attr.cop;
         } else if self.take_keyword("reentrant") {
             abi = Abi::Reentrant;
         }
@@ -813,6 +820,7 @@ impl Parser {
             abi,
             interrupt_preserve,
             interrupt_raw,
+            interrupt_cop,
             kind,
             name,
             params,
@@ -824,11 +832,25 @@ impl Parser {
             return Ok(InterruptAttr::default());
         }
 
+        let mut cop = false;
+        if self.take_keyword("cop") {
+            cop = true;
+            if self.take(TokenKind::RParen) {
+                return Ok(InterruptAttr {
+                    preserve: InterruptPreserve::DEFAULT,
+                    raw: false,
+                    cop,
+                });
+            }
+            self.expect(TokenKind::Comma)?;
+        }
+
         if self.take_keyword("raw") {
             self.expect(TokenKind::RParen)?;
             return Ok(InterruptAttr {
                 preserve: InterruptPreserve::NONE,
                 raw: true,
+                cop,
             });
         }
 
@@ -843,6 +865,7 @@ impl Parser {
                 return Ok(InterruptAttr {
                     preserve,
                     raw: false,
+                    cop,
                 });
             }
             "none" => {
@@ -850,6 +873,7 @@ impl Parser {
                 return Ok(InterruptAttr {
                     preserve,
                     raw: false,
+                    cop,
                 });
             }
             _ => apply_interrupt_preserve_name(&mut preserve, &first)?,
@@ -863,6 +887,7 @@ impl Parser {
         Ok(InterruptAttr {
             preserve,
             raw: false,
+            cop,
         })
     }
 
@@ -1375,10 +1400,28 @@ fn apply_interrupt_preserve_name(
     Ok(())
 }
 
+fn cop_register_builtin(name: &str) -> Option<CopRegister> {
+    match name {
+        "cop_a" => Some(CopRegister::A),
+        "cop_x" => Some(CopRegister::X),
+        "cop_y" => Some(CopRegister::Y),
+        _ => None,
+    }
+}
+
+fn integer_cast_builtin(name: &str) -> Option<Type> {
+    match name {
+        "u8" => Some(Type::U8),
+        "u16" => Some(Type::U16),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InterruptAttr {
     preserve: InterruptPreserve,
     raw: bool,
+    cop: bool,
 }
 
 impl Default for InterruptAttr {
@@ -1386,6 +1429,7 @@ impl Default for InterruptAttr {
         Self {
             preserve: InterruptPreserve::DEFAULT,
             raw: false,
+            cop: false,
         }
     }
 }
@@ -1596,6 +1640,7 @@ impl Lowerer {
             },
             interrupt_preserve: source.interrupt_preserve,
             interrupt_raw: source.interrupt_raw,
+            interrupt_cop: source.interrupt_cop,
             params: source
                 .params
                 .iter()
@@ -2033,6 +2078,26 @@ impl<'a> RoutineLowerer<'a> {
                 Ok(())
             }
             Expr::Call { name, args } => {
+                if let Some(target) = integer_cast_builtin(name) {
+                    self.lower_integer_cast(name, args, &target, expected, dst)?;
+                    return Ok(());
+                }
+                if name == "cop_signature" {
+                    self.check_cop_signature_call(args)?;
+                    ensure_assignable(expected, &Type::U8)?;
+                    self.body.push(IrInst::CopSignature { dst });
+                    return Ok(());
+                }
+                if let Some(register) = cop_register_builtin(name) {
+                    self.check_cop_register_call(name, args)?;
+                    ensure_assignable(expected, &Type::U16)?;
+                    self.body.push(IrInst::CopRegister { register, dst });
+                    return Ok(());
+                }
+                if name == "cop_call" {
+                    self.lower_cop_call(args, expected, dst)?;
+                    return Ok(());
+                }
                 let sig = self.check_call(name, args, false)?;
                 let result = sig.result_type(name)?;
                 ensure_assignable(expected, &result)?;
@@ -2290,6 +2355,22 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Number(_) => Ok(Type::U24),
             Expr::String(_) => Ok(string_literal_type()),
             Expr::Name(name) => Ok(self.binding(name)?.ty.clone()),
+            Expr::Call { name, args } if integer_cast_builtin(name).is_some() => {
+                self.check_integer_cast(name, args)?;
+                Ok(integer_cast_builtin(name).expect("checked above"))
+            }
+            Expr::Call { name, args } if name == "cop_signature" => {
+                self.check_cop_signature_call(args)?;
+                Ok(Type::U8)
+            }
+            Expr::Call { name, args } if cop_register_builtin(name).is_some() => {
+                self.check_cop_register_call(name, args)?;
+                Ok(Type::U16)
+            }
+            Expr::Call { name, args } if name == "cop_call" => {
+                self.check_cop_call(args)?;
+                Ok(Type::U16)
+            }
             Expr::Call { name, args } => self.check_call(name, args, false)?.result_type(name),
             Expr::ResultOk(value) => Ok(Type::Result {
                 ok: Box::new(self.infer_expr(value)?),
@@ -2393,6 +2474,129 @@ impl<'a> RoutineLowerer<'a> {
             ))),
             (RoutineDeclKind::Function { .. }, false) => Ok(sig),
         }
+    }
+
+    fn check_cop_signature_call(&self, args: &[Expr]) -> Result<(), FrontendError> {
+        if !args.is_empty() {
+            return Err(FrontendError::Type(format!(
+                "cop_signature expected 0 arguments, got {}",
+                args.len()
+            )));
+        }
+        if !matches!(self.routine.abi, Abi::Interrupt) || !self.routine.interrupt_cop {
+            return Err(FrontendError::Type(
+                "cop_signature can only be used in interrupt(cop) routines".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_cop_register_call(&self, name: &str, args: &[Expr]) -> Result<(), FrontendError> {
+        if !args.is_empty() {
+            return Err(FrontendError::Type(format!(
+                "{name} expected 0 arguments, got {}",
+                args.len()
+            )));
+        }
+        if !matches!(self.routine.abi, Abi::Interrupt) || !self.routine.interrupt_cop {
+            return Err(FrontendError::Type(format!(
+                "{name} can only be used in interrupt(cop) routines"
+            )));
+        }
+        Ok(())
+    }
+
+    fn check_integer_cast(&self, name: &str, args: &[Expr]) -> Result<(), FrontendError> {
+        if args.len() != 1 {
+            return Err(FrontendError::Type(format!(
+                "{name} expected 1 argument, got {}",
+                args.len()
+            )));
+        }
+        if integer_width(&self.infer_expr(&args[0])?).is_none() {
+            return Err(FrontendError::Type(format!(
+                "{name} cast needs an integer argument"
+            )));
+        }
+        Ok(())
+    }
+
+    fn lower_integer_cast(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        target: &Type,
+        expected: &Type,
+        dst: Value,
+    ) -> Result<(), FrontendError> {
+        self.check_integer_cast(name, args)?;
+        ensure_assignable(expected, target)?;
+        let source_ty = self.infer_expr(&args[0])?;
+        let value = self.expr_value(&args[0], &source_ty)?;
+        if matches!(target, Type::U16) && matches!(source_ty, Type::U8) {
+            self.body.push(IrInst::LoadConst {
+                dst: dst.clone(),
+                value: Const::U16(0),
+            });
+            self.body.push(IrInst::Move {
+                width: Width::Byte,
+                dst,
+                src: value,
+            });
+            return Ok(());
+        }
+        self.body.push(IrInst::Move {
+            width: width_for_type(target)?,
+            dst,
+            src: value,
+        });
+        Ok(())
+    }
+
+    fn check_cop_call(&self, args: &[Expr]) -> Result<(), FrontendError> {
+        if args.len() != 4 {
+            return Err(FrontendError::Type(format!(
+                "cop_call expected 4 arguments, got {}",
+                args.len()
+            )));
+        }
+        let family = self.const_expr_value(&args[0])?;
+        if family > u8::MAX as u32 {
+            return Err(FrontendError::Type(format!(
+                "COP family ${family:x} does not fit in one byte"
+            )));
+        }
+        for arg in &args[1..] {
+            let ty = self.infer_expr(arg)?;
+            if self.is_const_expr(arg)? {
+                const_for_type(self.const_expr_value(arg)?, &Type::U16)?;
+            } else {
+                ensure_assignable(&Type::U16, &ty)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn lower_cop_call(
+        &mut self,
+        args: &[Expr],
+        expected: &Type,
+        dst: Value,
+    ) -> Result<(), FrontendError> {
+        self.check_cop_call(args)?;
+        ensure_assignable(expected, &Type::U16)?;
+        let family = self.const_expr_value(&args[0])? as u8;
+        let call = self.expr_value(&args[1], &Type::U16)?;
+        let x = self.expr_value(&args[2], &Type::U16)?;
+        let y = self.expr_value(&args[3], &Type::U16)?;
+        self.body.push(IrInst::CopCall {
+            family,
+            call,
+            x,
+            y,
+            dst,
+        });
+        Ok(())
     }
 
     fn lower_call_args(
@@ -3081,6 +3285,48 @@ mod tests {
         assert!(!asm.contains("\tphb\n"));
         assert!(asm.contains("\tplx\n"));
         assert!(asm.contains("\tpla\n"));
+    }
+
+    #[test]
+    fn compiles_cop_interrupt_signature_builtin() {
+        let source = "
+            module Kernel
+            vector cop = cop_dispatch
+
+            var family: u8
+            var call: u16
+
+            interrupt(cop, preserve = p, dbr) procedure cop_dispatch()
+                family = cop_signature()
+                call = cop_a()
+                return
+            end
+        ";
+
+        let module = compile_source(source).unwrap();
+        assert!(module.routines[0].interrupt_cop);
+        assert!(module.routines[0]
+            .body
+            .iter()
+            .any(|inst| matches!(inst, IrInst::CopSignature { .. })));
+
+        let (lowered, _assignment) =
+            crate::lower_65816::lower_module_with_storage(&module).unwrap();
+        let asm = crate::ca65::emit_module(&lowered);
+
+        assert!(asm.contains("__mensch_cop_signature: .res 1\n"));
+        assert!(asm.contains("__mensch_cop_a: .res 2\n"));
+        assert!(asm.contains("__cop_dispatch_cop_signature_load:\n"));
+        assert!(asm.contains("\tsta __mensch_cop_a\n"));
+        assert!(asm.contains("\tstx __mensch_cop_x\n"));
+        assert!(asm.contains("\tsty __mensch_cop_y\n"));
+        assert!(asm.contains("\tlda $04,s\n"));
+        assert!(asm.contains("\tdec a\n"));
+        assert!(asm.contains("\tsta __cop_dispatch_cop_signature_load+1\n"));
+        assert!(asm.contains("\tlda $06,s\n"));
+        assert!(asm.contains("\tsta __cop_dispatch_cop_signature_load+3\n"));
+        assert!(asm.contains("\tlda f:$000000\n"));
+        assert!(asm.contains("\tsta __mensch_cop_signature\n"));
     }
 
     #[test]

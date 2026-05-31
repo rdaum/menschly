@@ -34,13 +34,13 @@ export procedure serial_init()
     return
 end
 
-export reentrant procedure serial_write(value: u8)
+export procedure serial_write(value: u16)
     tx_next = tx_head + 1 & RING_MASK
     if tx_next == tx_tail
-        tx_drop = value
+        tx_drop = u8(value)
         tx_overflow = 1
     else
-        tx_buffer[tx_head] = value
+        tx_buffer[tx_head] = u8(value)
         tx_head = tx_next
         serial_ctrl = RX_IRQ + TX_IRQ
     end
@@ -56,7 +56,7 @@ export function serial_has_data(): u8
 end
 
 export function serial_read(): u8
-    direct var value: u8
+    var value: u8
     value = rx_buffer[rx_tail]
     rx_tail = rx_tail + 1 & RING_MASK
     return value

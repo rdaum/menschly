@@ -484,6 +484,26 @@ fn rewrite_inst(inst: &IrInst, layout: &RoutineStorage) -> IrInst {
             name: name.clone(),
             dst: rewrite_value(dst, layout),
         },
+        IrInst::CopSignature { dst } => IrInst::CopSignature {
+            dst: rewrite_value(dst, layout),
+        },
+        IrInst::CopRegister { register, dst } => IrInst::CopRegister {
+            register: *register,
+            dst: rewrite_value(dst, layout),
+        },
+        IrInst::CopCall {
+            family,
+            call,
+            x,
+            y,
+            dst,
+        } => IrInst::CopCall {
+            family: *family,
+            call: rewrite_value(call, layout),
+            x: rewrite_value(x, layout),
+            y: rewrite_value(y, layout),
+            dst: rewrite_value(dst, layout),
+        },
         IrInst::ReturnValue(value) => IrInst::ReturnValue(rewrite_value(value, layout)),
         other => other.clone(),
     }
@@ -606,6 +626,16 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
         }
         IrInst::Push { width, value } => collect_temp_value(value, width.size_bytes(), &mut out),
         IrInst::CallFunction { dst, .. } => collect_temp_value(dst, 2, &mut out),
+        IrInst::CopSignature { dst } => collect_temp_value(dst, 1, &mut out),
+        IrInst::CopRegister { dst, .. } => collect_temp_value(dst, 2, &mut out),
+        IrInst::CopCall {
+            call, x, y, dst, ..
+        } => {
+            collect_temp_value(call, 2, &mut out);
+            collect_temp_value(x, 2, &mut out);
+            collect_temp_value(y, 2, &mut out);
+            collect_temp_value(dst, 2, &mut out);
+        }
         IrInst::Label(_)
         | IrInst::InlineAsm(_)
         | IrInst::Branch { .. }

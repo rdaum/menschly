@@ -133,6 +133,7 @@ pub struct Routine {
     pub abi: Abi,
     pub interrupt_preserve: InterruptPreserve,
     pub interrupt_raw: bool,
+    pub interrupt_cop: bool,
     pub params: Vec<Param>,
     pub locals: Vec<Local>,
     pub stack_frame_bytes: u16,
@@ -148,6 +149,7 @@ impl Routine {
             abi: Abi::Internal,
             interrupt_preserve: InterruptPreserve::default_for_abi(Abi::Internal),
             interrupt_raw: false,
+            interrupt_cop: false,
             params: Vec::new(),
             locals: Vec::new(),
             stack_frame_bytes: 0,
@@ -163,6 +165,7 @@ impl Routine {
             abi: Abi::Internal,
             interrupt_preserve: InterruptPreserve::default_for_abi(Abi::Internal),
             interrupt_raw: false,
+            interrupt_cop: false,
             params: Vec::new(),
             locals: Vec::new(),
             stack_frame_bytes: 0,
@@ -459,8 +462,29 @@ pub enum IrInst {
     CleanupStack {
         bytes: u16,
     },
+    CopSignature {
+        dst: Value,
+    },
+    CopRegister {
+        register: CopRegister,
+        dst: Value,
+    },
+    CopCall {
+        family: u8,
+        call: Value,
+        x: Value,
+        y: Value,
+        dst: Value,
+    },
     Return,
     ReturnValue(Value),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopRegister {
+    A,
+    X,
+    Y,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
