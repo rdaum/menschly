@@ -329,6 +329,60 @@ fn generated_frontend_program_runs() {
 }
 
 #[test]
+fn generated_frontend_global_pointer_deref_uses_direct_scratch() {
+    let binary = assemble_source_fixture(
+        "frontend-global-pointer-deref",
+        "
+        module GlobalPointerDerefDemo
+
+        var p: near ^u8
+        fixed($040006) volatile var out: u8
+
+        export far procedure main()
+            p = $4006
+            p^ = $7b
+            out = p^
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x040006), 0x7b);
+}
+
+#[test]
+fn generated_frontend_reentrant_stack_pointer_deref_uses_stack_indirect() {
+    let binary = assemble_source_fixture(
+        "frontend-reentrant-stack-pointer-deref",
+        "
+        module ReentrantStackPointerDerefDemo
+
+        fixed($040006) volatile var out: u8
+
+        export far procedure main()
+            write($4006)
+            return
+        end
+
+        reentrant procedure write(addr: u16)
+            var p: near ^u8
+
+            p = addr
+            p^ = $5a
+            out = p^
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x040006), 0x5a);
+}
+
+#[test]
 fn generated_frontend_fixed_volatile_io_program_runs() {
     let binary = assemble_source_fixture(
         "frontend-fixed-volatile",

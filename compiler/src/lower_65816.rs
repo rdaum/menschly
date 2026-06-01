@@ -729,25 +729,34 @@ fn symbol_with_offset(name: &str, offset: u16) -> Symbol {
     }
 }
 
-fn load_operand_for_address(
-    _out: &mut Vec<AsmInst>,
-    addr: &Address,
-) -> Result<Operand, LowerError> {
+fn load_operand_for_address(out: &mut Vec<AsmInst>, addr: &Address) -> Result<Operand, LowerError> {
     match addr {
         Address::NearPtr(Value::Direct(name)) => {
             Ok(Operand::IndirectDirect(Symbol::Named(name.clone())))
+        }
+        Address::NearPtr(Value::Stack { offset, .. }) => {
+            out.push(AsmInst::Ldy(Operand::Immediate(Immediate::Word(0))));
+            Ok(Operand::StackRelativeIndirectIndexedY(stack_offset_byte(
+                *offset,
+            )?))
         }
         other => operand_for_address(other),
     }
 }
 
 fn store_operand_for_address(
-    _out: &mut Vec<AsmInst>,
+    out: &mut Vec<AsmInst>,
     addr: &Address,
 ) -> Result<Operand, LowerError> {
     match addr {
         Address::NearPtr(Value::Direct(name)) => {
             Ok(Operand::IndirectDirect(Symbol::Named(name.clone())))
+        }
+        Address::NearPtr(Value::Stack { offset, .. }) => {
+            out.push(AsmInst::Ldy(Operand::Immediate(Immediate::Word(0))));
+            Ok(Operand::StackRelativeIndirectIndexedY(stack_offset_byte(
+                *offset,
+            )?))
         }
         other => operand_for_address(other),
     }
@@ -873,8 +882,12 @@ fn store_a_to_value(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerEr
 }
 
 fn stack_operand(offset: u16) -> Result<Operand, LowerError> {
+    Ok(Operand::StackRelative(stack_offset_byte(offset)?))
+}
+
+fn stack_offset_byte(offset: u16) -> Result<u8, LowerError> {
     let offset = u8::try_from(offset).map_err(|_| LowerError::UnsupportedStackOffset(offset))?;
-    Ok(Operand::StackRelative(offset))
+    Ok(offset)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

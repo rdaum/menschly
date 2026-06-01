@@ -2277,6 +2277,27 @@ impl<'a> RoutineLowerer<'a> {
                 kind,
             },
         )?;
+        let value = if matches!(
+            value,
+            Value::Direct(_)
+                | Value::Stack { .. }
+                | Value::Temp(_)
+                | Value::Local(_)
+                | Value::Param(_)
+        ) {
+            value
+        } else {
+            let temp = self.parent.temp();
+            self.body.push(IrInst::Move {
+                width: width_for_type(&Type::Pointer {
+                    to: to.clone(),
+                    kind,
+                })?,
+                dst: temp.clone(),
+                src: value,
+            });
+            temp
+        };
         let addr = match kind {
             PointerKind::Near | PointerKind::Direct | PointerKind::Code => Address::NearPtr(value),
             PointerKind::Far => Address::FarPtr(value),

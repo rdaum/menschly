@@ -289,6 +289,7 @@ fn emit_operand(operand: &Operand) -> String {
         Operand::DirectIndexedX(symbol) => format!("{},x", emit_symbol(symbol)),
         Operand::DirectIndexedY(symbol) => format!("{},y", emit_symbol(symbol)),
         Operand::StackRelative(offset) => format!("${offset:02x},s"),
+        Operand::StackRelativeIndirectIndexedY(offset) => format!("(${offset:02x},s),y"),
         Operand::IndirectDirect(symbol) => format!("({})", emit_symbol(symbol)),
         Operand::IndirectDirectIndexedY(symbol) => format!("({}),y", emit_symbol(symbol)),
         Operand::IndirectLongDirect(symbol) => format!("[{}]", emit_symbol(symbol)),

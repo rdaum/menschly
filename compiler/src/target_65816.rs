@@ -227,6 +227,7 @@ pub enum Operand {
     DirectIndexedX(Symbol),
     DirectIndexedY(Symbol),
     StackRelative(u8),
+    StackRelativeIndirectIndexedY(u8),
     IndirectDirect(Symbol),
     IndirectDirectIndexedY(Symbol),
     IndirectLongDirect(Symbol),

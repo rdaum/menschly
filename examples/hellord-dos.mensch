@@ -25,6 +25,10 @@ external procedure files_run_hello()
 external procedure files_run_demo()
 external function serial_rx_overflow(): u8
 external function serial_tx_overflow(): u8
+external reentrant function bios_block_status(dev: u16): u16
+external reentrant function bios_block_sector_count(dev: u16): u16
+external reentrant procedure bios_block_set_lba(dev: u16, lba: u16)
+external reentrant function bios_block_read(dev: u16, buffer: near ^u8): u16
 
 const COMMAND_UNKNOWN = 0
 const COMMAND_HELP = 1
@@ -48,6 +52,7 @@ const COMMAND_PEEK = 18
 const COMMAND_POKE = 19
 const COMMAND_DUMP = 20
 const COMMAND_FILL = 21
+const COMMAND_BLKINFO = 22
 const COMMAND_EMPTY = 255
 const FILE_UNKNOWN = 0
 const FILE_README = 1
@@ -67,6 +72,8 @@ const BACKSPACE = $08
 const RECALL = $10
 const DELETE = $7f
 const LOWERCASE_DELTA = 32
+const BIOS_BLOCK0 = $0008
+const BLOCK_SECTOR_BUFFER = $9200
 
 var current_drive: u8
 var current_dir: u8
@@ -80,6 +87,7 @@ var parse_ok: u8
 var current_path: [16]u8
 var command_buffer: [32]u8
 var history_buffer: [32]u8
+fixed($009200) var block_sector_buffer: [512]u8
 
 export procedure dos_boot()
     current_drive = 'A'
@@ -127,6 +135,8 @@ function command_code(): u8
         return COMMAND_DUMP
     elsif is_fill() != 0
         return COMMAND_FILL
+    elsif is_blkinfo() != 0
+        return COMMAND_BLKINFO
     elsif is_set() != 0
         return COMMAND_SET
     elsif is_run() != 0
@@ -453,6 +463,16 @@ function is_fill(): u8
     end
 end
 
+function is_blkinfo(): u8
+    if command_word_matches("BLK") != 0
+        return 1
+    elsif command_word_matches("BLKINFO") != 0
+        return 1
+    else
+        return 0
+    end
+end
+
 function is_set(): u8
     if command_word_matches("SET") != 0
         return 1
@@ -615,6 +635,8 @@ procedure dispatch_line()
         dump_memory()
     elsif code == COMMAND_FILL
         fill_memory()
+    elsif code == COMMAND_BLKINFO
+        write_block_info()
     elsif code == COMMAND_SET
         configure_set()
     elsif code == COMMAND_RUN
@@ -969,6 +991,37 @@ procedure write_memory_status()
     write_memory_range("BSS", $9000, $9eff)
     console_write_text("Line buffer $0020\r\n")
     console_write_text("Serial rings $0040\r\n")
+    return
+end
+
+procedure write_block_info()
+    var status: u16
+    var sectors: u16
+    var read_status: u16
+    var index: u16
+    status = bios_block_status(BIOS_BLOCK0)
+    sectors = bios_block_sector_count(BIOS_BLOCK0)
+    console_write_text("Block device 8:\r\nStatus $")
+    console_write_hex8(u8(status))
+    console_write_text("\r\nSectors $")
+    console_write_hex16(sectors)
+    console_newline()
+    bios_block_set_lba(BIOS_BLOCK0, 0)
+    read_status = bios_block_read(BIOS_BLOCK0, BLOCK_SECTOR_BUFFER)
+    if read_status == 0
+        console_write_text("Sector0:")
+        index = 0
+        while index != 16
+            console_write(' ')
+            console_write_hex8(block_sector_buffer[index])
+            index = index + 1
+        end
+        console_newline()
+    else
+        console_write_text("Read error $")
+        console_write_hex8(u8(read_status))
+        console_newline()
+    end
     return
 end
 

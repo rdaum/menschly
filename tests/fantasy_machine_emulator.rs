@@ -10,6 +10,7 @@ use x65alike_emul::{
 
 use x65_runner::{
     build_mensch_xex_sources, machine_with_loaded_image, run_image_until_output, temp_dir,
+    BlockDeviceConfig, RunConfig,
 };
 
 const ROUTINE_ADDR: usize = 0x020000;
@@ -339,7 +340,7 @@ fn language_bios_bconout_runs_through_cop_syscall() {
     assert_eq!(run.machine.byte(0x0002a8), b'?');
     assert_eq!(run.machine.byte(0x000296), 0x02);
     assert_eq!(run.machine.byte(0x000297), 0x00);
-    assert_eq!(run.machine.byte(0x000298), 0x00);
+    assert_eq!(run.machine.byte(0x000298), 0x08);
     assert_eq!(run.machine.byte(0x000299), 0x00);
     assert_eq!(run.machine.byte(0x00029a), 0x00);
     assert_eq!(run.machine.byte(0x00029b), 0x00);
@@ -667,7 +668,7 @@ fn raw_interrupt_skips_generated_entry_state() {
 #[test]
 fn hellord_example_boots_as_interrupt_driven_xex() {
     let build = build_hellord_example();
-    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> HELP\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nT  type\r\nR  run\r\nE  echo\r\nS  status\r\nP  pwd\r\nM  map\r\nMEM status\r\nC  cls\r\nPATH mode\r\nSET name value\r\nPROMPT mode\r\nCD path\r\nPEEK addr\r\nPOKE addr byte\r\nDUMP addr len\r\nFILL addr len byte\r\nA:-Z: drive\r\nCtrl-P recall\r\nA> VER\r\nHellord DOS 0.1\r\nA> DIR\r\nDirectory of A:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\nHELLO.PRG  $0025\r\nGAMES      <DIR>\r\n3 file(s)  1 dir(s)\r\nA> b:\r\nB> DIR\r\nDirectory of B:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\nHELLO.PRG  $0025\r\nGAMES      <DIR>\r\n3 file(s)  1 dir(s)\r\nB> PWD\r\nB:/\r\nB> CD GAMES\r\nB> PWD\r\nB:GAMES\r\nB> MAP\r\nMemory map:\r\nRAM $0000-$8FFF\r\nI/O $9F00-$9FFF\r\nROM $C000-$FFFF\r\nB> STAT\r\nR: 0\r\nT: 0\r\nB> ECHO heX\x08 \x08llo\r\nhello\r\nB> X\r\n?SYNTAX\r\nB> \r\nB> ";
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> HELP\r\nCommands:\r\nH  help\r\nV  version\r\nD  dir\r\nT  type\r\nR  run\r\nE  echo\r\nS  status\r\nP  pwd\r\nM  map\r\nMEM status\r\nBLKINFO disk\r\nC  cls\r\nPATH mode\r\nSET name value\r\nPROMPT mode\r\nCD path\r\nPEEK addr\r\nPOKE addr byte\r\nDUMP addr len\r\nFILL addr len byte\r\nA:-Z: drive\r\nCtrl-P recall\r\nA> VER\r\nHellord DOS 0.1\r\nA> DIR\r\nDirectory of A:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\nHELLO.PRG  $0025\r\nGAMES      <DIR>\r\n3 file(s)  1 dir(s)\r\nA> b:\r\nB> DIR\r\nDirectory of B:/\r\nREADME.TXT  $0031\r\nSYSTEM.TXT  $0041\r\nHELLO.PRG  $0025\r\nGAMES      <DIR>\r\n3 file(s)  1 dir(s)\r\nB> PWD\r\nB:/\r\nB> CD GAMES\r\nB> PWD\r\nB:GAMES\r\nB> MAP\r\nMemory map:\r\nRAM $0000-$8FFF\r\nI/O $9F00-$9FFF\r\nROM $C000-$FFFF\r\nB> STAT\r\nR: 0\r\nT: 0\r\nB> ECHO heX\x08 \x08llo\r\nhello\r\nB> X\r\n?SYNTAX\r\nB> \r\nB> ";
 
     let run = run_image_until_output(
         &build.image,
@@ -676,6 +677,34 @@ fn hellord_example_boots_as_interrupt_driven_xex() {
         1_000_000,
     )
     .expect("Hellord image should produce expected output");
+
+    assert_eq!(run.output, expected);
+    assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
+    assert_eq!(run.machine.byte(HELLORD_TX_OVERFLOW_ADDR), 0);
+}
+
+#[test]
+fn hellord_blkinfo_reads_attached_block_sector_through_bios() {
+    let build = build_hellord_example();
+    let mut disk = vec![0; 1024];
+    disk[0..15].copy_from_slice(b"MENSCH BLOCKDEV");
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> blkinfo\r\nBlock device 8:\r\nStatus $03\r\nSectors $0002\r\nSector0: 4D 45 4E 53 43 48 20 42 4C 4F 43 4B 44 45 56 00\r\nA> ";
+    let mut output = Vec::new();
+    let run = x65_runner::run_image(
+        &build.image,
+        RunConfig {
+            serial_input: b"blkinfo\n".to_vec(),
+            max_steps: 1_000_000,
+            stop_after_output_len: Some(expected.len()),
+            live_input: None,
+            block_device: Some(BlockDeviceConfig {
+                image: disk,
+                read_only: false,
+            }),
+        },
+        &mut output,
+    )
+    .expect("Hellord image should read sector zero through BIOS block calls");
 
     assert_eq!(run.output, expected);
     assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
@@ -1266,7 +1295,7 @@ fn xex_linker_config() -> &'static str {
 }
 
 fn cop_xex_linker_config() -> &'static str {
-    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $008000, size = $001000, file = %O;\n  META: start = $008f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  VECTORS: start = $00ffe4, size = $00000c, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTOR_COP: load = VECTORS, type = ro, optional = yes, offset = $0000;\n  VECTOR_BRK: load = VECTORS, type = ro, optional = yes, offset = $0002;\n  VECTOR_ABORT: load = VECTORS, type = ro, optional = yes, offset = $0004;\n  VECTOR_NMI: load = VECTORS, type = ro, optional = yes, offset = $0006;\n  VECTOR_IRQ: load = VECTORS, type = ro, optional = yes, offset = $000a;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
+    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $008000, size = $002000, file = %O;\n  META: start = $00a000, size = $000100, file = %O;\n  BSS: start = $00a100, size = $000f00, type = rw;\n  VECTORS: start = $00ffe4, size = $00000c, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTOR_COP: load = VECTORS, type = ro, optional = yes, offset = $0000;\n  VECTOR_BRK: load = VECTORS, type = ro, optional = yes, offset = $0002;\n  VECTOR_ABORT: load = VECTORS, type = ro, optional = yes, offset = $0004;\n  VECTOR_NMI: load = VECTORS, type = ro, optional = yes, offset = $0006;\n  VECTOR_IRQ: load = VECTORS, type = ro, optional = yes, offset = $000a;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
 }
 
 #[test]
