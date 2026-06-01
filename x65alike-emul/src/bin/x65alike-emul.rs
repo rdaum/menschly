@@ -45,6 +45,15 @@ fn run() -> Result<(), String> {
     };
 
     let mut machine = Machine::new();
+    if let Some(disk_path) = &config.disk_path {
+        let disk = fs::read(disk_path)
+            .map_err(|error| format!("failed to read disk image {disk_path}: {error}"))?;
+        if config.disk_read_only {
+            machine.attach_write_protected_block_device(disk)?;
+        } else {
+            machine.attach_block_device(disk)?;
+        }
+    }
     for range in &image.ranges {
         if range.cpu_visible {
             machine.load_cpu_visible(range.address, &range.bytes);
@@ -91,6 +100,15 @@ fn run() -> Result<(), String> {
     stdout
         .flush()
         .map_err(|error| format!("failed to flush stdout: {error}"))?;
+
+    if let Some(disk_path) = &config.disk_path {
+        if !config.disk_read_only {
+            if let Some(image) = bus.0.block_device_image() {
+                fs::write(disk_path, image)
+                    .map_err(|error| format!("failed to write disk image {disk_path}: {error}"))?;
+            }
+        }
+    }
 
     if !config.quiet {
         eprintln!(
@@ -208,6 +226,8 @@ struct Config {
     max_steps: usize,
     stop_at: Option<StopAt>,
     quiet: bool,
+    disk_path: Option<String>,
+    disk_read_only: bool,
 }
 
 impl Config {
@@ -223,6 +243,8 @@ impl Config {
         let mut max_steps = DEFAULT_STEPS;
         let mut stop_at = None;
         let mut quiet = false;
+        let mut disk_path = None;
+        let mut disk_read_only = false;
 
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
@@ -246,6 +268,10 @@ impl Config {
                     stop_at = Some(parse_stop_at(next_arg(&mut args, "--stop-at")?)?);
                 }
                 "--quiet" => quiet = true,
+                "--disk" => {
+                    disk_path = Some(next_arg(&mut args, "--disk")?);
+                }
+                "--disk-read-only" => disk_read_only = true,
                 option if option.starts_with('-') => {
                     return Err(format!("unknown option {option}\n\n{}", usage()));
                 }
@@ -273,6 +299,8 @@ impl Config {
             max_steps,
             stop_at,
             quiet,
+            disk_path,
+            disk_read_only,
         })
     }
 }
@@ -346,8 +374,11 @@ fn usage() -> String {
        --status P        Initial status register byte, default $00\n\
        --max-steps N     Maximum CPU steps, default 1000000; 0 runs indefinitely\n\
        --stop-at B:PC    Stop before executing when PBR:PC matches\n\
+       --disk PATH       Attach PATH as a 512-byte-sector block disk image\n\
+       --disk-read-only  Attach --disk without writing changes back on exit\n\
        --quiet           Suppress final CPU status on stderr\n\
      \n\
-     Stdin is queued as USB UART RX. Writes to USB_UART_DATA ($9f57) are streamed to stdout."
+     Stdin is queued as USB UART RX. Writes to USB_UART_DATA ($9f57) are streamed to stdout.\n\
+     The block disk interface is exposed at $9f60-$9f6d."
         .to_owned()
 }

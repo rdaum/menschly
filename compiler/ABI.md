@@ -179,6 +179,15 @@ The initial device tree has a single root/list node: device `2`, kind
 `$0001` for the x65-alike serial UART. Parent, first child, and next sibling
 are all `0` until more devices are registered.
 
+Block storage is intended to follow the same BIOS/GEMDOS layering as TOS-like
+systems: BIOS owns physical block devices and media status, while GEMDOS owns
+drive letters, paths, and filesystem interpretation. The emulator now provides
+a simple 512-byte-sector block backend at `$9F60..$9F6D`; the next BIOS surface
+should be an `Rwabs`-style transfer call that accepts a device or drive number,
+a sector number, a count, and a memory buffer. FAT12/FAT16/FAT32 code should sit
+above that block API rather than talking directly to emulator registers or to a
+future VERA/SPI transport.
+
 The Hellord GEMDOS layer owns the standard stream bindings instead of hardcoding
 a console device in callers: at boot it walks the BIOS device registry, chooses
 the first character device with both read and write flags, and binds stdin,

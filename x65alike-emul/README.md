@@ -28,10 +28,12 @@ small assembled programs under the existing `wdc65816` CPU core:
 - ROMBLOCK frame at `$C000..$FFFF`.
 - A scriptable subset of NORA's USB UART registers in the I/O window, including
   minimal UART IRQ line assertion.
+- A simple 512-byte-sector block disk device for OS and filesystem
+  experiments.
 
 The model deliberately skips most of the real X65 peripheral set for now. VERA,
-AURA, VIA, W6100, flash, timers, keyboard, video, and storage devices are not
-implemented yet. Interrupt support is currently limited to USB UART IRQ
+AURA, VIA, W6100, flash, timers, keyboard, video, and true SD-card/SPI devices
+are not implemented yet. Interrupt support is currently limited to USB UART IRQ
 assertion and runner-side maskable interrupt dispatch.
 
 ## Memory Map
@@ -48,6 +50,7 @@ The broad shape follows X65's documented NORA address decoding:
 | `$00_9F51` | NORA `ROMBLOCK` register |
 | `$00_9F52` | NORA `RAMBMASK` register |
 | `$00_9F53` | NORA `RMBCTRL` register |
+| `$00_9F60..$00_9F6D` | x65-alike block disk registers |
 | `$00_A000..$00_BFFF` | RAMBLOCK-selected 8 KiB SRAM frame |
 | `$00_C000..$00_FFFF` | ROMBLOCK-selected 16 KiB frame |
 
@@ -82,6 +85,36 @@ so tests can script input and inspect output without a terminal:
 The emulated TX path is never full, so bit 3 currently reads as 0 and bit 2
 reads as 1. `USB_UART_CTRL` bit 6 asserts the machine IRQ line while RX is not
 empty, and bit 7 asserts it while TX is not full.
+
+## Block Disk I/O
+
+The emulator includes a deliberately small hard-disk-like block device. It is
+not an SD-card protocol emulator and it does not provide file operations. It is
+a physical 512-byte sector backend intended to sit below BIOS `Rwabs`-style
+calls and, later, FAT12/FAT16/FAT32 code.
+
+| Address | Name | Behavior |
+| --- | --- | --- |
+| `$9F60` | `BLOCK_LBA0` | LBA byte 0 |
+| `$9F61` | `BLOCK_LBA1` | LBA byte 1 |
+| `$9F62` | `BLOCK_LBA2` | LBA byte 2 |
+| `$9F63` | `BLOCK_LBA3` | LBA byte 3 |
+| `$9F64` | `BLOCK_INDEX_LO` | Low byte of the 0..511 sector-buffer index |
+| `$9F65` | `BLOCK_INDEX_HI` | Bit 0 of the sector-buffer index |
+| `$9F66` | `BLOCK_DATA` | Read/write sector-buffer byte, then auto-increment index |
+| `$9F67` | `BLOCK_COMMAND` | Write `1` to read sector, `2` to write sector, `$7F` to clear error |
+| `$9F68` | `BLOCK_STATUS` | Bit 0 present, bit 1 ready, bit 2 error, bit 3 write-protected |
+| `$9F69` | `BLOCK_ERROR` | `0` none, `1` no media, `2` LBA out of range, `3` write-protected, `$FF` bad command |
+| `$9F6A..$9F6D` | `BLOCK_SECTOR_COUNT0..3` | Attached image size in 512-byte sectors |
+
+The command register operates on one sector at a time. A read command copies
+the selected LBA into the internal 512-byte buffer and resets the buffer index
+to zero. Software then reads `BLOCK_DATA` 512 times. For writes, software fills
+the buffer through `BLOCK_DATA`, sets the LBA, and writes command `2`.
+
+This shape is intentionally closer to a BIOS physical block device than to
+VERA's real SD-card SPI transport. A future VERA/SPI model can live underneath
+the same BIOS block API without changing filesystem code.
 
 ## Interrupts
 
@@ -141,6 +174,8 @@ x65alike-emul program.xex
 x65alike-emul --format xex program
 x65alike-emul --format raw --load $020000 --pc $0000 --pbr $02 --max-steps 100000 image.bin
 x65alike-emul --stop-at $03:$1234 image.bin
+x65alike-emul --disk fat32.img program.xex
+x65alike-emul --disk fat32.img --disk-read-only program.xex
 printf 'hello' | x65alike-emul --quiet image.bin
 ```
 
@@ -163,4 +198,5 @@ program banks. Use a raw image with an explicit `--load` address for simple
 implemented.
 
 The runner is deliberately minimal. It does not yet emulate reset-vector boot,
-NMI delivery, S-record/Intel HEX input, o65 host-side loading, or cycle timing.
+NMI delivery, S-record/Intel HEX input, o65 host-side loading, SD-card SPI, or
+cycle timing.

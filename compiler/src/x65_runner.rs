@@ -37,6 +37,13 @@ pub struct RunConfig {
     pub max_steps: usize,
     pub stop_after_output_len: Option<usize>,
     pub live_input: Option<Receiver<u8>>,
+    pub block_device: Option<BlockDeviceConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockDeviceConfig {
+    pub image: Vec<u8>,
+    pub read_only: bool,
 }
 
 impl RunConfig {
@@ -46,6 +53,7 @@ impl RunConfig {
             max_steps,
             stop_after_output_len: None,
             live_input: None,
+            block_device: None,
         }
     }
 }
@@ -164,6 +172,13 @@ pub fn run_image(
     output: &mut impl Write,
 ) -> Result<RunResult, String> {
     let mut machine = machine_with_loaded_image(image);
+    if let Some(block_device) = config.block_device {
+        if block_device.read_only {
+            machine.attach_write_protected_block_device(block_device.image)?;
+        } else {
+            machine.attach_block_device(block_device.image)?;
+        }
+    }
     machine.push_serial_input(&config.serial_input);
 
     let entry = image

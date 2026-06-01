@@ -42,10 +42,41 @@ pub const USB_UART_STAT_PARITY_ERROR: u8 = 0x20;
 pub const USB_UART_STAT_CTS_INACTIVE: u8 = 0x40;
 pub const USB_UART_STAT_RX_EMPTY: u8 = 0x80;
 
+pub const BLOCK_LBA0: u32 = 0x009f60;
+pub const BLOCK_LBA1: u32 = 0x009f61;
+pub const BLOCK_LBA2: u32 = 0x009f62;
+pub const BLOCK_LBA3: u32 = 0x009f63;
+pub const BLOCK_INDEX_LO: u32 = 0x009f64;
+pub const BLOCK_INDEX_HI: u32 = 0x009f65;
+pub const BLOCK_DATA: u32 = 0x009f66;
+pub const BLOCK_COMMAND: u32 = 0x009f67;
+pub const BLOCK_STATUS: u32 = 0x009f68;
+pub const BLOCK_ERROR: u32 = 0x009f69;
+pub const BLOCK_SECTOR_COUNT0: u32 = 0x009f6a;
+pub const BLOCK_SECTOR_COUNT1: u32 = 0x009f6b;
+pub const BLOCK_SECTOR_COUNT2: u32 = 0x009f6c;
+pub const BLOCK_SECTOR_COUNT3: u32 = 0x009f6d;
+
+pub const BLOCK_COMMAND_READ: u8 = 0x01;
+pub const BLOCK_COMMAND_WRITE: u8 = 0x02;
+pub const BLOCK_COMMAND_CLEAR_ERROR: u8 = 0x7f;
+
+pub const BLOCK_STATUS_PRESENT: u8 = 0x01;
+pub const BLOCK_STATUS_READY: u8 = 0x02;
+pub const BLOCK_STATUS_ERROR: u8 = 0x04;
+pub const BLOCK_STATUS_WRITE_PROTECT: u8 = 0x08;
+
+pub const BLOCK_ERROR_NONE: u8 = 0x00;
+pub const BLOCK_ERROR_NO_MEDIA: u8 = 0x01;
+pub const BLOCK_ERROR_OUT_OF_RANGE: u8 = 0x02;
+pub const BLOCK_ERROR_WRITE_PROTECT: u8 = 0x03;
+pub const BLOCK_ERROR_BAD_COMMAND: u8 = 0xff;
+
 const RAMBLOCK_SIZE: usize = 0x2000;
 const ROMBLOCK_SIZE: usize = 0x4000;
 const ROMBLOCK_BASE: usize = 0x080000;
 const PBL_SIZE: usize = 512;
+pub const BLOCK_SECTOR_SIZE: usize = 512;
 
 #[derive(Debug, Clone)]
 pub struct Machine {
@@ -59,6 +90,7 @@ pub struct Machine {
     serial_tx: Vec<u8>,
     usb_uart_ctrl: u8,
     usb_uart_errors: u8,
+    block_device: BlockDevice,
 }
 
 impl Machine {
@@ -74,6 +106,7 @@ impl Machine {
             serial_tx: Vec::new(),
             usb_uart_ctrl: 0x04,
             usb_uart_errors: 0,
+            block_device: BlockDevice::new(),
         }
     }
 
@@ -102,6 +135,7 @@ impl Machine {
             Mapping::UsbUartData => self.serial_rx.pop_front().unwrap_or(0),
             Mapping::UsbUartStatus => self.usb_uart_status(),
             Mapping::UsbUartControl => self.usb_uart_ctrl,
+            Mapping::BlockRegister(register) => self.block_device.read_register(register),
             Mapping::Io => 0,
             Mapping::Sram(index) => self.sram[index],
             Mapping::Pbl(index) => self.pbl[index],
@@ -122,6 +156,7 @@ impl Machine {
                 self.usb_uart_errors &=
                     !(value & (USB_UART_STAT_FRAME_ERROR | USB_UART_STAT_PARITY_ERROR));
             }
+            Mapping::BlockRegister(register) => self.block_device.write_register(register, value),
             Mapping::Io | Mapping::Pbl(_) | Mapping::Unmapped => {}
             Mapping::Sram(index) => self.sram[index] = value,
         }
@@ -137,6 +172,26 @@ impl Machine {
 
     pub fn serial_output(&self) -> &[u8] {
         &self.serial_tx
+    }
+
+    pub fn attach_block_device(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        self.block_device.attach(bytes)
+    }
+
+    pub fn attach_write_protected_block_device(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        self.block_device.attach_write_protected(bytes)
+    }
+
+    pub fn detach_block_device(&mut self) {
+        self.block_device.detach();
+    }
+
+    pub fn block_device_image(&self) -> Option<&[u8]> {
+        self.block_device.image()
+    }
+
+    pub fn take_block_device_image(&mut self) -> Option<Vec<u8>> {
+        self.block_device.take_image()
     }
 
     pub fn irq_pending(&self) -> bool {
@@ -203,6 +258,20 @@ impl Machine {
             USB_UART_DATA => Mapping::UsbUartData,
             USB_UART_STAT => Mapping::UsbUartStatus,
             USB_UART_CTRL => Mapping::UsbUartControl,
+            BLOCK_LBA0 => Mapping::BlockRegister(BlockRegister::Lba0),
+            BLOCK_LBA1 => Mapping::BlockRegister(BlockRegister::Lba1),
+            BLOCK_LBA2 => Mapping::BlockRegister(BlockRegister::Lba2),
+            BLOCK_LBA3 => Mapping::BlockRegister(BlockRegister::Lba3),
+            BLOCK_INDEX_LO => Mapping::BlockRegister(BlockRegister::IndexLo),
+            BLOCK_INDEX_HI => Mapping::BlockRegister(BlockRegister::IndexHi),
+            BLOCK_DATA => Mapping::BlockRegister(BlockRegister::Data),
+            BLOCK_COMMAND => Mapping::BlockRegister(BlockRegister::Command),
+            BLOCK_STATUS => Mapping::BlockRegister(BlockRegister::Status),
+            BLOCK_ERROR => Mapping::BlockRegister(BlockRegister::Error),
+            BLOCK_SECTOR_COUNT0 => Mapping::BlockRegister(BlockRegister::SectorCount0),
+            BLOCK_SECTOR_COUNT1 => Mapping::BlockRegister(BlockRegister::SectorCount1),
+            BLOCK_SECTOR_COUNT2 => Mapping::BlockRegister(BlockRegister::SectorCount2),
+            BLOCK_SECTOR_COUNT3 => Mapping::BlockRegister(BlockRegister::SectorCount3),
             IO_START..=IO_END => Mapping::Io,
             RAMBLOCK_FRAME_START..=RAMBLOCK_FRAME_END => Mapping::Sram(
                 ((((self.ramblock & self.rambmask) ^ 0x80) as usize) * RAMBLOCK_SIZE)
@@ -249,6 +318,235 @@ impl Default for Machine {
     }
 }
 
+#[derive(Debug, Clone)]
+struct BlockDevice {
+    image: Option<Vec<u8>>,
+    buffer: [u8; BLOCK_SECTOR_SIZE],
+    lba: u32,
+    index: u16,
+    error: u8,
+    write_protected: bool,
+}
+
+impl BlockDevice {
+    fn new() -> Self {
+        Self {
+            image: None,
+            buffer: [0; BLOCK_SECTOR_SIZE],
+            lba: 0,
+            index: 0,
+            error: BLOCK_ERROR_NONE,
+            write_protected: false,
+        }
+    }
+
+    fn attach(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        self.attach_with_write_protect(bytes, false)
+    }
+
+    fn attach_write_protected(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        self.attach_with_write_protect(bytes, true)
+    }
+
+    fn attach_with_write_protect(&mut self, bytes: Vec<u8>, write_protected: bool) -> Result<(), String> {
+        if bytes.len() % BLOCK_SECTOR_SIZE != 0 {
+            return Err(format!(
+                "block device image size {} is not a multiple of {} bytes",
+                bytes.len(),
+                BLOCK_SECTOR_SIZE
+            ));
+        }
+        self.image = Some(bytes);
+        self.buffer = [0; BLOCK_SECTOR_SIZE];
+        self.lba = 0;
+        self.index = 0;
+        self.error = BLOCK_ERROR_NONE;
+        self.write_protected = write_protected;
+        Ok(())
+    }
+
+    fn detach(&mut self) {
+        self.image = None;
+        self.buffer = [0; BLOCK_SECTOR_SIZE];
+        self.lba = 0;
+        self.index = 0;
+        self.error = BLOCK_ERROR_NO_MEDIA;
+        self.write_protected = false;
+    }
+
+    fn image(&self) -> Option<&[u8]> {
+        self.image.as_deref()
+    }
+
+    fn take_image(&mut self) -> Option<Vec<u8>> {
+        self.image.take()
+    }
+
+    fn read_register(&mut self, register: BlockRegister) -> u8 {
+        match register {
+            BlockRegister::Lba0 => self.lba.to_le_bytes()[0],
+            BlockRegister::Lba1 => self.lba.to_le_bytes()[1],
+            BlockRegister::Lba2 => self.lba.to_le_bytes()[2],
+            BlockRegister::Lba3 => self.lba.to_le_bytes()[3],
+            BlockRegister::IndexLo => self.index.to_le_bytes()[0],
+            BlockRegister::IndexHi => self.index.to_le_bytes()[1] & 0x01,
+            BlockRegister::Data => {
+                let value = self.buffer[usize::from(self.index & 0x01ff)];
+                self.index = (self.index + 1) & 0x01ff;
+                value
+            }
+            BlockRegister::Command => 0,
+            BlockRegister::Status => self.status(),
+            BlockRegister::Error => self.error,
+            BlockRegister::SectorCount0
+            | BlockRegister::SectorCount1
+            | BlockRegister::SectorCount2
+            | BlockRegister::SectorCount3 => {
+                let bytes = self.sector_count().to_le_bytes();
+                bytes[register.sector_count_byte_index().unwrap()]
+            }
+        }
+    }
+
+    fn write_register(&mut self, register: BlockRegister, value: u8) {
+        match register {
+            BlockRegister::Lba0 => self.set_lba_byte(0, value),
+            BlockRegister::Lba1 => self.set_lba_byte(1, value),
+            BlockRegister::Lba2 => self.set_lba_byte(2, value),
+            BlockRegister::Lba3 => self.set_lba_byte(3, value),
+            BlockRegister::IndexLo => {
+                self.index = (self.index & 0x0100) | u16::from(value);
+            }
+            BlockRegister::IndexHi => {
+                self.index = (self.index & 0x00ff) | (u16::from(value & 0x01) << 8);
+            }
+            BlockRegister::Data => {
+                self.buffer[usize::from(self.index & 0x01ff)] = value;
+                self.index = (self.index + 1) & 0x01ff;
+            }
+            BlockRegister::Command => self.run_command(value),
+            BlockRegister::Error => {
+                if value == 0 {
+                    self.error = BLOCK_ERROR_NONE;
+                }
+            }
+            BlockRegister::Status
+            | BlockRegister::SectorCount0
+            | BlockRegister::SectorCount1
+            | BlockRegister::SectorCount2
+            | BlockRegister::SectorCount3 => {}
+        }
+    }
+
+    fn status(&self) -> u8 {
+        let mut status = BLOCK_STATUS_READY;
+        if self.image.is_some() {
+            status |= BLOCK_STATUS_PRESENT;
+        }
+        if self.error != BLOCK_ERROR_NONE {
+            status |= BLOCK_STATUS_ERROR;
+        }
+        if self.write_protected {
+            status |= BLOCK_STATUS_WRITE_PROTECT;
+        }
+        status
+    }
+
+    fn sector_count(&self) -> u32 {
+        let Some(image) = &self.image else {
+            return 0;
+        };
+        u32::try_from(image.len() / BLOCK_SECTOR_SIZE).unwrap_or(u32::MAX)
+    }
+
+    fn set_lba_byte(&mut self, index: usize, value: u8) {
+        let mut bytes = self.lba.to_le_bytes();
+        bytes[index] = value;
+        self.lba = u32::from_le_bytes(bytes);
+    }
+
+    fn run_command(&mut self, command: u8) {
+        match command {
+            BLOCK_COMMAND_READ => self.read_sector(),
+            BLOCK_COMMAND_WRITE => self.write_sector(),
+            BLOCK_COMMAND_CLEAR_ERROR => self.error = BLOCK_ERROR_NONE,
+            _ => self.error = BLOCK_ERROR_BAD_COMMAND,
+        }
+    }
+
+    fn read_sector(&mut self) {
+        let Some(image) = &self.image else {
+            self.error = BLOCK_ERROR_NO_MEDIA;
+            return;
+        };
+        let Some(range) = sector_range(self.lba, image.len()) else {
+            self.error = BLOCK_ERROR_OUT_OF_RANGE;
+            return;
+        };
+        self.buffer.copy_from_slice(&image[range]);
+        self.index = 0;
+        self.error = BLOCK_ERROR_NONE;
+    }
+
+    fn write_sector(&mut self) {
+        if self.write_protected {
+            self.error = BLOCK_ERROR_WRITE_PROTECT;
+            return;
+        }
+        let Some(image) = &mut self.image else {
+            self.error = BLOCK_ERROR_NO_MEDIA;
+            return;
+        };
+        let Some(range) = sector_range(self.lba, image.len()) else {
+            self.error = BLOCK_ERROR_OUT_OF_RANGE;
+            return;
+        };
+        image[range].copy_from_slice(&self.buffer);
+        self.index = 0;
+        self.error = BLOCK_ERROR_NONE;
+    }
+}
+
+fn sector_range(lba: u32, image_len: usize) -> Option<std::ops::Range<usize>> {
+    let start = usize::try_from(lba).ok()?.checked_mul(BLOCK_SECTOR_SIZE)?;
+    let end = start.checked_add(BLOCK_SECTOR_SIZE)?;
+    if end <= image_len {
+        Some(start..end)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockRegister {
+    Lba0,
+    Lba1,
+    Lba2,
+    Lba3,
+    IndexLo,
+    IndexHi,
+    Data,
+    Command,
+    Status,
+    Error,
+    SectorCount0,
+    SectorCount1,
+    SectorCount2,
+    SectorCount3,
+}
+
+impl BlockRegister {
+    fn sector_count_byte_index(self) -> Option<usize> {
+        match self {
+            Self::SectorCount0 => Some(0),
+            Self::SectorCount1 => Some(1),
+            Self::SectorCount2 => Some(2),
+            Self::SectorCount3 => Some(3),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mapping {
     RamBlockReg,
@@ -258,6 +556,7 @@ enum Mapping {
     UsbUartData,
     UsbUartStatus,
     UsbUartControl,
+    BlockRegister(BlockRegister),
     Io,
     Sram(usize),
     Pbl(usize),
@@ -374,5 +673,100 @@ mod tests {
 
         machine.write(USB_UART_CTRL, USB_UART_CTRL_IRQ_TX_NOT_FULL);
         assert!(machine.irq_pending());
+    }
+
+    #[test]
+    fn block_device_reports_presence_and_capacity() {
+        let mut machine = Machine::new();
+
+        assert_eq!(machine.read(BLOCK_STATUS), BLOCK_STATUS_READY);
+        assert_eq!(machine.read(BLOCK_SECTOR_COUNT0), 0);
+
+        machine
+            .attach_block_device(vec![0; BLOCK_SECTOR_SIZE * 3])
+            .expect("block image should attach");
+
+        assert_eq!(
+            machine.read(BLOCK_STATUS),
+            BLOCK_STATUS_PRESENT | BLOCK_STATUS_READY
+        );
+        assert_eq!(machine.read(BLOCK_SECTOR_COUNT0), 3);
+        assert_eq!(machine.read(BLOCK_SECTOR_COUNT1), 0);
+        assert_eq!(machine.read(BLOCK_SECTOR_COUNT2), 0);
+        assert_eq!(machine.read(BLOCK_SECTOR_COUNT3), 0);
+    }
+
+    #[test]
+    fn block_device_reads_selected_sector_into_data_port() {
+        let mut image = vec![0; BLOCK_SECTOR_SIZE * 2];
+        image[BLOCK_SECTOR_SIZE] = 0x42;
+        image[BLOCK_SECTOR_SIZE + 1] = 0x55;
+        let mut machine = Machine::new();
+        machine
+            .attach_block_device(image)
+            .expect("block image should attach");
+
+        machine.write(BLOCK_LBA0, 1);
+        machine.write(BLOCK_COMMAND, BLOCK_COMMAND_READ);
+
+        assert_eq!(machine.read(BLOCK_ERROR), BLOCK_ERROR_NONE);
+        assert_eq!(machine.read(BLOCK_INDEX_LO), 0);
+        assert_eq!(machine.read(BLOCK_DATA), 0x42);
+        assert_eq!(machine.read(BLOCK_DATA), 0x55);
+        assert_eq!(machine.read(BLOCK_INDEX_LO), 2);
+    }
+
+    #[test]
+    fn block_device_writes_buffer_to_selected_sector() {
+        let mut machine = Machine::new();
+        machine
+            .attach_block_device(vec![0; BLOCK_SECTOR_SIZE * 2])
+            .expect("block image should attach");
+
+        machine.write(BLOCK_INDEX_LO, 0);
+        machine.write(BLOCK_INDEX_HI, 0);
+        machine.write(BLOCK_DATA, 0xaa);
+        machine.write(BLOCK_DATA, 0xbb);
+        machine.write(BLOCK_LBA0, 1);
+        machine.write(BLOCK_COMMAND, BLOCK_COMMAND_WRITE);
+
+        let image = machine
+            .block_device_image()
+            .expect("block image should remain attached");
+        assert_eq!(image[BLOCK_SECTOR_SIZE], 0xaa);
+        assert_eq!(image[BLOCK_SECTOR_SIZE + 1], 0xbb);
+        assert_eq!(machine.read(BLOCK_ERROR), BLOCK_ERROR_NONE);
+    }
+
+    #[test]
+    fn block_device_rejects_unaligned_images() {
+        let mut machine = Machine::new();
+
+        assert!(machine.attach_block_device(vec![0; 17]).is_err());
+        assert_eq!(machine.read(BLOCK_STATUS), BLOCK_STATUS_READY);
+    }
+
+    #[test]
+    fn block_device_reports_out_of_range_and_write_protect_errors() {
+        let mut machine = Machine::new();
+        machine
+            .attach_write_protected_block_device(vec![0; BLOCK_SECTOR_SIZE])
+            .expect("block image should attach");
+
+        machine.write(BLOCK_LBA0, 1);
+        machine.write(BLOCK_COMMAND, BLOCK_COMMAND_READ);
+        assert_eq!(machine.read(BLOCK_ERROR), BLOCK_ERROR_OUT_OF_RANGE);
+        assert_eq!(
+            machine.read(BLOCK_STATUS),
+            BLOCK_STATUS_PRESENT
+                | BLOCK_STATUS_READY
+                | BLOCK_STATUS_ERROR
+                | BLOCK_STATUS_WRITE_PROTECT
+        );
+
+        machine.write(BLOCK_COMMAND, BLOCK_COMMAND_CLEAR_ERROR);
+        machine.write(BLOCK_LBA0, 0);
+        machine.write(BLOCK_COMMAND, BLOCK_COMMAND_WRITE);
+        assert_eq!(machine.read(BLOCK_ERROR), BLOCK_ERROR_WRITE_PROTECT);
     }
 }
