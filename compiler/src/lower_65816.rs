@@ -221,24 +221,39 @@ fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
         StackFrameOp::Allocate,
     );
 
+    let mut outgoing_stack_bytes = 0;
     for inst in &routine.body {
-        lower_inst(routine, inst, &mut out.insts)?;
+        lower_inst(routine, inst, &mut out.insts, outgoing_stack_bytes)?;
+        match inst {
+            IrInst::Push { width, .. } => {
+                outgoing_stack_bytes += width_bytes(*width);
+            }
+            IrInst::CleanupStack { bytes } => {
+                outgoing_stack_bytes = outgoing_stack_bytes.saturating_sub(*bytes);
+            }
+            _ => {}
+        }
     }
 
     Ok(out)
 }
 
-fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Result<(), LowerError> {
+fn lower_inst(
+    routine: &Routine,
+    inst: &IrInst,
+    out: &mut Vec<AsmInst>,
+    outgoing_stack_bytes: u16,
+) -> Result<(), LowerError> {
     match inst {
         IrInst::Label(label) => out.push(AsmInst::Label(label.to_string())),
         IrInst::InlineAsm(line) => out.push(AsmInst::Raw(line.clone())),
         IrInst::Move { width, dst, src } => {
             set_mode_for_width(out, *width);
-            load_value_to_a_as_width(out, src, *width)?;
+            load_value_to_a_as_width(out, src, *width, outgoing_stack_bytes)?;
             if matches!(dst, Value::IndexX) {
                 out.push(AsmInst::Tax);
             } else {
-                store_a_to_value(out, dst)?;
+                store_a_to_value(out, dst, outgoing_stack_bytes)?;
             }
         }
         IrInst::LoadConst { dst, value } => {
@@ -253,7 +268,7 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                 }
                 Value::Stack { .. } => {
                     out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
-                    store_a_to_value(out, dst)?;
+                    store_a_to_value(out, dst, outgoing_stack_bytes)?;
                 }
                 Value::Temp(name) | Value::Local(name) | Value::Param(name) => {
                     out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
@@ -271,11 +286,11 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             out.push(AsmInst::Lda(Operand::ImmediateSymbol(Symbol::Named(
                 symbol.clone(),
             ))));
-            store_a_to_value(out, dst)?;
+            store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }
         IrInst::Load { width, dst, addr } => {
             set_mode_for_width(out, *width);
-            let operand = load_operand_for_address(out, addr)?;
+            let operand = load_operand_for_address(out, addr, outgoing_stack_bytes)?;
             match dst {
                 Value::Accumulator => out.push(AsmInst::Lda(operand)),
                 Value::IndexX => out.push(AsmInst::Ldx(operand)),
@@ -287,7 +302,7 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                 | Value::Param(_)
                 | Value::Global(_) => {
                     out.push(AsmInst::Lda(operand));
-                    store_a_to_value(out, dst)?;
+                    store_a_to_value(out, dst, outgoing_stack_bytes)?;
                 }
                 other => return Err(LowerError::UnsupportedValue(other.clone())),
             }
@@ -295,9 +310,9 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
         IrInst::Store { width, addr, src } => {
             set_mode_for_width(out, *width);
             if !matches!(src, Value::Accumulator) {
-                load_value_to_a(out, src)?;
+                load_value_to_a(out, src, outgoing_stack_bytes)?;
             }
-            let operand = store_operand_for_address(out, addr)?;
+            let operand = store_operand_for_address(out, addr, outgoing_stack_bytes)?;
             out.push(AsmInst::Sta(operand));
         }
         IrInst::Add {
@@ -307,10 +322,10 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             rhs,
         } => {
             set_mode_for_width(out, *width);
-            load_value_to_a(out, lhs)?;
+            load_value_to_a(out, lhs, outgoing_stack_bytes)?;
             out.push(AsmInst::Clc);
-            out.push(AsmInst::Adc(operand_for_value(rhs)?));
-            store_a_to_value(out, dst)?;
+            out.push(AsmInst::Adc(operand_for_value(rhs, outgoing_stack_bytes)?));
+            store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }
         IrInst::Sub {
             width,
@@ -319,10 +334,10 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             rhs,
         } => {
             set_mode_for_width(out, *width);
-            load_value_to_a(out, lhs)?;
+            load_value_to_a(out, lhs, outgoing_stack_bytes)?;
             out.push(AsmInst::Sec);
-            out.push(AsmInst::Sbc(operand_for_value(rhs)?));
-            store_a_to_value(out, dst)?;
+            out.push(AsmInst::Sbc(operand_for_value(rhs, outgoing_stack_bytes)?));
+            store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }
         IrInst::BitAnd {
             width,
@@ -331,18 +346,18 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             rhs,
         } => {
             set_mode_for_width(out, *width);
-            load_value_to_a(out, lhs)?;
-            out.push(AsmInst::And(operand_for_value(rhs)?));
-            store_a_to_value(out, dst)?;
+            load_value_to_a(out, lhs, outgoing_stack_bytes)?;
+            out.push(AsmInst::And(operand_for_value(rhs, outgoing_stack_bytes)?));
+            store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }
         IrInst::Dec { width, value } => {
             set_mode_for_width(out, *width);
             match value {
                 Value::Stack { .. } => {
-                    load_value_to_a(out, value)?;
+                    load_value_to_a(out, value, outgoing_stack_bytes)?;
                     out.push(AsmInst::Sec);
                     out.push(AsmInst::Sbc(Operand::Immediate(one_immediate(*width)?)));
-                    store_a_to_value(out, value)?;
+                    store_a_to_value(out, value, outgoing_stack_bytes)?;
                 }
                 Value::Direct(name) => {
                     out.push(AsmInst::Dec(Operand::Direct(Symbol::Named(name.clone()))))
@@ -361,10 +376,10 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             match value {
                 Value::IndexX => out.push(AsmInst::Inx),
                 Value::Stack { .. } => {
-                    load_value_to_a(out, value)?;
+                    load_value_to_a(out, value, outgoing_stack_bytes)?;
                     out.push(AsmInst::Clc);
                     out.push(AsmInst::Adc(Operand::Immediate(one_immediate(*width)?)));
-                    store_a_to_value(out, value)?;
+                    store_a_to_value(out, value, outgoing_stack_bytes)?;
                 }
                 Value::Direct(name) => {
                     out.push(AsmInst::Inc(Operand::Direct(Symbol::Named(name.clone()))))
@@ -381,17 +396,21 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
         IrInst::Compare { width, lhs, rhs } => {
             set_mode_for_width(out, *width);
             match lhs {
-                Value::Accumulator => out.push(AsmInst::Cmp(operand_for_value(rhs)?)),
-                Value::IndexX => out.push(AsmInst::Cpx(operand_for_value(rhs)?)),
+                Value::Accumulator => {
+                    out.push(AsmInst::Cmp(operand_for_value(rhs, outgoing_stack_bytes)?))
+                }
+                Value::IndexX => {
+                    out.push(AsmInst::Cpx(operand_for_value(rhs, outgoing_stack_bytes)?))
+                }
                 other => {
-                    load_value_to_a(out, other)?;
-                    out.push(AsmInst::Cmp(operand_for_value(rhs)?));
+                    load_value_to_a(out, other, outgoing_stack_bytes)?;
+                    out.push(AsmInst::Cmp(operand_for_value(rhs, outgoing_stack_bytes)?));
                 }
             }
         }
         IrInst::Branch { target } => out.push(AsmInst::Brl(target.to_string())),
         IrInst::BranchIfZero { value, target } => {
-            load_value_to_a(out, value)?;
+            load_value_to_a(out, value, outgoing_stack_bytes)?;
             out.push(long_branch_if_equal(target));
         }
         IrInst::BranchIfEqual { target } => out.push(long_branch_if_equal(target)),
@@ -400,13 +419,13 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
         IrInst::BranchIfCarryClear { target } => out.push(long_branch_if_carry_clear(target)),
         IrInst::Push { width, value } => {
             set_mode_for_width(out, *width);
-            load_value_to_a(out, value)?;
+            load_value_to_a(out, value, outgoing_stack_bytes)?;
             out.push(AsmInst::Pha);
         }
         IrInst::CallProcedure { name } => out.push(AsmInst::Jsr(name.clone())),
         IrInst::CallFunction { name, dst } => {
             out.push(AsmInst::Jsr(name.clone()));
-            store_a_to_value(out, dst)?;
+            store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }
         IrInst::CleanupStack { bytes } => {
             if *bytes != 0 {
@@ -422,14 +441,14 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             out.push(AsmInst::Lda(Operand::Absolute(Symbol::Named(
                 COP_SIGNATURE_SYMBOL.to_owned(),
             ))));
-            store_a_to_value(out, dst)?;
+            store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }
         IrInst::CopRegister { register, dst } => {
             set_mode_for_width(out, Width::Word);
             out.push(AsmInst::Lda(Operand::Absolute(Symbol::Named(
                 cop_register_symbol(*register).to_owned(),
             ))));
-            store_a_to_value(out, dst)?;
+            store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }
         IrInst::CopCall {
             family,
@@ -439,13 +458,13 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
             dst,
         } => {
             set_mode_for_width(out, Width::Word);
-            load_value_to_a(out, y)?;
+            load_value_to_a(out, y, outgoing_stack_bytes)?;
             out.push(AsmInst::Tay);
-            load_value_to_a(out, x)?;
+            load_value_to_a(out, x, outgoing_stack_bytes)?;
             out.push(AsmInst::Tax);
-            load_value_to_a(out, call)?;
+            load_value_to_a(out, call, outgoing_stack_bytes)?;
             out.push(AsmInst::Raw(format!("cop ${family:02x}")));
-            store_a_to_value(out, dst)?;
+            store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }
         IrInst::Return => {
             emit_return_sequence(routine, out);
@@ -455,7 +474,7 @@ fn lower_inst(routine: &Routine, inst: &IrInst, out: &mut Vec<AsmInst>) -> Resul
                 let width = width_for_type(result)?;
                 set_mode_for_width(out, width);
                 if !matches!(value, Value::Accumulator) {
-                    load_value_to_a(out, value)?;
+                    load_value_to_a(out, value, outgoing_stack_bytes)?;
                 }
                 if routine.stack_frame_bytes != 0 && matches!(width, Width::Byte | Width::Word) {
                     out.push(AsmInst::Tax);
@@ -668,6 +687,14 @@ fn width_for_size(size: u16) -> Result<Width, LowerError> {
     }
 }
 
+fn width_bytes(width: Width) -> u16 {
+    match width {
+        Width::Byte => 1,
+        Width::Word => 2,
+        Width::Long => 3,
+    }
+}
+
 fn immediate(value: Const) -> Immediate {
     match value {
         Const::U8(value) => Immediate::Byte(value),
@@ -684,12 +711,14 @@ fn one_immediate(width: Width) -> Result<Immediate, LowerError> {
     }
 }
 
-fn operand_for_address(addr: &Address) -> Result<Operand, LowerError> {
+fn operand_for_address(addr: &Address, outgoing_stack_bytes: u16) -> Result<Operand, LowerError> {
     match addr {
         Address::Symbol(name) => Ok(Operand::Absolute(Symbol::Named(name.clone()))),
         Address::SymbolIndexedX(name) => Ok(Operand::AbsoluteIndexedX(Symbol::Named(name.clone()))),
         Address::Direct(name) => Ok(Operand::Direct(Symbol::Named(name.clone()))),
-        Address::ValueOffset { base, offset } => operand_for_value_offset(base, *offset),
+        Address::ValueOffset { base, offset } => {
+            operand_for_value_offset(base, *offset, outgoing_stack_bytes)
+        }
         Address::Absolute(addr) => Ok(Operand::Absolute(Symbol::Address(*addr))),
         Address::AbsoluteIndexedX(addr) => Ok(Operand::AbsoluteIndexedX(Symbol::Address(*addr))),
         Address::NearPtr(value) => match value {
@@ -703,7 +732,11 @@ fn operand_for_address(addr: &Address) -> Result<Operand, LowerError> {
     }
 }
 
-fn operand_for_value_offset(value: &Value, offset: u16) -> Result<Operand, LowerError> {
+fn operand_for_value_offset(
+    value: &Value,
+    offset: u16,
+    outgoing_stack_bytes: u16,
+) -> Result<Operand, LowerError> {
     match value {
         Value::Direct(name) => Ok(Operand::Direct(symbol_with_offset(name, offset))),
         Value::Stack {
@@ -712,6 +745,7 @@ fn operand_for_value_offset(value: &Value, offset: u16) -> Result<Operand, Lower
         } => stack_operand(
             stack_offset
                 .checked_add(offset)
+                .and_then(|offset| offset.checked_add(outgoing_stack_bytes))
                 .ok_or(LowerError::UnsupportedStackOffset(*stack_offset))?,
         ),
         Value::Temp(name) | Value::Local(name) | Value::Param(name) | Value::Global(name) => {
@@ -729,24 +763,10 @@ fn symbol_with_offset(name: &str, offset: u16) -> Symbol {
     }
 }
 
-fn load_operand_for_address(out: &mut Vec<AsmInst>, addr: &Address) -> Result<Operand, LowerError> {
-    match addr {
-        Address::NearPtr(Value::Direct(name)) => {
-            Ok(Operand::IndirectDirect(Symbol::Named(name.clone())))
-        }
-        Address::NearPtr(Value::Stack { offset, .. }) => {
-            out.push(AsmInst::Ldy(Operand::Immediate(Immediate::Word(0))));
-            Ok(Operand::StackRelativeIndirectIndexedY(stack_offset_byte(
-                *offset,
-            )?))
-        }
-        other => operand_for_address(other),
-    }
-}
-
-fn store_operand_for_address(
+fn load_operand_for_address(
     out: &mut Vec<AsmInst>,
     addr: &Address,
+    outgoing_stack_bytes: u16,
 ) -> Result<Operand, LowerError> {
     match addr {
         Address::NearPtr(Value::Direct(name)) => {
@@ -755,18 +775,45 @@ fn store_operand_for_address(
         Address::NearPtr(Value::Stack { offset, .. }) => {
             out.push(AsmInst::Ldy(Operand::Immediate(Immediate::Word(0))));
             Ok(Operand::StackRelativeIndirectIndexedY(stack_offset_byte(
-                *offset,
+                offset
+                    .checked_add(outgoing_stack_bytes)
+                    .ok_or(LowerError::UnsupportedStackOffset(*offset))?,
             )?))
         }
-        other => operand_for_address(other),
+        other => operand_for_address(other, outgoing_stack_bytes),
     }
 }
 
-fn operand_for_value(value: &Value) -> Result<Operand, LowerError> {
+fn store_operand_for_address(
+    out: &mut Vec<AsmInst>,
+    addr: &Address,
+    outgoing_stack_bytes: u16,
+) -> Result<Operand, LowerError> {
+    match addr {
+        Address::NearPtr(Value::Direct(name)) => {
+            Ok(Operand::IndirectDirect(Symbol::Named(name.clone())))
+        }
+        Address::NearPtr(Value::Stack { offset, .. }) => {
+            out.push(AsmInst::Ldy(Operand::Immediate(Immediate::Word(0))));
+            Ok(Operand::StackRelativeIndirectIndexedY(stack_offset_byte(
+                offset
+                    .checked_add(outgoing_stack_bytes)
+                    .ok_or(LowerError::UnsupportedStackOffset(*offset))?,
+            )?))
+        }
+        other => operand_for_address(other, outgoing_stack_bytes),
+    }
+}
+
+fn operand_for_value(value: &Value, outgoing_stack_bytes: u16) -> Result<Operand, LowerError> {
     match value {
         Value::Const(value) => Ok(Operand::Immediate(immediate(*value))),
         Value::Direct(name) => Ok(Operand::Direct(Symbol::Named(name.clone()))),
-        Value::Stack { offset, .. } => stack_operand(*offset),
+        Value::Stack { offset, .. } => stack_operand(
+            offset
+                .checked_add(outgoing_stack_bytes)
+                .ok_or(LowerError::UnsupportedStackOffset(*offset))?,
+        ),
         Value::Temp(name) | Value::Local(name) | Value::Param(name) => {
             Ok(Operand::Absolute(Symbol::Named(name.clone())))
         }
@@ -775,7 +822,11 @@ fn operand_for_value(value: &Value) -> Result<Operand, LowerError> {
     }
 }
 
-fn load_value_to_a(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerError> {
+fn load_value_to_a(
+    out: &mut Vec<AsmInst>,
+    value: &Value,
+    outgoing_stack_bytes: u16,
+) -> Result<(), LowerError> {
     match value {
         Value::Accumulator => Ok(()),
         Value::IndexX => {
@@ -796,7 +847,11 @@ fn load_value_to_a(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerErr
         }
         Value::Stack { offset, size } => {
             set_mode_for_width(out, width_for_size(*size)?);
-            out.push(AsmInst::Lda(stack_operand(*offset)?));
+            out.push(AsmInst::Lda(stack_operand(
+                offset
+                    .checked_add(outgoing_stack_bytes)
+                    .ok_or(LowerError::UnsupportedStackOffset(*offset))?,
+            )?));
             Ok(())
         }
         Value::Temp(name) | Value::Local(name) | Value::Param(name) => {
@@ -814,6 +869,7 @@ fn load_value_to_a_as_width(
     out: &mut Vec<AsmInst>,
     value: &Value,
     width: Width,
+    outgoing_stack_bytes: u16,
 ) -> Result<(), LowerError> {
     set_mode_for_width(out, width);
     match value {
@@ -835,7 +891,11 @@ fn load_value_to_a_as_width(
             Ok(())
         }
         Value::Stack { offset, .. } => {
-            out.push(AsmInst::Lda(stack_operand(*offset)?));
+            out.push(AsmInst::Lda(stack_operand(
+                offset
+                    .checked_add(outgoing_stack_bytes)
+                    .ok_or(LowerError::UnsupportedStackOffset(*offset))?,
+            )?));
             Ok(())
         }
         Value::Temp(name) | Value::Local(name) | Value::Param(name) => {
@@ -849,7 +909,11 @@ fn load_value_to_a_as_width(
     }
 }
 
-fn store_a_to_value(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerError> {
+fn store_a_to_value(
+    out: &mut Vec<AsmInst>,
+    value: &Value,
+    outgoing_stack_bytes: u16,
+) -> Result<(), LowerError> {
     match value {
         Value::Accumulator => Ok(()),
         Value::IndexX => {
@@ -866,7 +930,11 @@ fn store_a_to_value(out: &mut Vec<AsmInst>, value: &Value) -> Result<(), LowerEr
         }
         Value::Stack { offset, size } => {
             set_mode_for_width(out, width_for_size(*size)?);
-            out.push(AsmInst::Sta(stack_operand(*offset)?));
+            out.push(AsmInst::Sta(stack_operand(
+                offset
+                    .checked_add(outgoing_stack_bytes)
+                    .ok_or(LowerError::UnsupportedStackOffset(*offset))?,
+            )?));
             Ok(())
         }
         Value::Temp(name) | Value::Local(name) | Value::Param(name) => {

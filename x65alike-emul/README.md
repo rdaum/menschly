@@ -90,8 +90,8 @@ empty, and bit 7 asserts it while TX is not full.
 
 The emulator includes a deliberately small hard-disk-like block device. It is
 not an SD-card protocol emulator and it does not provide file operations. It is
-a physical 512-byte sector backend intended to sit below BIOS `Rwabs`-style
-calls and, later, FAT12/FAT16/FAT32 code.
+a physical 512-byte sector backend intended to sit below BIOS block-device calls
+and, later, FAT12/FAT16/FAT32 code.
 
 | Address | Name | Behavior |
 | --- | --- | --- |

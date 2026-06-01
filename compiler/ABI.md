@@ -231,15 +231,88 @@ Y = near pointer to a 512-byte destination buffer
 `Bread` reads one 512-byte sector from the selected LBA into the destination
 buffer and returns `0` on success or a block-device error code in `A`.
 
-Block storage is still intended to follow the same BIOS/GEMDOS layering as
-TOS-like systems: BIOS owns physical block devices and media status, while
-GEMDOS owns drive letters, paths, and filesystem interpretation. Hellord's
-`BLKINFO` command currently calls the BIOS block surface directly as a bring-up
-test. The next DOS-facing surface should be an `Rwabs`-style transfer call that
-maps a drive or logical block device to BIOS device `8`, accepts a sector
-number, a count, and a memory buffer, and keeps FAT12/FAT16/FAT32 code above
-that raw block API rather than talking directly to emulator registers or to a
-future VERA/SPI transport.
+```text
+COP #$0d
+A = $0204       ; Bwrite
+X = device
+Y = near pointer to a 512-byte source buffer
+```
+
+`Bwrite` writes one 512-byte sector from the source buffer to the selected LBA
+and returns `0` on success or a block-device error code in `A`.
+
+Block storage follows the same BIOS/DOS layering as TOS-like systems: BIOS owns
+physical block devices and media status, while the DOS layer owns drive letters,
+paths, and filesystem interpretation. Hellord now initializes a small internal
+drive table with backend kind, filesystem driver, BIOS device id, and partition
+offset fields. `A:` maps to BIOS block device `8` at partition offset `0`, while
+the other drives remain ROMFS-only.
+
+The x65-alike boot image should not treat the initial bank-0 ROM window as the
+whole operating-system budget. That window is the boot/vector home: it should
+perform initial setup, install interrupt and trap entry points, select the
+needed ROM/RAM page, and then transfer into banked or paged OS code. The
+compiler supports a temporary module-level placement hook for this bring-up:
+`metadata code_segment = "BANK1"` emits that module's static data and routines
+into the named ca65 segment. The remaining work is to pair that with an
+x65-alike image format/link flow that can load those banked segments and with
+explicit long-call or page-switching conventions for crossing between the boot
+home and banked OS pages.
+
+There is intentionally no GEMDOS raw-sector syscall in this ABI. TOS had
+`Rwabs` in XBIOS, not GEMDOS, and Hellord does not need a public equivalent yet.
+The internal `dos_drive_read_blocks` and `dos_drive_write_blocks` helpers accept
+a logical drive, sector number, sector count, and memory buffer, apply the
+drive's partition offset, and delegate to `dos_volume_read_blocks` or
+`dos_volume_write_blocks`. The volume helpers map the request through the drive
+table to the BIOS block device and loop over counted 512-byte sector transfers.
+A one-sector DOS block cache records the last drive/LBA read or written; reads
+copy cache hits into the caller's buffer, and successful writes refresh the
+cached sector.
+
+Filesystem implementations sit above those internal raw block helpers. Future
+FAT12/FAT16/FAT32 code should call the DOS drive/volume helpers through its
+filesystem driver, not talk directly to emulator registers, a future VERA/SPI
+transport, or a GEMDOS-style public block call. GEMDOS file calls such as
+`Fsfirst`, `Fopen`, `Fread`, and `Fwrite` should route into DOS filesystem
+dispatch, and the filesystem driver should perform any raw block access it
+needs underneath that boundary.
+
+The current FAT boundary is only a scaffold: `dos_mount_fat_drive` selects the
+FAT driver for a logical drive that is already backed by a BIOS block device,
+and `fat_read_sector`/`fat_write_sector` move one sector through the DOS drive
+helpers. These are filesystem-driver helpers, not public GEMDOS calls. FAT
+directory search currently parses enough of a simple one-FAT FAT12/FAT16-style
+boot sector to locate the fixed root directory and enumerate simple 8.3 entries
+from the first root-directory sector through `Fsfirst`/`Fsnext`.
+`Fopen`/`Fread` can open one matching 8.3 file from that root sector and read
+bytes from the first data cluster. The read path keeps a small sequential FAT16
+cursor and can advance
+across the next two cluster boundaries with FAT-table lookups, which proves
+non-contiguous media reads without yet being a general unbounded chain walker.
+`Fwrite` on a FAT handle currently writes the caller's buffer as a whole sector
+to the file's first data cluster and returns the requested byte count on a
+successful sector write. That proves the GEMDOS-to-FAT-to-BIOS write path, but
+it is not yet a byte-granular FAT update path. Arbitrary-length cluster
+traversal, subdirectories, long names, allocation, file-size updates, and FAT32
+root-cluster handling are still missing. A real FAT implementation should
+continue growing downward from GEMDOS file/path calls into FAT directory,
+allocation, and cluster logic, using the sector helpers as its raw media access
+layer.
+
+The command-facing file operations now cross a small filesystem-driver dispatch
+boundary before reaching the current ROM file table. `DIR`, `TYPE`, and `RUN`
+ask the DOS layer for the current drive's filesystem driver, then route to the
+ROMFS implementation when the driver is `$0001`. This keeps the existing ROMFS
+behavior intact while giving FAT and future filesystems a place to implement
+directory enumeration, file reads, and program loading without changing command
+parsing.
+
+Open DOS file handles also record the filesystem driver that created them.
+`Fread` dispatches through the handle's saved driver instead of the current
+drive, so a file opened from ROMFS remains a ROMFS handle even if the current
+drive is later remounted as FAT. That is still a tiny handle table, but it is
+the boundary needed before FAT can add its own file identifiers and read logic.
 
 The Hellord GEMDOS layer owns the standard stream bindings instead of hardcoding
 a console device in callers: at boot it walks the BIOS device registry, chooses
@@ -260,7 +333,105 @@ A = $0010       ; Cconos, stdout output-ready status
 COP #$01
 A = $0002       ; Cconout
 X = character   ; low byte is written to stdout
+```
 
+The first drive-management GEMDOS calls use the TOS call numbers and route into
+the DOS drive table. These calls initialize the DOS drive table if it has not
+already been initialized by `dos_boot`.
+
+```text
+COP #$01
+A = $0019       ; Dgetdrv, returns current drive index: A=0, B=1, ...
+
+COP #$01
+A = $000e       ; Dsetdrv
+X = drive index ; A=0, B=1, ...
+```
+
+`Dsetdrv` updates the DOS current-drive field and currently returns `$ffff` for
+valid drive indexes in the supported `A:` through `Z:` range, or `0` for an
+invalid drive index. This is a 16-bit placeholder for TOS's wider drive bitmap.
+
+The first path-management call also uses the TOS call number and delegates to
+DOS path state:
+
+```text
+COP #$01
+A = $003b       ; Dsetpath
+X = near pointer to a NUL-terminated path string
+```
+
+`Dsetpath` currently recognizes `/`, `.`, `..`, `GAMES`, and `/GAMES`,
+case-insensitively. It returns `0` on success and `$ffff` for an unknown path.
+This is deliberately a GEMDOS path operation over DOS state, not a raw block
+operation; later filesystem-backed directories should extend the DOS
+filesystem-driver dispatch underneath this call.
+
+Directory search now has the first GEMDOS-shaped entry points:
+
+```text
+COP #$01
+A = $004e       ; Fsfirst
+X = near pointer to a NUL-terminated pattern string
+Y = near pointer to a search result buffer
+
+COP #$01
+A = $004f       ; Fsnext
+X = near pointer to a search result buffer
+```
+
+The current `Fsfirst` implementation ignores the pattern and starts a search in
+the current DOS directory. `Fsnext` advances that search. Both calls route
+through DOS filesystem-driver dispatch; ROMFS and the FAT root-directory
+scaffold are the implemented drivers today. They return `0` when an entry is
+written and `$fffe` when there are no more entries.
+
+The temporary search result buffer is not a TOS-compatible DTA yet. Hellord
+currently writes:
+
+```text
+byte 0          GEMDOS-style attribute bits; `$10` marks a directory
+byte 1..2       little-endian file size
+byte 3..        NUL-terminated filename
+```
+
+The first GEMDOS file-handle calls are also present:
+
+```text
+COP #$01
+A = $003d       ; Fopen
+X = near pointer to a NUL-terminated path string
+Y = open mode
+
+COP #$01
+A = $003f       ; Fread
+X = file handle
+Y = near pointer to destination buffer
+
+COP #$01
+A = $0040       ; Fwrite
+X = file handle
+Y = near pointer to source buffer
+
+COP #$01
+A = $003e       ; Fclose
+X = file handle
+```
+
+`Fopen` currently opens ROMFS text files from the current DOS directory or a
+simple 8.3 FAT root entry and returns handles starting at `6`. `Fread` advances
+the handle offset and returns the number of bytes copied. `Fclose` releases the
+handle. `Fwrite` returns `$fffb` for ROMFS because it is read-only, while FAT
+handles route to the current sector-write scaffold described above. `Fread` and
+`Fwrite` carry their byte count through the current GEMDOS stub scratch word,
+since the minimal `COP` convention only has `A`, `X`, and `Y`; this is a
+temporary ABI detail to revisit when the syscall frame grows beyond two word
+arguments.
+
+Hellord also has two private GEMDOS calls for testing and bootstrapping the
+standard stream bindings:
+
+```text
 COP #$01
 A = $0100       ; get stddev, X = stdin=0/stdout=1/stderr=2
 

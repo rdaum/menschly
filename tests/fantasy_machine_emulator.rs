@@ -259,6 +259,7 @@ fn language_bios_bconout_runs_through_cop_syscall() {
     let dir = temp_dir("language-bios-bconout-cop");
     fs::create_dir_all(&dir).expect("temp dir should be created");
     let caller_path = dir.join("caller.mensch");
+    let traps_path = dir.join("bios_traps.mensch");
     let cfg_path = dir.join("image.cfg");
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
@@ -314,6 +315,7 @@ fn language_bios_bconout_runs_through_cop_syscall() {
         ",
     )
     .expect("caller source should be written");
+    fs::write(&traps_path, bios_only_traps_source()).expect("BIOS trap source should be written");
     fs::write(&cfg_path, cop_xex_linker_config()).expect("linker config should be written");
 
     let build = build_mensch_xex_sources(
@@ -321,8 +323,7 @@ fn language_bios_bconout_runs_through_cop_syscall() {
         &[
             caller_path,
             repo_root.join("examples/hellord-bios.mensch"),
-            repo_root.join("examples/hellord-gemdos.mensch"),
-            repo_root.join("examples/hellord-traps.mensch"),
+            traps_path,
             repo_root.join("examples/serial-ring.mensch"),
         ],
         &cfg_path,
@@ -357,12 +358,548 @@ fn language_bios_bconout_runs_through_cop_syscall() {
 }
 
 #[test]
+fn language_bios_block_write_updates_attached_disk_image() {
+    let dir = temp_dir("language-bios-block-write");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let traps_path = dir.join("bios_traps.mensch");
+    let cfg_path = dir.join("image.cfg");
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    fs::write(
+        &caller_path,
+        "
+        module BiosBlockWriteCaller
+        application main
+        vector irq = serial_irq
+        const BIOS_BLOCK0 = $0008
+        const WRITE_BUFFER = $9400
+        fixed($0002b2) volatile var write_status: u16
+        fixed($009400) var write_buffer: [512]u8
+
+        external interrupt procedure serial_irq()
+        external procedure serial_init()
+        external procedure bios_bconout(dev: u16, ch: u16)
+        external reentrant procedure bios_block_set_lba(dev: u16, lba: u16)
+        external reentrant function bios_block_write(dev: u16, buffer: near ^u8): u16
+
+        procedure main()
+            serial_init()
+            write_buffer[0] = 'W'
+            write_buffer[1] = 'R'
+            write_buffer[2] = 'I'
+            write_buffer[3] = 'T'
+            write_buffer[4] = 'E'
+            bios_block_set_lba(BIOS_BLOCK0, 1)
+            write_status = bios_block_write(BIOS_BLOCK0, WRITE_BUFFER)
+            bios_bconout(2, '!')
+            return
+        end
+        ",
+    )
+    .expect("caller source should be written");
+    fs::write(&traps_path, bios_only_traps_source()).expect("BIOS trap source should be written");
+    fs::write(&cfg_path, cop_xex_linker_config()).expect("linker config should be written");
+
+    let build = build_mensch_xex_sources(
+        "language-bios-block-write",
+        &[
+            caller_path,
+            repo_root.join("examples/hellord-bios.mensch"),
+            traps_path,
+            repo_root.join("examples/serial-ring.mensch"),
+        ],
+        &cfg_path,
+    )
+    .expect("BIOS block write image should build");
+
+    let mut output = Vec::new();
+    let run = x65_runner::run_image(
+        &build.image,
+        RunConfig {
+            serial_input: Vec::new(),
+            max_steps: 500_000,
+            stop_after_output_len: Some(1),
+            live_input: None,
+            block_device: Some(BlockDeviceConfig {
+                image: vec![0; 1024],
+                read_only: false,
+            }),
+        },
+        &mut output,
+    )
+    .expect("BIOS block write image should run");
+
+    let disk = run
+        .machine
+        .block_device_image()
+        .expect("block image should remain attached");
+    assert_eq!(run.output, b"!");
+    assert_eq!(&disk[512..517], b"WRITE");
+    assert_eq!(run.machine.byte(0x0002b2), 0);
+    assert_eq!(run.machine.byte(0x0002b3), 0);
+}
+
+#[test]
+fn language_fat_sector_helpers_use_dos_drive_mapping() {
+    let dir = temp_dir("language-fat-sector-helpers");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let cfg_path = dir.join("image.cfg");
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fs::write(&cfg_path, large_integration_xex_linker_config())
+        .expect("large integration linker config should be written");
+
+    fs::write(
+        &caller_path,
+        "
+        module FatSectorCaller
+        application main
+        vector irq = serial_irq
+        const READ_BUFFER = $9800
+        const WRITE_BUFFER = $9a00
+        fixed($0002e4) volatile var mount_a_status: u16
+        fixed($0002e8) volatile var write_status: u16
+        fixed($009800) var read_buffer: [512]u8
+        fixed($009a00) var write_buffer: [512]u8
+
+        external interrupt procedure serial_irq()
+        external procedure serial_init()
+        external reentrant procedure gemdos_init()
+        external reentrant procedure gemdos_cconout(ch: u8)
+        external reentrant function dos_mount_fat_drive(drive: u16): u16
+        external reentrant function fat_read_sector(drive: u16, lba: u16, buffer: near ^u8): u16
+        external reentrant function fat_write_sector(drive: u16, lba: u16, buffer: near ^u8): u16
+
+        procedure main()
+            serial_init()
+            gemdos_init()
+            mount_a_status = dos_mount_fat_drive(0)
+            write_buffer[0] = 'F'
+            write_buffer[1] = 'A'
+            write_buffer[2] = 'T'
+            write_buffer[3] = '!'
+            write_status = fat_write_sector(0, 1, WRITE_BUFFER)
+            gemdos_cconout('!')
+            return
+        end
+        ",
+    )
+    .expect("caller source should be written");
+
+    let build = build_mensch_xex_sources(
+        "language-fat-sector-helpers",
+        &[
+            caller_path,
+            repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/hellord-gemdos.mensch"),
+            repo_root.join("examples/hellord-traps.mensch"),
+            repo_root.join("examples/hellord-console.mensch"),
+            repo_root.join("examples/hellord-files.mensch"),
+            repo_root.join("examples/serial-ring.mensch"),
+        ],
+        &cfg_path,
+    )
+    .expect("FAT helper image should build");
+
+    let mut disk = vec![0; 1024];
+    disk[0] = b'M';
+    disk[1] = b'Z';
+    let run = x65_runner::run_image(
+        &build.image,
+        RunConfig {
+            serial_input: Vec::new(),
+            max_steps: 600_000,
+            stop_after_output_len: Some(1),
+            live_input: None,
+            block_device: Some(BlockDeviceConfig {
+                image: disk,
+                read_only: false,
+            }),
+        },
+        &mut Vec::new(),
+    )
+    .expect("FAT helper image should run");
+
+    let disk = run
+        .machine
+        .block_device_image()
+        .expect("block image should remain attached");
+    assert_eq!(run.output, b"!");
+    assert_eq!(run.machine.byte(0x0002e4), 0);
+    assert_eq!(run.machine.byte(0x0002e5), 0);
+    assert_eq!(run.machine.byte(0x0002e8), 0);
+    assert_eq!(run.machine.byte(0x0002e9), 0);
+    assert_eq!(&disk[512..516], b"FAT!");
+}
+
+#[test]
+fn language_gemdos_fsfirst_enumerates_fat_root_directory() {
+    let dir = temp_dir("language-gemdos-fat-root-dir");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let cfg_path = dir.join("image.cfg");
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fs::write(&cfg_path, large_integration_xex_linker_config())
+        .expect("large integration linker config should be written");
+
+    fs::write(
+        &caller_path,
+        "
+        module GemdosFatDirCaller
+        application main
+        vector irq = serial_irq
+        fixed($0002f0) volatile var mount_status: u16
+        fixed($0002f2) volatile var first_status: u16
+        fixed($0002f4) volatile var second_status: u16
+        fixed($0002f6) volatile var done_status: u16
+        const FIRST_DTA = $9800
+        const SECOND_DTA = $9840
+        fixed($009800) var first_dta: [32]u8
+        fixed($009840) var second_dta: [32]u8
+
+        external interrupt procedure serial_irq()
+        external procedure serial_init()
+        external reentrant procedure gemdos_init()
+        external reentrant function dos_mount_fat_drive(drive: u16): u16
+        external reentrant function gemdos_fsfirst(pattern: near ^u8, dta: near ^u8): u16
+        external reentrant function gemdos_fsnext(dta: near ^u8): u16
+        external reentrant procedure gemdos_cconout(ch: u8)
+
+        procedure main()
+            serial_init()
+            gemdos_init()
+            mount_status = dos_mount_fat_drive(0)
+            first_status = gemdos_fsfirst(\"*.*\", FIRST_DTA)
+            second_status = gemdos_fsnext(SECOND_DTA)
+            done_status = gemdos_fsnext(SECOND_DTA)
+            gemdos_cconout('!')
+            return
+        end
+        ",
+    )
+    .expect("caller source should be written");
+
+    let build = build_mensch_xex_sources(
+        "language-gemdos-fat-root-dir",
+        &[
+            caller_path,
+            repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/hellord-gemdos.mensch"),
+            repo_root.join("examples/hellord-traps.mensch"),
+            repo_root.join("examples/hellord-console.mensch"),
+            repo_root.join("examples/hellord-files.mensch"),
+            repo_root.join("examples/serial-ring.mensch"),
+        ],
+        &cfg_path,
+    )
+    .expect("GEMDOS FAT directory image should build");
+
+    let mut disk = vec![0; 2048];
+    disk[11] = 0x00;
+    disk[12] = 0x02;
+    disk[13] = 1;
+    disk[14] = 1;
+    disk[16] = 1;
+    disk[17] = 16;
+    disk[22] = 1;
+    let root = 1024;
+    disk[root..root + 11].copy_from_slice(b"FILE    TXT");
+    disk[root + 11] = 0x20;
+    disk[root + 28] = 5;
+    disk[root + 32..root + 43].copy_from_slice(b"SUBDIR     ");
+    disk[root + 32 + 11] = 0x10;
+
+    let run = x65_runner::run_image(
+        &build.image,
+        RunConfig {
+            serial_input: Vec::new(),
+            max_steps: 800_000,
+            stop_after_output_len: Some(1),
+            live_input: None,
+            block_device: Some(BlockDeviceConfig {
+                image: disk,
+                read_only: false,
+            }),
+        },
+        &mut Vec::new(),
+    )
+    .expect("GEMDOS FAT directory image should run");
+
+    assert_eq!(run.output, b"!");
+    assert_eq!(run.machine.byte(0x0002f0), 0);
+    assert_eq!(run.machine.byte(0x0002f1), 0);
+    assert_eq!(run.machine.byte(0x0002f2), 0);
+    assert_eq!(run.machine.byte(0x0002f3), 0);
+    assert_eq!(run.machine.byte(0x0002f4), 0);
+    assert_eq!(run.machine.byte(0x0002f5), 0);
+    assert_eq!(run.machine.byte(0x0002f6), 0xfe);
+    assert_eq!(run.machine.byte(0x0002f7), 0xff);
+    assert_eq!(run.machine.byte(0x009800), 0);
+    assert_eq!(run.machine.byte(0x009801), 5);
+    assert_eq!(run.machine.byte(0x009802), 0);
+    assert_eq!(
+        &[
+            run.machine.byte(0x009803),
+            run.machine.byte(0x009804),
+            run.machine.byte(0x009805),
+            run.machine.byte(0x009806),
+            run.machine.byte(0x009807),
+            run.machine.byte(0x009808),
+            run.machine.byte(0x009809),
+            run.machine.byte(0x00980a),
+            run.machine.byte(0x00980b),
+        ],
+        b"FILE.TXT\0"
+    );
+    assert_eq!(run.machine.byte(0x009840), 0x10);
+    assert_eq!(run.machine.byte(0x009841), 0);
+    assert_eq!(run.machine.byte(0x009842), 0);
+    assert_eq!(
+        &[
+            run.machine.byte(0x009843),
+            run.machine.byte(0x009844),
+            run.machine.byte(0x009845),
+            run.machine.byte(0x009846),
+            run.machine.byte(0x009847),
+            run.machine.byte(0x009848),
+            run.machine.byte(0x009849),
+        ],
+        b"SUBDIR\0"
+    );
+}
+
+#[test]
+fn language_gemdos_fread_reads_fat_root_file() {
+    let dir = temp_dir("language-gemdos-fat-file-read");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let cfg_path = dir.join("fat-file-read.cfg");
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fs::write(&cfg_path, large_integration_xex_linker_config())
+        .expect("large integration linker config should be written");
+
+    fs::write(
+        &caller_path,
+        "
+        module GemdosFatFileCaller
+        application main
+        vector irq = serial_irq
+        const READ_BUFFER = $9400
+        fixed($009400) var read_buffer: [1028]u8
+
+        external interrupt procedure serial_irq()
+        external procedure serial_init()
+        external reentrant procedure gemdos_init()
+        external reentrant function dos_mount_fat_drive(drive: u16): u16
+        external reentrant function gemdos_fopen(path: near ^u8, mode: u16): u16
+        external reentrant function gemdos_fread(handle: u16, count: u16, buffer: near ^u8): u16
+        external reentrant procedure gemdos_cconout(ch: u8)
+
+        procedure main()
+            var handle: u16
+            var status: u16
+            serial_init()
+            gemdos_init()
+            status = dos_mount_fat_drive(0)
+            handle = gemdos_fopen(\"FILE.TXT\", 0)
+            status = gemdos_fread(handle, 1026, READ_BUFFER)
+            gemdos_cconout('!')
+            return
+        end
+        ",
+    )
+    .expect("caller source should be written");
+
+    let build = build_mensch_xex_sources(
+        "language-gemdos-fat-file-read",
+        &[
+            caller_path,
+            repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/hellord-gemdos.mensch"),
+            repo_root.join("examples/hellord-traps.mensch"),
+            repo_root.join("examples/hellord-console.mensch"),
+            repo_root.join("examples/hellord-files.mensch"),
+            repo_root.join("examples/serial-ring.mensch"),
+        ],
+        &cfg_path,
+    )
+    .expect("GEMDOS FAT file image should build");
+
+    let mut disk = vec![0; 4096];
+    disk[11] = 0x00;
+    disk[12] = 0x02;
+    disk[13] = 1;
+    disk[14] = 1;
+    disk[16] = 1;
+    disk[17] = 16;
+    disk[22] = 1;
+    let root = 1024;
+    disk[516] = 4;
+    disk[520] = 6;
+    disk[root..root + 11].copy_from_slice(b"FILE    TXT");
+    disk[root + 11] = 0x20;
+    disk[root + 26] = 2;
+    disk[root + 28] = 0x02;
+    disk[root + 29] = 0x04;
+    disk[1536..1542].copy_from_slice(b"HELLO!");
+    disk[2560] = b'O';
+    disk[2561] = b'K';
+    disk[3584] = b'3';
+    disk[3585] = b'!';
+
+    let run = x65_runner::run_image(
+        &build.image,
+        RunConfig {
+            serial_input: Vec::new(),
+            max_steps: 30_000_000,
+            stop_after_output_len: Some(1),
+            live_input: None,
+            block_device: Some(BlockDeviceConfig {
+                image: disk,
+                read_only: false,
+            }),
+        },
+        &mut Vec::new(),
+    )
+    .expect("GEMDOS FAT file image should run");
+
+    assert_eq!(run.output, b"!");
+    assert_eq!(run.machine.byte(0x009600), b'O');
+    assert_eq!(run.machine.byte(0x009601), b'K');
+    assert_eq!(run.machine.byte(0x009800), b'3');
+    assert_eq!(run.machine.byte(0x009801), b'!');
+    assert_eq!(
+        &[
+            run.machine.byte(0x009400),
+            run.machine.byte(0x009401),
+            run.machine.byte(0x009402),
+            run.machine.byte(0x009403),
+            run.machine.byte(0x009404),
+            run.machine.byte(0x009405),
+        ],
+        b"HELLO!"
+    );
+}
+
+#[test]
+fn language_gemdos_fwrite_updates_fat_root_file_sector() {
+    let dir = temp_dir("language-gemdos-fat-file-write");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let cfg_path = dir.join("fat-file-write.cfg");
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fs::write(&cfg_path, large_integration_xex_linker_config())
+        .expect("large integration linker config should be written");
+
+    fs::write(
+        &caller_path,
+        "
+        module GemdosFatFileWriteCaller
+        application main
+        vector irq = serial_irq
+        const WRITE_BUFFER = $9400
+        fixed($000304) volatile var written: u16
+        fixed($009400) var write_buffer: [512]u8
+
+        external interrupt procedure serial_irq()
+        external procedure serial_init()
+        external reentrant procedure gemdos_init()
+        external reentrant function dos_mount_fat_drive(drive: u16): u16
+        external reentrant function gemdos_fopen(path: near ^u8, mode: u16): u16
+        external reentrant function gemdos_fwrite(handle: u16, count: u16, buffer: near ^u8): u16
+        external reentrant procedure gemdos_cconout(ch: u8)
+
+        procedure main()
+            var handle: u16
+            var status: u16
+            serial_init()
+            gemdos_init()
+            status = dos_mount_fat_drive(0)
+            handle = gemdos_fopen(\"FILE.TXT\", 0)
+            write_buffer[0] = 'B'
+            write_buffer[1] = 'Y'
+            write_buffer[2] = 'E'
+            write_buffer[3] = 'L'
+            write_buffer[4] = 'O'
+            write_buffer[5] = '!'
+            written = gemdos_fwrite(handle, 3, WRITE_BUFFER)
+            gemdos_cconout('!')
+            return
+        end
+        ",
+    )
+    .expect("caller source should be written");
+
+    let build = build_mensch_xex_sources(
+        "language-gemdos-fat-file-write",
+        &[
+            caller_path,
+            repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/hellord-gemdos.mensch"),
+            repo_root.join("examples/hellord-traps.mensch"),
+            repo_root.join("examples/hellord-console.mensch"),
+            repo_root.join("examples/hellord-files.mensch"),
+            repo_root.join("examples/serial-ring.mensch"),
+        ],
+        &cfg_path,
+    )
+    .expect("GEMDOS FAT file write image should build");
+
+    let mut disk = vec![0; 2048];
+    disk[11] = 0x00;
+    disk[12] = 0x02;
+    disk[13] = 1;
+    disk[14] = 1;
+    disk[16] = 1;
+    disk[17] = 16;
+    disk[22] = 1;
+    let root = 1024;
+    disk[root..root + 11].copy_from_slice(b"FILE    TXT");
+    disk[root + 11] = 0x20;
+    disk[root + 26] = 2;
+    disk[root + 28] = 6;
+    disk[1536..1542].copy_from_slice(b"HELLO!");
+
+    let run = x65_runner::run_image(
+        &build.image,
+        RunConfig {
+            serial_input: Vec::new(),
+            max_steps: 1_000_000,
+            stop_after_output_len: Some(1),
+            live_input: None,
+            block_device: Some(BlockDeviceConfig {
+                image: disk,
+                read_only: false,
+            }),
+        },
+        &mut Vec::new(),
+    )
+    .expect("GEMDOS FAT file write image should run");
+
+    let disk = run
+        .machine
+        .block_device_image()
+        .expect("block image should remain attached");
+    assert_eq!(run.output, b"!");
+    assert_eq!(run.machine.byte(0x000304), 3);
+    assert_eq!(run.machine.byte(0x000305), 0);
+    assert_eq!(&disk[1536..1542], b"BYELO!");
+}
+
+#[test]
 fn language_gemdos_console_discovers_bios_device() {
     let dir = temp_dir("language-gemdos-console-device");
     fs::create_dir_all(&dir).expect("temp dir should be created");
     let caller_path = dir.join("caller.mensch");
     let cfg_path = dir.join("image.cfg");
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fs::write(&cfg_path, large_integration_xex_linker_config())
+        .expect("large integration linker config should be written");
 
     fs::write(
         &caller_path,
@@ -396,15 +933,17 @@ fn language_gemdos_console_discovers_bios_device() {
         ",
     )
     .expect("caller source should be written");
-    fs::write(&cfg_path, cop_xex_linker_config()).expect("linker config should be written");
 
     let build = build_mensch_xex_sources(
         "language-gemdos-console-device",
         &[
             caller_path,
+            repo_root.join("examples/hellord-dos.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
             repo_root.join("examples/hellord-traps.mensch"),
+            repo_root.join("examples/hellord-console.mensch"),
+            repo_root.join("examples/hellord-files.mensch"),
             repo_root.join("examples/serial-ring.mensch"),
         ],
         &cfg_path,
@@ -422,6 +961,210 @@ fn language_gemdos_console_discovers_bios_device() {
     assert_eq!(run.machine.byte(0x0002ae), 0xff);
     assert_eq!(run.machine.byte(0x0002af), 0xff);
     assert_eq!(run.machine.byte(0x0002b0), b'G');
+}
+
+#[test]
+fn language_gemdos_drive_syscalls_update_dos_current_drive() {
+    let dir = temp_dir("language-gemdos-drive-syscalls");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let cfg_path = dir.join("image.cfg");
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fs::write(&cfg_path, large_integration_xex_linker_config())
+        .expect("large integration linker config should be written");
+
+    fs::write(
+        &caller_path,
+        "
+        module GemdosDriveCaller
+        application main
+        vector irq = serial_irq
+        fixed($0002b4) volatile var initial_drive: u16
+        fixed($0002b6) volatile var set_mask: u16
+        fixed($0002b8) volatile var selected_drive: u16
+        fixed($0002be) volatile var set_root_status: u16
+        fixed($0002c0) volatile var root_first_status: u16
+        fixed($0002c2) volatile var root_next_status: u16
+        const ROOT_DTA = $9800
+        fixed($009800) var root_dta: [32]u8
+
+        external interrupt procedure serial_irq()
+        external procedure serial_init()
+        external reentrant procedure gemdos_init()
+        external reentrant function gemdos_dgetdrv(): u16
+        external reentrant function gemdos_dsetdrv(drive: u16): u16
+        external reentrant function gemdos_dsetpath(path: near ^u8): u16
+        external reentrant function gemdos_fsfirst(pattern: near ^u8, dta: near ^u8): u16
+        external reentrant function gemdos_fsnext(dta: near ^u8): u16
+        external reentrant procedure gemdos_cconout(ch: u8)
+
+        procedure main()
+            serial_init()
+            gemdos_init()
+            initial_drive = gemdos_dgetdrv()
+            set_mask = gemdos_dsetdrv(2)
+            selected_drive = gemdos_dgetdrv()
+            set_root_status = gemdos_dsetpath(\"/\")
+            root_first_status = gemdos_fsfirst(\"*.*\", ROOT_DTA)
+            root_next_status = gemdos_fsnext(ROOT_DTA)
+            gemdos_cconout('!')
+            return
+        end
+        ",
+    )
+    .expect("caller source should be written");
+
+    let build = build_mensch_xex_sources(
+        "language-gemdos-drive-syscalls",
+        &[
+            caller_path,
+            repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/hellord-gemdos.mensch"),
+            repo_root.join("examples/hellord-traps.mensch"),
+            repo_root.join("examples/hellord-console.mensch"),
+            repo_root.join("examples/hellord-files.mensch"),
+            repo_root.join("examples/serial-ring.mensch"),
+        ],
+        &cfg_path,
+    )
+    .expect("GEMDOS drive syscall image should build");
+
+    let run = x65_runner::run_image(
+        &build.image,
+        RunConfig {
+            serial_input: Vec::new(),
+            max_steps: 200_000,
+            stop_after_output_len: Some(1),
+            live_input: None,
+            block_device: None,
+        },
+        &mut Vec::new(),
+    )
+    .expect("GEMDOS drive syscall image should run");
+
+    assert_eq!(run.output, b"!");
+    assert_eq!(run.machine.byte(0x0002b4), 0);
+    assert_eq!(run.machine.byte(0x0002b5), 0);
+    assert_eq!(run.machine.byte(0x0002b6), 0xff);
+    assert_eq!(run.machine.byte(0x0002b7), 0xff);
+    assert_eq!(run.machine.byte(0x0002b8), 2);
+    assert_eq!(run.machine.byte(0x0002b9), 0);
+    assert_eq!(run.machine.byte(0x0002be), 0);
+    assert_eq!(run.machine.byte(0x0002bf), 0);
+    assert_eq!(run.machine.byte(0x0002c0), 0);
+    assert_eq!(run.machine.byte(0x0002c1), 0);
+    assert_eq!(run.machine.byte(0x0002c2), 0);
+    assert_eq!(run.machine.byte(0x0002c3), 0);
+    assert_eq!(run.machine.byte(0x009800), 0);
+    assert_eq!(run.machine.byte(0x009801), 65);
+    assert_eq!(run.machine.byte(0x009802), 0);
+    assert_eq!(run.machine.byte(0x009803), b'S');
+    assert_eq!(run.machine.byte(0x009804), b'Y');
+    assert_eq!(run.machine.byte(0x009805), b'S');
+}
+
+#[test]
+fn language_gemdos_file_syscalls_read_romfs_file() {
+    let dir = temp_dir("language-gemdos-file-syscalls");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let cfg_path = dir.join("image.cfg");
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fs::write(&cfg_path, large_integration_xex_linker_config())
+        .expect("large integration linker config should be written");
+
+    fs::write(
+        &caller_path,
+        "
+        module GemdosFileCaller
+        application main
+        vector irq = serial_irq
+        fixed($0002d0) volatile var handle: u16
+        fixed($0002d2) volatile var read_count: u16
+        fixed($0002d6) volatile var write_status: u16
+        fixed($0002d8) volatile var close_status: u16
+        const READ_BUFFER = $9880
+        fixed($009880) var read_buffer: [32]u8
+
+        external interrupt procedure serial_irq()
+        external procedure serial_init()
+        external reentrant procedure gemdos_init()
+        external reentrant function gemdos_fopen(path: near ^u8, mode: u16): u16
+        external reentrant function gemdos_fread(handle: u16, count: u16, buffer: near ^u8): u16
+        external reentrant function gemdos_fwrite(handle: u16, count: u16, buffer: near ^u8): u16
+        external reentrant function gemdos_fclose(handle: u16): u16
+        external reentrant procedure gemdos_cconout(ch: u8)
+
+        procedure main()
+            serial_init()
+            gemdos_init()
+            handle = gemdos_fopen(\"SYSTEM.TXT\", 0)
+            read_count = gemdos_fread(handle, 12, READ_BUFFER)
+            write_status = gemdos_fwrite(handle, 1, READ_BUFFER)
+            close_status = gemdos_fclose(handle)
+            gemdos_cconout('!')
+            return
+        end
+        ",
+    )
+    .expect("caller source should be written");
+
+    let build = build_mensch_xex_sources(
+        "language-gemdos-file-syscalls",
+        &[
+            caller_path,
+            repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/hellord-gemdos.mensch"),
+            repo_root.join("examples/hellord-traps.mensch"),
+            repo_root.join("examples/hellord-console.mensch"),
+            repo_root.join("examples/hellord-files.mensch"),
+            repo_root.join("examples/serial-ring.mensch"),
+        ],
+        &cfg_path,
+    )
+    .expect("GEMDOS file syscall image should build");
+
+    let run = x65_runner::run_image(
+        &build.image,
+        RunConfig {
+            serial_input: Vec::new(),
+            max_steps: 400_000,
+            stop_after_output_len: Some(1),
+            live_input: None,
+            block_device: None,
+        },
+        &mut Vec::new(),
+    )
+    .expect("GEMDOS file syscall image should run");
+
+    assert_eq!(run.output, b"!");
+    assert_eq!(run.machine.byte(0x0002d0), 6);
+    assert_eq!(run.machine.byte(0x0002d1), 0);
+    assert_eq!(run.machine.byte(0x0002d2), 12);
+    assert_eq!(run.machine.byte(0x0002d3), 0);
+    assert_eq!(run.machine.byte(0x0002d6), 0xfb);
+    assert_eq!(run.machine.byte(0x0002d7), 0xff);
+    assert_eq!(run.machine.byte(0x0002d8), 0);
+    assert_eq!(run.machine.byte(0x0002d9), 0);
+    assert_eq!(
+        &[
+            run.machine.byte(0x009880),
+            run.machine.byte(0x009881),
+            run.machine.byte(0x009882),
+            run.machine.byte(0x009883),
+            run.machine.byte(0x009884),
+            run.machine.byte(0x009885),
+            run.machine.byte(0x009886),
+            run.machine.byte(0x009887),
+            run.machine.byte(0x009888),
+            run.machine.byte(0x009889),
+            run.machine.byte(0x00988a),
+            run.machine.byte(0x00988b),
+        ],
+        b"CPU: 65816\r\n"
+    );
 }
 
 #[test]
@@ -688,7 +1431,7 @@ fn hellord_blkinfo_reads_attached_block_sector_through_bios() {
     let build = build_hellord_example();
     let mut disk = vec![0; 1024];
     disk[0..15].copy_from_slice(b"MENSCH BLOCKDEV");
-    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> blkinfo\r\nBlock device 8:\r\nStatus $03\r\nSectors $0002\r\nSector0: 4D 45 4E 53 43 48 20 42 4C 4F 43 4B 44 45 56 00\r\nA> ";
+    let expected = b"Hellord DOS 0.1\r\nType H for help.\r\nA> blkinfo\r\nDrive A block:\r\nStatus $03\r\nSectors $0002\r\nSector0: 4D 45 4E 53 43 48 20 42 4C 4F 43 4B 44 45 56 00\r\nA> ";
     let mut output = Vec::new();
     let run = x65_runner::run_image(
         &build.image,
@@ -705,6 +1448,19 @@ fn hellord_blkinfo_reads_attached_block_sector_through_bios() {
         &mut output,
     )
     .expect("Hellord image should read sector zero through BIOS block calls");
+
+    assert_eq!(run.output, expected);
+    assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
+    assert_eq!(run.machine.byte(HELLORD_TX_OVERFLOW_ADDR), 0);
+}
+
+#[test]
+fn hellord_blkinfo_reports_romfs_drives_without_block_mapping() {
+    let build = build_hellord_example();
+    let expected =
+        b"Hellord DOS 0.1\r\nType H for help.\r\nA> b:\r\nB> blkinfo\r\nDrive B block:\r\nNo block device\r\nB> ";
+    let run = run_image_until_output(&build.image, b"b:\nblkinfo\n", expected.len(), 1_000_000)
+        .expect("Hellord image should report that ROMFS-only drives have no block device");
 
     assert_eq!(run.output, expected);
     assert_eq!(run.machine.byte(HELLORD_OVERFLOW_ADDR), 0);
@@ -1294,8 +2050,32 @@ fn xex_linker_config() -> &'static str {
     "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $008000, size = $001000, file = %O;\n  META: start = $008f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  VECTORS: start = $00ffe4, size = $00000c, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTOR_COP: load = VECTORS, type = ro, optional = yes, offset = $0000;\n  VECTOR_BRK: load = VECTORS, type = ro, optional = yes, offset = $0002;\n  VECTOR_ABORT: load = VECTORS, type = ro, optional = yes, offset = $0004;\n  VECTOR_NMI: load = VECTORS, type = ro, optional = yes, offset = $0006;\n  VECTOR_IRQ: load = VECTORS, type = ro, optional = yes, offset = $000a;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
 }
 
+fn large_integration_xex_linker_config() -> &'static str {
+    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $002000, size = $007000, file = %O;\n  META: start = $00ffc0, size = $000024, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  VECTORS: start = $00ffe4, size = $00000c, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTOR_COP: load = VECTORS, type = ro, optional = yes, offset = $0000;\n  VECTOR_BRK: load = VECTORS, type = ro, optional = yes, offset = $0002;\n  VECTOR_ABORT: load = VECTORS, type = ro, optional = yes, offset = $0004;\n  VECTOR_NMI: load = VECTORS, type = ro, optional = yes, offset = $0006;\n  VECTOR_IRQ: load = VECTORS, type = ro, optional = yes, offset = $000a;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
+}
+
 fn cop_xex_linker_config() -> &'static str {
     "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $008000, size = $002000, file = %O;\n  META: start = $00a000, size = $000100, file = %O;\n  BSS: start = $00a100, size = $000f00, type = rw;\n  VECTORS: start = $00ffe4, size = $00000c, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTOR_COP: load = VECTORS, type = ro, optional = yes, offset = $0000;\n  VECTOR_BRK: load = VECTORS, type = ro, optional = yes, offset = $0002;\n  VECTOR_ABORT: load = VECTORS, type = ro, optional = yes, offset = $0004;\n  VECTOR_NMI: load = VECTORS, type = ro, optional = yes, offset = $0006;\n  VECTOR_IRQ: load = VECTORS, type = ro, optional = yes, offset = $000a;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
+}
+
+fn bios_only_traps_source() -> &'static str {
+    "
+    module BiosOnlyTraps
+
+    vector cop = cop_dispatch
+
+    external reentrant function bios_trap_dispatch(call: u16, arg0: u16, arg1: u16): u16
+
+    const COP_FAMILY_BIOS = $0d
+
+    interrupt(cop, preserve = x, y, p, dbr) function cop_dispatch(): u16
+        if cop_signature() == COP_FAMILY_BIOS
+            return bios_trap_dispatch(cop_a(), cop_x(), cop_y())
+        else
+            return $ffff
+        end
+    end
+    "
 }
 
 #[test]

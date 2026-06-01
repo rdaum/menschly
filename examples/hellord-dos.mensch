@@ -29,6 +29,7 @@ external reentrant function bios_block_status(dev: u16): u16
 external reentrant function bios_block_sector_count(dev: u16): u16
 external reentrant procedure bios_block_set_lba(dev: u16, lba: u16)
 external reentrant function bios_block_read(dev: u16, buffer: near ^u8): u16
+external reentrant function bios_block_write(dev: u16, buffer: near ^u8): u16
 
 const COMMAND_UNKNOWN = 0
 const COMMAND_HELP = 1
@@ -73,9 +74,32 @@ const RECALL = $10
 const DELETE = $7f
 const LOWERCASE_DELTA = 32
 const BIOS_BLOCK0 = $0008
-const BLOCK_SECTOR_BUFFER = $9200
+const BLOCK_SECTOR_BUFFER = $9c00
+const DRIVE_COUNT = 26
+const DRIVE_BACKEND_NONE = 0
+const DRIVE_BACKEND_ROMFS = 1
+const DRIVE_BACKEND_BIOS_BLOCK = 2
+const FS_DRIVER_NONE = 0
+const FS_DRIVER_ROMFS = 1
+const FS_DRIVER_FAT = 2
+const DOS_BLOCK_OK = 0
+const DOS_BLOCK_ERR_NO_DEVICE = $ffff
+const DOS_OK = 0
+const DOS_ERR_PATH_NOT_FOUND = $ffff
+const DOS_ERR_NO_MORE_FILES = $fffe
+const DOS_ERR_FILE_NOT_FOUND = $fffd
+const DOS_ERR_BAD_HANDLE = $fffc
+const DOS_ERR_ACCESS_DENIED = $fffb
+const GEMDOS_ATTR_DIR = $10
+const DOS_MAX_HANDLES = 4
+const DOS_HANDLE_BASE = 6
+const DOS_HANDLE_LIMIT = 10
+const FAT_ATTR_VOLUME = $08
+const FAT_ATTR_DIRECTORY = $10
+const FAT_ATTR_LONG_NAME = $0f
 
 var current_drive: u8
+var dos_initialized: u8
 var current_dir: u8
 var prompt_mode: u8
 var path_mode: u8
@@ -84,15 +108,32 @@ var line_len: u16
 var history_len: u16
 var parse_end: u16
 var parse_ok: u8
+var drive_backend: [26]u8
+var drive_fs_driver: [26]u8
+var drive_bios_device: [26]u16
+var drive_partition_lba: [26]u16
+var block_cache_valid: u8
+var block_cache_drive: u8
+var block_cache_lba: u16
+var dos_search_dir: u8
+var dos_search_next: u8
+var dos_current_read_slot: u8
+var dos_handle_driver: [4]u8
+var dos_handle_file: [4]u8
+var dos_handle_offset: [4]u16
+var dos_handle_drive: [4]u8
+var dos_handle_lba: [4]u16
+var dos_handle_size: [4]u16
 var current_path: [16]u8
 var command_buffer: [32]u8
 var history_buffer: [32]u8
-fixed($009200) var block_sector_buffer: [512]u8
+fixed($009c00) var block_sector_buffer: [512]u8
 
 export procedure dos_boot()
     current_drive = 'A'
     prompt_mode = PROMPT_SHORT
     path_mode = PATH_CURRENT
+    dos_ensure_init()
     init_path()
     console_write_greeting()
     prompt()
@@ -101,6 +142,186 @@ export procedure dos_boot()
         save_history()
         dispatch_line()
         prompt()
+    end
+end
+
+export reentrant function dos_get_drive_index(): u16
+    dos_ensure_init()
+    return dos_drive_index(current_drive)
+end
+
+export reentrant function dos_set_drive_index(drive: u16): u16
+    dos_ensure_init()
+    if drive < DRIVE_COUNT
+        current_drive = u8(drive) + 'A'
+        return $ffff
+    else
+        return 0
+    end
+end
+
+export reentrant function dos_mount_fat_drive(drive: u16): u16
+    dos_ensure_init()
+    if drive >= DRIVE_COUNT
+        return DOS_BLOCK_ERR_NO_DEVICE
+    elsif drive_backend[drive] != DRIVE_BACKEND_BIOS_BLOCK
+        return DOS_BLOCK_ERR_NO_DEVICE
+    else
+        drive_fs_driver[drive] = FS_DRIVER_FAT
+        return DOS_OK
+    end
+end
+
+export reentrant function dos_set_path(path: near ^u8): u16
+    dos_ensure_init()
+    if path^ == 0
+        init_path()
+        return DOS_OK
+    elsif path_is_root(path) != 0
+        init_path()
+        return DOS_OK
+    elsif path_is_current(path) != 0
+        return DOS_OK
+    elsif path_is_parent(path) != 0
+        init_path()
+        return DOS_OK
+    elsif path_is_games(path) != 0
+        set_games_path()
+        return DOS_OK
+    elsif path_is_root_games(path) != 0
+        set_games_path()
+        return DOS_OK
+    else
+        return DOS_ERR_PATH_NOT_FOUND
+    end
+end
+
+export reentrant function dos_fsfirst(dta: near ^u8): u16
+    dos_ensure_init()
+    dos_search_dir = current_dir
+    dos_search_next = 0
+    return dos_fsnext(dta)
+end
+
+export reentrant function dos_fsnext(dta: near ^u8): u16
+    if dos_current_fs_driver() == FS_DRIVER_ROMFS
+        return romfs_search_next(dta)
+    elsif dos_current_fs_driver() == FS_DRIVER_FAT
+        return fat_search_next(dta)
+    else
+        return DOS_ERR_NO_MORE_FILES
+    end
+end
+
+export reentrant function dos_fopen(path: near ^u8): u16
+    var driver: u8
+    var code: u8
+    dos_ensure_init()
+    driver = dos_current_fs_driver()
+    if driver == FS_DRIVER_FAT
+        return fat_fopen(path)
+    end
+    code = dos_fs_file_code(path)
+    if code == FILE_UNKNOWN
+        return DOS_ERR_FILE_NOT_FOUND
+    else
+        return dos_alloc_handle(driver, code)
+    end
+end
+
+export reentrant function dos_fread(handle: u16, count: u16, buffer: near ^u8): u16
+    var slot: u16
+    var read_count: u16
+    var driver: u8
+    var code: u8
+    var offset: u16
+    var done: u8
+    dos_ensure_init()
+    if dos_handle_slot_valid(handle) == 0
+        return DOS_ERR_BAD_HANDLE
+    end
+    slot = handle - DOS_HANDLE_BASE
+    driver = dos_handle_driver[slot]
+    code = dos_handle_file[slot]
+    if code == FILE_UNKNOWN
+        return DOS_ERR_BAD_HANDLE
+    end
+    dos_current_read_slot = u8(slot)
+    offset = dos_handle_offset[slot]
+    read_count = 0
+    done = 0
+    while done == 0
+        if read_count == count
+            done = 1
+        elsif offset >= dos_file_size(driver, code)
+            done = 1
+        else
+            buffer^ = dos_file_byte(driver, code, offset)
+            buffer = buffer + 1
+            offset = offset + 1
+            read_count = read_count + 1
+        end
+    end
+    dos_handle_offset[slot] = offset
+    return read_count
+end
+
+export reentrant function dos_fwrite(handle: u16, count: u16, buffer: near ^u8): u16
+    var slot: u16
+    dos_ensure_init()
+    if dos_handle_slot_valid(handle) == 0
+        return DOS_ERR_BAD_HANDLE
+    end
+    slot = handle - DOS_HANDLE_BASE
+    if dos_handle_file[slot] == FILE_UNKNOWN
+        return DOS_ERR_BAD_HANDLE
+    elsif dos_handle_driver[slot] == FS_DRIVER_FAT
+        if fat_write_sector(u16(dos_handle_drive[slot]), dos_handle_lba[slot], buffer) == DOS_BLOCK_OK
+            return count
+        else
+            return 0
+        end
+    else
+        return DOS_ERR_ACCESS_DENIED
+    end
+end
+
+export reentrant function dos_fclose(handle: u16): u16
+    var slot: u16
+    dos_ensure_init()
+    if dos_handle_slot_valid(handle) == 0
+        return DOS_ERR_BAD_HANDLE
+    else
+        slot = handle - DOS_HANDLE_BASE
+        dos_handle_driver[slot] = FS_DRIVER_NONE
+        dos_handle_file[slot] = FILE_UNKNOWN
+        dos_handle_offset[slot] = 0
+        dos_handle_drive[slot] = 0
+        dos_handle_lba[slot] = 0
+        dos_handle_size[slot] = 0
+        return DOS_OK
+    end
+end
+
+export reentrant function fat_read_sector(drive: u16, lba: u16, buffer: near ^u8): u16
+    dos_ensure_init()
+    if drive >= DRIVE_COUNT
+        return DOS_BLOCK_ERR_NO_DEVICE
+    elsif drive_fs_driver[drive] != FS_DRIVER_FAT
+        return DOS_BLOCK_ERR_NO_DEVICE
+    else
+        return dos_drive_read_blocks(u8(drive) + 'A', lba, 1, buffer)
+    end
+end
+
+export reentrant function fat_write_sector(drive: u16, lba: u16, buffer: near ^u8): u16
+    dos_ensure_init()
+    if drive >= DRIVE_COUNT
+        return DOS_BLOCK_ERR_NO_DEVICE
+    elsif drive_fs_driver[drive] != FS_DRIVER_FAT
+        return DOS_BLOCK_ERR_NO_DEVICE
+    else
+        return dos_drive_write_blocks(u8(drive) + 'A', lba, 1, buffer)
     end
 end
 
@@ -141,8 +362,6 @@ function command_code(): u8
         return COMMAND_SET
     elsif is_run() != 0
         return COMMAND_RUN
-    elsif bare_program_code() != 0
-        return COMMAND_PROGRAM
     elsif is_type() != 0
         return COMMAND_TYPE
     elsif is_cd() != 0
@@ -151,6 +370,8 @@ function command_code(): u8
         return COMMAND_ECHO
     elsif is_drive_select() != 0
         return COMMAND_DRIVE
+    elsif bare_program_code() != 0
+        return COMMAND_PROGRAM
     else
         return COMMAND_UNKNOWN
     end
@@ -185,6 +406,87 @@ function normalized_drive(value: u8): u8
     end
 end
 
+reentrant function path_is_root(path: near ^u8): u8
+    if path^ == '/'
+        path = path + 1
+        if path^ == 0
+            return 1
+        else
+            return 0
+        end
+    else
+        return 0
+    end
+end
+
+reentrant function path_is_current(path: near ^u8): u8
+    if path^ == '.'
+        path = path + 1
+        if path^ == 0
+            return 1
+        else
+            return 0
+        end
+    else
+        return 0
+    end
+end
+
+reentrant function path_is_parent(path: near ^u8): u8
+    if path^ == '.'
+        path = path + 1
+        if path^ == '.'
+            path = path + 1
+            if path^ == 0
+                return 1
+            else
+                return 0
+            end
+        else
+            return 0
+        end
+    else
+        return 0
+    end
+end
+
+reentrant function path_is_games(path: near ^u8): u8
+    if normalized_drive(path^) != 'G'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'A'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'M'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'E'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'S'
+        return 0
+    end
+    path = path + 1
+    if path^ == 0
+        return 1
+    else
+        return 0
+    end
+end
+
+reentrant function path_is_root_games(path: near ^u8): u8
+    if path^ == '/'
+        path = path + 1
+        return path_is_games(path)
+    else
+        return 0
+    end
+end
+
 function is_drive_letter(value: u8): u8
     var drive: u8
     drive = normalized_drive(value)
@@ -201,6 +503,184 @@ function is_drive_select(): u8
     else
         return 0
     end
+end
+
+reentrant procedure dos_ensure_init()
+    if dos_initialized == 0
+        dos_init_drives()
+    end
+    return
+end
+
+procedure dos_init_drives()
+    var index: u16
+    if current_drive == 0
+        current_drive = 'A'
+    end
+    index = 0
+    while index != DRIVE_COUNT
+        drive_backend[index] = DRIVE_BACKEND_ROMFS
+        drive_fs_driver[index] = FS_DRIVER_ROMFS
+        drive_bios_device[index] = 0
+        drive_partition_lba[index] = 0
+        index = index + 1
+    end
+    drive_backend[0] = DRIVE_BACKEND_BIOS_BLOCK
+    drive_bios_device[0] = BIOS_BLOCK0
+    drive_partition_lba[0] = 0
+    block_cache_valid = 0
+    index = 0
+    while index != DOS_MAX_HANDLES
+        dos_handle_driver[index] = FS_DRIVER_NONE
+        dos_handle_file[index] = FILE_UNKNOWN
+        dos_handle_offset[index] = 0
+        dos_handle_drive[index] = 0
+        dos_handle_lba[index] = 0
+        dos_handle_size[index] = 0
+        index = index + 1
+    end
+    dos_initialized = 1
+    return
+end
+
+function dos_drive_index(drive: u8): u16
+    return u16(normalized_drive(drive) - 'A')
+end
+
+function dos_drive_backend(drive: u8): u8
+    return drive_backend[dos_drive_index(drive)]
+end
+
+function dos_drive_fs_driver(drive: u8): u8
+    return drive_fs_driver[dos_drive_index(drive)]
+end
+
+function dos_drive_bios_device(drive: u8): u16
+    if dos_drive_backend(drive) != DRIVE_BACKEND_BIOS_BLOCK
+        return 0
+    else
+        return drive_bios_device[dos_drive_index(drive)]
+    end
+end
+
+function dos_drive_partition_lba(drive: u8): u16
+    return drive_partition_lba[dos_drive_index(drive)]
+end
+
+function dos_drive_block_status(drive: u8): u16
+    var dev: u16
+    dev = dos_drive_bios_device(drive)
+    if dev == 0
+        return 0
+    else
+        return bios_block_status(dev)
+    end
+end
+
+function dos_drive_block_sector_count(drive: u8): u16
+    var dev: u16
+    dev = dos_drive_bios_device(drive)
+    if dev == 0
+        return 0
+    else
+        return bios_block_sector_count(dev)
+    end
+end
+
+function dos_drive_read_blocks(drive: u8, lba: u16, count: u16, buffer: near ^u8): u16
+    var physical_lba: u16
+    physical_lba = dos_drive_partition_lba(drive) + lba
+    return dos_volume_read_blocks(drive, physical_lba, count, buffer)
+end
+
+function dos_drive_write_blocks(drive: u8, lba: u16, count: u16, buffer: near ^u8): u16
+    var physical_lba: u16
+    physical_lba = dos_drive_partition_lba(drive) + lba
+    return dos_volume_write_blocks(drive, physical_lba, count, buffer)
+end
+
+function dos_volume_read_blocks(drive: u8, lba: u16, count: u16, buffer: near ^u8): u16
+    var dev: u16
+    var status: u16
+    var sector_lba: u16
+    var remaining: u16
+    dev = dos_drive_bios_device(drive)
+    if dev == 0
+        return DOS_BLOCK_ERR_NO_DEVICE
+    else
+        sector_lba = lba
+        remaining = count
+        while remaining != 0
+            if block_cache_valid != 0 and block_cache_drive == normalized_drive(drive) and block_cache_lba == sector_lba
+                copy_block_cache_to(buffer)
+            else
+                bios_block_set_lba(dev, sector_lba)
+                status = bios_block_read(dev, BLOCK_SECTOR_BUFFER)
+                if status != DOS_BLOCK_OK
+                    return status
+                end
+                block_cache_valid = 1
+                block_cache_drive = normalized_drive(drive)
+                block_cache_lba = sector_lba
+                copy_block_cache_to(buffer)
+            end
+            buffer = buffer + $0200
+            sector_lba = sector_lba + 1
+            remaining = remaining - 1
+        end
+        return DOS_BLOCK_OK
+    end
+end
+
+function dos_volume_write_blocks(drive: u8, lba: u16, count: u16, buffer: near ^u8): u16
+    var dev: u16
+    var status: u16
+    var sector_lba: u16
+    var remaining: u16
+    dev = dos_drive_bios_device(drive)
+    if dev == 0
+        return DOS_BLOCK_ERR_NO_DEVICE
+    else
+        sector_lba = lba
+        remaining = count
+        while remaining != 0
+            copy_block_to_cache(buffer)
+            bios_block_set_lba(dev, sector_lba)
+            status = bios_block_write(dev, BLOCK_SECTOR_BUFFER)
+            if status != DOS_BLOCK_OK
+                return status
+            end
+            block_cache_valid = 1
+            block_cache_drive = normalized_drive(drive)
+            block_cache_lba = sector_lba
+            buffer = buffer + $0200
+            sector_lba = sector_lba + 1
+            remaining = remaining - 1
+        end
+        return DOS_BLOCK_OK
+    end
+end
+
+procedure copy_block_cache_to(buffer: near ^u8)
+    var index: u16
+    index = 0
+    while index != $0200
+        buffer^ = block_sector_buffer[index]
+        buffer = buffer + 1
+        index = index + 1
+    end
+    return
+end
+
+procedure copy_block_to_cache(buffer: near ^u8)
+    var index: u16
+    index = 0
+    while index != $0200
+        block_sector_buffer[index] = buffer^
+        buffer = buffer + 1
+        index = index + 1
+    end
+    return
 end
 
 function command_char_matches(index: u16, expected: u8): u8
@@ -957,11 +1437,288 @@ end
 procedure write_dir()
     console_write_text("Directory of ")
     write_path()
+    dos_fs_write_dir()
+    return
+end
+
+function dos_current_fs_driver(): u8
+    return dos_drive_fs_driver(current_drive)
+end
+
+procedure dos_fs_write_dir()
+    if dos_current_fs_driver() == FS_DRIVER_ROMFS
+        romfs_write_dir()
+    else
+        files_write_path_not_found()
+    end
+    return
+end
+
+procedure romfs_write_dir()
     if current_dir == DIR_ROOT
         files_write_root_dir()
     else
         files_write_games_dir()
     end
+    return
+end
+
+reentrant function romfs_search_next(dta: near ^u8): u16
+    if dos_search_dir == DIR_ROOT
+        if dos_search_next == 0
+            dos_search_next = 1
+            romfs_write_search_entry(dta, "README.TXT", 49, 0)
+            return DOS_OK
+        elsif dos_search_next == 1
+            dos_search_next = 2
+            romfs_write_search_entry(dta, "SYSTEM.TXT", 65, 0)
+            return DOS_OK
+        elsif dos_search_next == 2
+            dos_search_next = 3
+            romfs_write_search_entry(dta, "HELLO.PRG", 37, 0)
+            return DOS_OK
+        elsif dos_search_next == 3
+            dos_search_next = 4
+            romfs_write_search_entry(dta, "GAMES", 0, GEMDOS_ATTR_DIR)
+            return DOS_OK
+        else
+            return DOS_ERR_NO_MORE_FILES
+        end
+    else
+        if dos_search_next == 0
+            dos_search_next = 1
+            romfs_write_search_entry(dta, "DEMO.TXT", 48, 0)
+            return DOS_OK
+        elsif dos_search_next == 1
+            dos_search_next = 2
+            romfs_write_search_entry(dta, "DEMO.PRG", 36, 0)
+            return DOS_OK
+        else
+            return DOS_ERR_NO_MORE_FILES
+        end
+    end
+end
+
+reentrant function fat_search_next(dta: near ^u8): u16
+    var root_lba: u16
+    var entry: u16
+    var attr: u8
+    var first: u8
+    if dos_search_dir != DIR_ROOT
+        return DOS_ERR_NO_MORE_FILES
+    end
+    if fat_read_sector(dos_drive_index(current_drive), 0, BLOCK_SECTOR_BUFFER) != DOS_BLOCK_OK
+        return DOS_ERR_NO_MORE_FILES
+    end
+    root_lba = fat_root_dir_lba()
+    if fat_read_sector(dos_drive_index(current_drive), root_lba, BLOCK_SECTOR_BUFFER) != DOS_BLOCK_OK
+        return DOS_ERR_NO_MORE_FILES
+    end
+    while dos_search_next != 16
+        entry = fat_entry_offset(u16(dos_search_next))
+        dos_search_next = dos_search_next + 1
+        first = block_sector_buffer[entry]
+        attr = block_sector_buffer[entry + 11]
+        if first == 0
+            return DOS_ERR_NO_MORE_FILES
+        elsif first == $e5
+        elsif attr == FAT_ATTR_LONG_NAME
+        elsif attr & FAT_ATTR_VOLUME != 0
+        else
+            fat_write_search_entry(dta, entry)
+            return DOS_OK
+        end
+    end
+    return DOS_ERR_NO_MORE_FILES
+end
+
+reentrant function fat_fopen(path: near ^u8): u16
+    var root_lba: u16
+    var entry: u16
+    var index: u8
+    var attr: u8
+    var first: u8
+    var handle: u16
+    var slot: u16
+    if current_dir != DIR_ROOT
+        return DOS_ERR_FILE_NOT_FOUND
+    end
+    if fat_read_sector(dos_drive_index(current_drive), 0, BLOCK_SECTOR_BUFFER) != DOS_BLOCK_OK
+        return DOS_ERR_FILE_NOT_FOUND
+    end
+    root_lba = fat_root_dir_lba()
+    if fat_read_sector(dos_drive_index(current_drive), root_lba, BLOCK_SECTOR_BUFFER) != DOS_BLOCK_OK
+        return DOS_ERR_FILE_NOT_FOUND
+    end
+    index = 0
+    while index != 16
+        entry = fat_entry_offset(u16(index))
+        first = block_sector_buffer[entry]
+        attr = block_sector_buffer[entry + 11]
+        if first == 0
+            return DOS_ERR_FILE_NOT_FOUND
+        elsif first == $e5
+        elsif attr == FAT_ATTR_LONG_NAME
+        elsif attr & FAT_ATTR_VOLUME != 0
+        elsif attr & FAT_ATTR_DIRECTORY != 0
+        elsif fat_entry_name_matches(path, entry) != 0
+            handle = dos_alloc_handle(FS_DRIVER_FAT, 1)
+            if handle >= DOS_HANDLE_BASE and handle < DOS_HANDLE_LIMIT
+                slot = handle - DOS_HANDLE_BASE
+                dos_handle_drive[slot] = u8(dos_drive_index(current_drive))
+                dos_handle_lba[slot] = root_lba + fat_entry_cluster(entry) - 1
+                dos_handle_size[slot] = fat_entry_size(entry)
+            end
+            return handle
+        end
+        index = index + 1
+    end
+    return DOS_ERR_FILE_NOT_FOUND
+end
+
+reentrant function fat_root_dir_lba(): u16
+    return fat_boot_u16(14) + fat_boot_u16(22)
+end
+
+reentrant function fat_entry_cluster(entry: u16): u16
+    return u16(block_sector_buffer[entry + 26]) + byte_to_high_word(u16(block_sector_buffer[entry + 27]))
+end
+
+reentrant function fat_entry_size(entry: u16): u16
+    return u16(block_sector_buffer[entry + 28]) + byte_to_high_word(u16(block_sector_buffer[entry + 29]))
+end
+
+reentrant function fat_entry_offset(index: u16): u16
+    asm "lda $03,s"
+    asm "asl a"
+    asm "asl a"
+    asm "asl a"
+    asm "asl a"
+    asm "asl a"
+    asm "sta $03,s"
+    return index
+end
+
+reentrant function fat_boot_u16(offset: u16): u16
+    return u16(block_sector_buffer[offset]) + byte_to_high_word(u16(block_sector_buffer[offset + 1]))
+end
+
+reentrant function byte_to_high_word(value: u16): u16
+    asm "sep #$20"
+    asm ".a8"
+    asm "lda $03,s"
+    asm "sta $04,s"
+    asm "lda #$00"
+    asm "sta $03,s"
+    asm "rep #$20"
+    asm ".a16"
+    return value
+end
+
+reentrant procedure fat_write_search_entry(dta: near ^u8, entry: u16)
+    var size: u16
+    var attr: u8
+    attr = block_sector_buffer[entry + 11]
+    size = fat_entry_size(entry)
+    if attr & FAT_ATTR_DIRECTORY != 0
+        dta^ = GEMDOS_ATTR_DIR
+    else
+        dta^ = 0
+    end
+    dta = dta + 1
+    dta^ = u8(size)
+    dta = dta + 1
+    dta^ = block_sector_buffer[entry + 29]
+    dta = dta + 1
+    fat_write_83_name(dta, entry)
+    return
+end
+
+reentrant function fat_entry_name_matches(path: near ^u8, entry: u16): u8
+    var index: u16
+    index = 0
+    while index != 8
+        if path^ == '.' or path^ == 0
+            if block_sector_buffer[entry + index] != ' '
+                return 0
+            else
+                index = index + 1
+            end
+        elsif normalized_drive(path^) != block_sector_buffer[entry + index]
+            return 0
+        else
+            path = path + 1
+            index = index + 1
+        end
+    end
+    if path^ == '.'
+        path = path + 1
+    end
+    index = 8
+    while index != 11
+        if path^ == 0
+            if block_sector_buffer[entry + index] != ' '
+                return 0
+            else
+                index = index + 1
+            end
+        elsif normalized_drive(path^) != block_sector_buffer[entry + index]
+            return 0
+        else
+            path = path + 1
+            index = index + 1
+        end
+    end
+    if path^ == 0
+        return 1
+    else
+        return 0
+    end
+end
+
+reentrant procedure fat_write_83_name(dta: near ^u8, entry: u16)
+    var index: u16
+    index = 0
+    while index != 8
+        if block_sector_buffer[entry + index] == ' '
+            index = 8
+        else
+            dta^ = block_sector_buffer[entry + index]
+            dta = dta + 1
+            index = index + 1
+        end
+    end
+    if block_sector_buffer[entry + 8] != ' '
+        dta^ = '.'
+        dta = dta + 1
+        index = 8
+        while index != 11
+            if block_sector_buffer[entry + index] == ' '
+                index = 11
+            else
+                dta^ = block_sector_buffer[entry + index]
+                dta = dta + 1
+                index = index + 1
+            end
+        end
+    end
+    dta^ = 0
+    return
+end
+
+reentrant procedure romfs_write_search_entry(dta: near ^u8, name: near ^u8, size: u16, attr: u8)
+    dta^ = attr
+    dta = dta + 1
+    dta^ = u8(size)
+    dta = dta + 1
+    dta^ = 0
+    dta = dta + 1
+    while name^ != 0
+        dta^ = name^
+        dta = dta + 1
+        name = name + 1
+    end
+    dta^ = 0
     return
 end
 
@@ -999,16 +1756,22 @@ procedure write_block_info()
     var sectors: u16
     var read_status: u16
     var index: u16
-    status = bios_block_status(BIOS_BLOCK0)
-    sectors = bios_block_sector_count(BIOS_BLOCK0)
-    console_write_text("Block device 8:\r\nStatus $")
+    status = dos_drive_block_status(current_drive)
+    sectors = dos_drive_block_sector_count(current_drive)
+    console_write_text("Drive ")
+    console_write(current_drive)
+    console_write_text(" block:\r\n")
+    if dos_drive_bios_device(current_drive) == 0
+        console_write_text("No block device\r\n")
+        return
+    end
+    console_write_text("Status $")
     console_write_hex8(u8(status))
     console_write_text("\r\nSectors $")
     console_write_hex16(sectors)
     console_newline()
-    bios_block_set_lba(BIOS_BLOCK0, 0)
-    read_status = bios_block_read(BIOS_BLOCK0, BLOCK_SECTOR_BUFFER)
-    if read_status == 0
+    read_status = dos_drive_read_blocks(current_drive, 0, 1, BLOCK_SECTOR_BUFFER)
+    if read_status == DOS_BLOCK_OK
         console_write_text("Sector0:")
         index = 0
         while index != 16
@@ -1139,6 +1902,55 @@ end
 function type_file_code(): u8
     var start: u16
     start = argument_start("T", "TYPE")
+    return dos_fs_type_file_code(start)
+end
+
+function dos_fs_type_file_code(start: u16): u8
+    if dos_current_fs_driver() == FS_DRIVER_ROMFS
+        return romfs_type_file_code(start)
+    else
+        return FILE_UNKNOWN
+    end
+end
+
+reentrant function dos_fs_file_code(path: near ^u8): u8
+    if dos_current_fs_driver() == FS_DRIVER_ROMFS
+        return romfs_file_code(path)
+    else
+        return FILE_UNKNOWN
+    end
+end
+
+reentrant function romfs_file_code(path: near ^u8): u8
+    if path^ == '/'
+        path = path + 1
+        return romfs_root_file_code(path)
+    elsif current_dir == DIR_ROOT
+        return romfs_root_file_code(path)
+    else
+        return romfs_games_file_code(path)
+    end
+end
+
+reentrant function romfs_root_file_code(path: near ^u8): u8
+    if file_name_is_readme(path) != 0
+        return FILE_README
+    elsif file_name_is_system(path) != 0
+        return FILE_SYSTEM
+    else
+        return FILE_UNKNOWN
+    end
+end
+
+reentrant function romfs_games_file_code(path: near ^u8): u8
+    if file_name_is_demo(path) != 0
+        return FILE_DEMO
+    else
+        return FILE_UNKNOWN
+    end
+end
+
+function romfs_type_file_code(start: u16): u8
     if current_dir == DIR_ROOT
         if argument_word_matches(start, "README.TXT") != 0
             return FILE_README
@@ -1160,27 +1972,312 @@ function type_file_code(): u8
     end
 end
 
-function run_program_code(): u8
-    var start: u16
-    start = argument_start("R", "RUN")
-    return program_code_at(start)
+reentrant function dos_alloc_handle(driver: u8, code: u8): u16
+    var slot: u16
+    slot = 0
+    while slot != DOS_MAX_HANDLES
+        if dos_handle_file[slot] == FILE_UNKNOWN
+            dos_handle_driver[slot] = driver
+            dos_handle_file[slot] = code
+            dos_handle_offset[slot] = 0
+            dos_handle_drive[slot] = u8(dos_drive_index(current_drive))
+            dos_handle_lba[slot] = 0
+            dos_handle_size[slot] = 0
+            return slot + DOS_HANDLE_BASE
+        end
+        slot = slot + 1
+    end
+    return DOS_ERR_ACCESS_DENIED
 end
 
-function bare_program_code(): u8
-    var code: u8
-    code = program_code_at(0)
-    if code != FILE_UNKNOWN
-        return code
-    elsif path_mode == PATH_ROOT
-        return root_program_code_at(0)
+reentrant function dos_handle_slot_valid(handle: u16): u8
+    if handle < DOS_HANDLE_BASE
+        return 0
+    elsif handle >= DOS_HANDLE_LIMIT
+        return 0
+    else
+        return 1
+    end
+end
+
+reentrant function dos_file_size(driver: u8, code: u8): u16
+    if driver == FS_DRIVER_ROMFS
+        return romfs_file_size(code)
+    elsif driver == FS_DRIVER_FAT
+        return fat_handle_size()
+    else
+        return 0
+    end
+end
+
+reentrant function dos_file_byte(driver: u8, code: u8, offset: u16): u8
+    if driver == FS_DRIVER_ROMFS
+        return romfs_file_byte(code, offset)
+    elsif driver == FS_DRIVER_FAT
+        return fat_handle_byte(offset)
+    else
+        return 0
+    end
+end
+
+reentrant function fat_handle_size(): u16
+    return dos_handle_size[u16(dos_current_read_slot)]
+end
+
+reentrant function fat_handle_byte(offset: u16): u8
+    var slot: u16
+    var byte_offset: u16
+    var sector_lba: u16
+    var drive: u16
+    slot = u16(dos_current_read_slot)
+    drive = u16(dos_handle_drive[slot])
+    byte_offset = offset
+    sector_lba = dos_handle_lba[slot]
+    if byte_offset >= $0200
+        byte_offset = byte_offset - $0200
+        if fat_read_sector(drive, 1, BLOCK_SECTOR_BUFFER) != DOS_BLOCK_OK
+            return 0
+        end
+        if byte_offset >= $0200
+            byte_offset = byte_offset - $0200
+            sector_lba = sector_lba + fat_boot_u16(8) - 2
+        else
+            sector_lba = sector_lba + fat_boot_u16(4) - 2
+        end
+    end
+    if fat_read_sector(drive, sector_lba, BLOCK_SECTOR_BUFFER) != DOS_BLOCK_OK
+        return 0
+    else
+        return block_sector_buffer[byte_offset]
+    end
+end
+
+reentrant function romfs_file_size(code: u8): u16
+    if code == FILE_README
+        return 49
+    elsif code == FILE_SYSTEM
+        return 65
+    elsif code == FILE_DEMO
+        return 48
+    else
+        return 0
+    end
+end
+
+reentrant function romfs_file_byte(code: u8, offset: u16): u8
+    if code == FILE_README
+        return readme_byte(offset)
+    elsif code == FILE_SYSTEM
+        return system_byte(offset)
+    elsif code == FILE_DEMO
+        return demo_byte(offset)
+    else
+        return 0
+    end
+end
+
+reentrant function readme_byte(offset: u16): u8
+    return string_byte_at("Hellord is a tiny Mensch DOS for the x65-alike.\r\n", offset)
+end
+
+reentrant function system_byte(offset: u16): u8
+    return string_byte_at("CPU: 65816\r\nConsole: USB UART IRQ rings\r\nStorage: ROM file table\r\n", offset)
+end
+
+reentrant function demo_byte(offset: u16): u8
+    return string_byte_at("No games yet, but the directory layer works.\r\n", offset)
+end
+
+reentrant function string_byte_at(text: near ^u8, offset: u16): u8
+    while offset != 0
+        text = text + 1
+        offset = offset - 1
+    end
+    return text^
+end
+
+reentrant function file_name_is_readme(path: near ^u8): u8
+    if normalized_drive(path^) != 'R'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'E'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'A'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'D'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'M'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'E'
+        return 0
+    end
+    path = path + 1
+    if path^ == 0
+        return 1
+    elsif path^ == '.'
+        path = path + 1
+        if normalized_drive(path^) != 'T'
+            return 0
+        end
+        path = path + 1
+        if normalized_drive(path^) != 'X'
+            return 0
+        end
+        path = path + 1
+        if normalized_drive(path^) != 'T'
+            return 0
+        end
+        path = path + 1
+        if path^ == 0
+            return 1
+        else
+            return 0
+        end
+    else
+        return 0
+    end
+end
+
+reentrant function file_name_is_system(path: near ^u8): u8
+    if normalized_drive(path^) != 'S'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'Y'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'S'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'T'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'E'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'M'
+        return 0
+    end
+    path = path + 1
+    if path^ == 0
+        return 1
+    elsif path^ == '.'
+        path = path + 1
+        if normalized_drive(path^) != 'T'
+            return 0
+        end
+        path = path + 1
+        if normalized_drive(path^) != 'X'
+            return 0
+        end
+        path = path + 1
+        if normalized_drive(path^) != 'T'
+            return 0
+        end
+        path = path + 1
+        if path^ == 0
+            return 1
+        else
+            return 0
+        end
+    else
+        return 0
+    end
+end
+
+reentrant function file_name_is_demo(path: near ^u8): u8
+    if normalized_drive(path^) != 'D'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'E'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'M'
+        return 0
+    end
+    path = path + 1
+    if normalized_drive(path^) != 'O'
+        return 0
+    end
+    path = path + 1
+    if path^ == 0
+        return 1
+    elsif path^ == '.'
+        path = path + 1
+        if normalized_drive(path^) != 'T'
+            return 0
+        end
+        path = path + 1
+        if normalized_drive(path^) != 'X'
+            return 0
+        end
+        path = path + 1
+        if normalized_drive(path^) != 'T'
+            return 0
+        end
+        path = path + 1
+        if path^ == 0
+            return 1
+        else
+            return 0
+        end
+    else
+        return 0
+    end
+end
+
+function run_program_code(): u8
+    if dos_current_fs_driver() == FS_DRIVER_ROMFS
+        return romfs_run_program_code()
     else
         return FILE_UNKNOWN
     end
 end
 
-function program_code_at(start: u16): u8
+function bare_program_code(): u8
+    var code: u8
+    if dos_current_fs_driver() == FS_DRIVER_ROMFS
+        code = romfs_program_code_at(0)
+    else
+        code = FILE_UNKNOWN
+    end
+    if code != FILE_UNKNOWN
+        return code
+    elsif path_mode == PATH_ROOT
+        if dos_current_fs_driver() == FS_DRIVER_ROMFS
+            return romfs_root_program_code_at(0)
+        else
+            return FILE_UNKNOWN
+        end
+    else
+        return FILE_UNKNOWN
+    end
+end
+
+function romfs_run_program_code(): u8
+    var start: u16
+    start = argument_start("R", "RUN")
+    return romfs_program_code_at(start)
+end
+
+function romfs_program_code_at(start: u16): u8
     if current_dir == DIR_ROOT
-        return root_program_code_at(start)
+        return romfs_root_program_code_at(start)
     elsif argument_word_matches(start, "DEMO.PRG") != 0
         return PROGRAM_DEMO
     elsif argument_word_matches(start, "DEMO") != 0
@@ -1190,7 +2287,7 @@ function program_code_at(start: u16): u8
     end
 end
 
-function root_program_code_at(start: u16): u8
+function romfs_root_program_code_at(start: u16): u8
     if argument_word_matches(start, "HELLO.PRG") != 0
         return PROGRAM_HELLO
     elsif argument_word_matches(start, "HELLO") != 0
@@ -1201,6 +2298,11 @@ function root_program_code_at(start: u16): u8
 end
 
 procedure run_program_code_value(code: u8)
+    romfs_run_program_code_value(code)
+    return
+end
+
+procedure romfs_run_program_code_value(code: u8)
     if code == PROGRAM_HELLO
         files_run_hello()
     elsif code == PROGRAM_DEMO
@@ -1228,6 +2330,15 @@ end
 procedure type_file()
     var code: u8
     code = type_file_code()
+    if dos_current_fs_driver() == FS_DRIVER_ROMFS
+        romfs_type_file_code_value(code)
+    else
+        files_write_not_found()
+    end
+    return
+end
+
+procedure romfs_type_file_code_value(code: u8)
     if code == FILE_README
         files_type_readme()
     elsif code == FILE_SYSTEM

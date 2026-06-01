@@ -383,6 +383,115 @@ fn generated_frontend_reentrant_stack_pointer_deref_uses_stack_indirect() {
 }
 
 #[test]
+fn generated_frontend_reentrant_pointer_string_compare_runs() {
+    let binary = assemble_source_fixture(
+        "frontend-reentrant-pointer-string-compare",
+        "
+        module ReentrantPointerStringCompareDemo
+
+        fixed($040008) volatile var match_out: u8
+        fixed($00400a) var left_buffer: [6]u8
+        fixed($004010) var right_buffer: [6]u8
+
+        export far procedure main()
+            left_buffer[0] = 'g'
+            left_buffer[1] = 'a'
+            left_buffer[2] = 'm'
+            left_buffer[3] = 'e'
+            left_buffer[4] = 's'
+            left_buffer[5] = 0
+            right_buffer[0] = 'G'
+            right_buffer[1] = 'A'
+            right_buffer[2] = 'M'
+            right_buffer[3] = 'E'
+            right_buffer[4] = 'S'
+            right_buffer[5] = 0
+            match_out = text_matches($400a, $4010)
+            return
+        end
+
+        function normalized(value: u8): u8
+            if value >= 'a' and value <= 'z'
+                return value - 32
+            else
+                return value
+            end
+        end
+
+        reentrant function text_matches(left_text: near ^u8, right_text: near ^u8): u8
+            var left: u8
+            var right: u8
+            while left_text^ != 0 and right_text^ != 0
+                left = normalized(left_text^)
+                right = normalized(right_text^)
+                if left != right
+                    return 0
+                end
+                left_text = left_text + 1
+                right_text = right_text + 1
+            end
+            if left_text^ == 0 and right_text^ == 0
+                return 1
+            else
+                return 0
+            end
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x040008), 1);
+}
+
+#[test]
+fn generated_frontend_reentrant_call_args_preserve_stack_offsets_after_pushes() {
+    let binary = assemble_source_fixture(
+        "frontend-reentrant-call-args-preserve-stack-offsets",
+        "
+        module ReentrantCallArgStackOffsetDemo
+
+        fixed($400a) var entry_buffer: [16]u8
+        fixed($4010) var name_buffer: [4]u8
+
+        export far procedure main()
+            name_buffer[0] = 'S'
+            name_buffer[1] = 'Y'
+            name_buffer[2] = 'S'
+            name_buffer[3] = 0
+            start()
+            return
+        end
+
+        reentrant procedure start()
+            var name: near ^u8
+            name = $4010
+            write_entry($400a, name, 65, 0)
+            return
+        end
+
+        reentrant procedure write_entry(dta: near ^u8, name: near ^u8, size: u16, attr: u8)
+            dta^ = attr
+            dta = dta + 1
+            dta^ = u8(size)
+            dta = dta + 1
+            dta^ = 0
+            dta = dta + 1
+            dta^ = name^
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x02400a), 0);
+    assert_eq!(memory.byte(0x02400b), 65);
+    assert_eq!(memory.byte(0x02400c), 0);
+    assert_eq!(memory.byte(0x02400d), b'S');
+}
+
+#[test]
 fn generated_frontend_fixed_volatile_io_program_runs() {
     let binary = assemble_source_fixture(
         "frontend-fixed-volatile",

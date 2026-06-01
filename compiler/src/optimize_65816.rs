@@ -284,7 +284,7 @@ fn remove_redundant_accumulator_loads(insts: &[AsmInst]) -> Vec<AsmInst> {
                 out.push(inst.clone());
                 state.a_changed_with_matching_flags();
             }
-            AsmInst::Txa | AsmInst::Tya | AsmInst::Pla => {
+            AsmInst::Txa | AsmInst::Tya => {
                 out.push(inst.clone());
                 state.a_changed_with_matching_flags();
             }
@@ -296,10 +296,7 @@ fn remove_redundant_accumulator_loads(insts: &[AsmInst]) -> Vec<AsmInst> {
             | AsmInst::Ldy(_)
             | AsmInst::Inx
             | AsmInst::Inc(_)
-            | AsmInst::Dec(_)
-            | AsmInst::Plx
-            | AsmInst::Ply
-            | AsmInst::Plp => {
+            | AsmInst::Dec(_) => {
                 out.push(inst.clone());
                 state.flags_no_longer_match_a();
             }
@@ -321,21 +318,33 @@ fn remove_redundant_accumulator_loads(insts: &[AsmInst]) -> Vec<AsmInst> {
                 out.push(inst.clone());
                 state.clear();
             }
-            AsmInst::Bra(_) | AsmInst::Brl(_) => {
-                out.push(inst.clone());
-                state.clear();
-            }
-            AsmInst::Clc
-            | AsmInst::Sec
-            | AsmInst::Pha
+            AsmInst::Pha
             | AsmInst::Phx
             | AsmInst::Phy
             | AsmInst::Php
             | AsmInst::Phb
             | AsmInst::Phk
             | AsmInst::Pea(_)
-            | AsmInst::Per(_)
-            | AsmInst::Plb
+            | AsmInst::Per(_) => {
+                out.push(inst.clone());
+                state.invalidate_stack_aliases();
+            }
+            AsmInst::Pla => {
+                out.push(inst.clone());
+                state.invalidate_stack_aliases();
+                state.a_changed_with_matching_flags();
+            }
+            AsmInst::Plx | AsmInst::Ply | AsmInst::Plp | AsmInst::Plb => {
+                out.push(inst.clone());
+                state.invalidate_stack_aliases();
+                state.flags_no_longer_match_a();
+            }
+            AsmInst::Bra(_) | AsmInst::Brl(_) => {
+                out.push(inst.clone());
+                state.clear();
+            }
+            AsmInst::Clc
+            | AsmInst::Sec
             | AsmInst::Beq(_)
             | AsmInst::Bne(_)
             | AsmInst::Bcc(_)
@@ -389,6 +398,10 @@ impl AccumulatorState {
             .retain(|alias| operand_alias_survives_store(alias, operand));
     }
 
+    fn invalidate_stack_aliases(&mut self) {
+        self.aliases.retain(operand_survives_stack_pointer_change);
+    }
+
     fn add_alias(&mut self, operand: Operand) {
         if !self.aliases.iter().any(|alias| alias == &operand) {
             self.aliases.push(operand);
@@ -396,12 +409,41 @@ impl AccumulatorState {
     }
 }
 
+fn operand_survives_stack_pointer_change(operand: &Operand) -> bool {
+    !matches!(
+        operand,
+        Operand::StackRelative(_) | Operand::StackRelativeIndirectIndexedY(_)
+    )
+}
+
 fn operand_alias_survives_store(alias: &Operand, store: &Operand) -> bool {
     if alias == store {
         return true;
     }
+    !matches!(
+        (alias, store),
+        (Operand::Absolute(_), Operand::Absolute(_))
+            | (Operand::Absolute(_), Operand::AbsoluteIndexedX(_))
+            | (Operand::AbsoluteIndexedX(_), Operand::Absolute(_))
+            | (Operand::AbsoluteIndexedX(_), Operand::AbsoluteIndexedX(_))
+            | (Operand::Direct(_), Operand::Direct(_))
+            | (Operand::Direct(_), Operand::DirectIndexedX(_))
+            | (Operand::DirectIndexedX(_), Operand::Direct(_))
+            | (Operand::DirectIndexedX(_), Operand::DirectIndexedX(_))
+            | (Operand::StackRelative(_), Operand::StackRelative(_))
+            | (
+                Operand::StackRelativeIndirectIndexedY(_),
+                Operand::StackRelativeIndirectIndexedY(_)
+            )
+    )
+}
 
-    matches!(alias, Operand::Immediate(_) | Operand::ImmediateSymbol(_))
+fn memory_alias_survives_unrelated_store(alias: &Operand, store: &Operand) -> bool {
+    match (alias, store) {
+        (Operand::Immediate(_), _) | (Operand::ImmediateSymbol(_), _) => true,
+        _ if alias == store => false,
+        _ => operand_alias_survives_store(alias, store),
+    }
 }
 
 fn accumulator_load_cacheable(operand: &Operand) -> bool {
@@ -416,10 +458,7 @@ fn accumulator_load_cacheable(operand: &Operand) -> bool {
 }
 
 fn accumulator_store_cacheable(operand: &Operand) -> bool {
-    matches!(
-        operand,
-        Operand::Direct(_) | Operand::DirectIndexedX(_) | Operand::StackRelative(_)
-    )
+    matches!(operand, Operand::Direct(_) | Operand::StackRelative(_))
 }
 
 fn remove_redundant_index_loads(insts: &[AsmInst]) -> Vec<AsmInst> {
@@ -481,29 +520,16 @@ impl IndexLoadState {
                 self.x.flags_no_longer_match();
                 self.y.flags_match = true;
             }
-            AsmInst::Inx | AsmInst::Plx => {
+            AsmInst::Inx => {
                 self.x.aliases.clear();
                 self.x.flags_match = true;
                 self.y.flags_no_longer_match();
             }
-            AsmInst::Ply => {
-                self.y.aliases.clear();
-                self.y.flags_match = true;
-                self.x.flags_no_longer_match();
-            }
-            AsmInst::Lda(_)
-            | AsmInst::Adc(_)
-            | AsmInst::Sbc(_)
-            | AsmInst::And(_)
-            | AsmInst::Pla => {
+            AsmInst::Lda(_) | AsmInst::Adc(_) | AsmInst::Sbc(_) | AsmInst::And(_) => {
                 self.x.flags_no_longer_match();
                 self.y.flags_no_longer_match();
             }
-            AsmInst::Cmp(_)
-            | AsmInst::Cpx(_)
-            | AsmInst::Inc(_)
-            | AsmInst::Dec(_)
-            | AsmInst::Plp => {
+            AsmInst::Cmp(_) | AsmInst::Cpx(_) | AsmInst::Inc(_) | AsmInst::Dec(_) => {
                 self.x.flags_no_longer_match();
                 self.y.flags_no_longer_match();
             }
@@ -540,25 +566,29 @@ impl IndexLoadState {
             | AsmInst::Xba
             | AsmInst::Tsc
             | AsmInst::Tcs
+            | AsmInst::Pla
+            | AsmInst::Plx
+            | AsmInst::Ply
+            | AsmInst::Plp
+            | AsmInst::Plb
             | AsmInst::Bra(_)
             | AsmInst::Brl(_)
             | AsmInst::Beq(_)
             | AsmInst::Bne(_)
             | AsmInst::Bcc(_)
             | AsmInst::Bcs(_) => self.clear(),
-            AsmInst::Clc
-            | AsmInst::Sec
-            | AsmInst::Pha
+            AsmInst::Pha
             | AsmInst::Phx
             | AsmInst::Phy
             | AsmInst::Php
             | AsmInst::Phb
             | AsmInst::Phk
             | AsmInst::Pea(_)
-            | AsmInst::Per(_)
-            | AsmInst::Plb
-            | AsmInst::Nop
-            | AsmInst::Stp => {}
+            | AsmInst::Per(_) => {
+                self.x.invalidate_stack_aliases();
+                self.y.invalidate_stack_aliases();
+            }
+            AsmInst::Clc | AsmInst::Sec | AsmInst::Nop | AsmInst::Stp => {}
         }
     }
 
@@ -600,6 +630,10 @@ impl RegisterAliasState {
     fn invalidate_memory_aliases_for_unrelated_store(&mut self, operand: &Operand) {
         self.aliases
             .retain(|alias| memory_alias_survives_unrelated_store(alias, operand));
+    }
+
+    fn invalidate_stack_aliases(&mut self) {
+        self.aliases.retain(operand_survives_stack_pointer_change);
     }
 
     fn add_alias(&mut self, operand: Operand) {
@@ -676,10 +710,10 @@ impl IndexTransferState {
                 self.invalidate_a_memory_aliases_for_unrelated_store(operand);
                 self.invalidate_x_memory_aliases_for_unrelated_store(operand);
             }
-            AsmInst::Adc(_) | AsmInst::Sbc(_) | AsmInst::And(_) | AsmInst::Tya | AsmInst::Pla => {
+            AsmInst::Adc(_) | AsmInst::Sbc(_) | AsmInst::And(_) | AsmInst::Tya => {
                 self.a_aliases.clear();
             }
-            AsmInst::Inx | AsmInst::Plx => {
+            AsmInst::Inx => {
                 self.x_aliases.clear();
             }
             AsmInst::Mode(_)
@@ -693,6 +727,19 @@ impl IndexTransferState {
             | AsmInst::Xba
             | AsmInst::Tsc
             | AsmInst::Tcs
+            | AsmInst::Pha
+            | AsmInst::Phx
+            | AsmInst::Phy
+            | AsmInst::Php
+            | AsmInst::Phb
+            | AsmInst::Phk
+            | AsmInst::Pea(_)
+            | AsmInst::Per(_)
+            | AsmInst::Pla
+            | AsmInst::Plx
+            | AsmInst::Ply
+            | AsmInst::Plp
+            | AsmInst::Plb
             | AsmInst::Bra(_)
             | AsmInst::Brl(_)
             | AsmInst::Beq(_)
@@ -701,23 +748,12 @@ impl IndexTransferState {
             | AsmInst::Bcs(_) => self.clear(),
             AsmInst::Ldy(_)
             | AsmInst::Tay
-            | AsmInst::Phx
-            | AsmInst::Phy
-            | AsmInst::Php
-            | AsmInst::Phb
-            | AsmInst::Phk
-            | AsmInst::Pea(_)
-            | AsmInst::Per(_)
-            | AsmInst::Ply
-            | AsmInst::Plp
-            | AsmInst::Plb
             | AsmInst::Cmp(_)
             | AsmInst::Cpx(_)
             | AsmInst::Inc(_)
             | AsmInst::Dec(_)
             | AsmInst::Clc
             | AsmInst::Sec
-            | AsmInst::Pha
             | AsmInst::Nop
             | AsmInst::Stp => {}
         }
@@ -753,10 +789,6 @@ impl IndexTransferState {
             self.x_aliases.push(operand);
         }
     }
-}
-
-fn memory_alias_survives_unrelated_store(alias: &Operand, store: &Operand) -> bool {
-    alias != store && matches!(alias, Operand::Immediate(_) | Operand::ImmediateSymbol(_))
 }
 
 fn load_uses_index_x(inst: &AsmInst) -> bool {
@@ -967,6 +999,28 @@ mod tests {
                 AsmInst::Sta(Operand::Direct(Symbol::Named("slot".to_owned()))),
                 AsmInst::Pha,
                 AsmInst::Adc(Operand::Immediate(Immediate::Word(1))),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_stack_relative_reload_after_stack_push() {
+        let module = module(vec![
+            AsmInst::Mode(Mode::Acc16Index16),
+            AsmInst::Lda(Operand::StackRelative(4)),
+            AsmInst::Pha,
+            AsmInst::Lda(Operand::StackRelative(4)),
+            AsmInst::Pha,
+        ]);
+
+        assert_eq!(
+            optimized_insts(&module),
+            vec![
+                AsmInst::Mode(Mode::Acc16Index16),
+                AsmInst::Lda(Operand::StackRelative(4)),
+                AsmInst::Pha,
+                AsmInst::Lda(Operand::StackRelative(4)),
+                AsmInst::Pha,
             ]
         );
     }

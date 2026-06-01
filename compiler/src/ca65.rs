@@ -60,8 +60,10 @@ pub fn emit_module(module: &AsmModule) -> String {
         out.push('\n');
     }
 
+    let code_segment = code_segment(module);
+
     if !module.static_data.is_empty() {
-        out.push_str(".segment \"CODE\"\n");
+        emit_code_segment(&mut out, code_segment);
         for data in &module.static_data {
             out.push_str(&data.name);
             out.push_str(":\n");
@@ -105,7 +107,8 @@ pub fn emit_module(module: &AsmModule) -> String {
         out.push('\n');
     }
 
-    out.push_str(".code\n\n");
+    emit_code_segment(&mut out, code_segment);
+    out.push('\n');
 
     for routine in &module.routines {
         emit_routine(&mut out, routine);
@@ -113,6 +116,25 @@ pub fn emit_module(module: &AsmModule) -> String {
     }
 
     out
+}
+
+fn code_segment(module: &AsmModule) -> &str {
+    module
+        .metadata
+        .iter()
+        .find(|metadata| metadata.key == "code_segment")
+        .map(|metadata| metadata.value.as_str())
+        .unwrap_or("CODE")
+}
+
+fn emit_code_segment(out: &mut String, segment: &str) {
+    if segment == "CODE" {
+        out.push_str(".code\n");
+    } else {
+        out.push_str(".segment \"");
+        out.push_str(segment);
+        out.push_str("\"\n");
+    }
 }
 
 fn vector_segment(name: &str) -> &'static str {

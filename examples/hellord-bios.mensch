@@ -12,6 +12,7 @@ const BIOS_BBLKSTAT = $0200
 const BIOS_BBLKCOUNT = $0201
 const BIOS_BSETLBA = $0202
 const BIOS_BREAD = $0203
+const BIOS_BWRITE = $0204
 const BIOS_DEV_FIRST = $0100
 const BIOS_DEV_NEXT = $0101
 const BIOS_DEV_PARENT = $0102
@@ -140,6 +141,10 @@ end
 
 export reentrant function bios_block_read(dev: u16, buffer: near ^u8): u16
     return cop_call(BIOS_FAMILY, BIOS_BREAD, dev, u16(buffer))
+end
+
+export reentrant function bios_block_write(dev: u16, buffer: near ^u8): u16
+    return cop_call(BIOS_FAMILY, BIOS_BWRITE, dev, u16(buffer))
 end
 
 export procedure bios_init_registry()
@@ -442,6 +447,34 @@ reentrant function bios_dispatch_block_read(): u16
     end
 end
 
+reentrant function bios_dispatch_block_write(): u16
+    var buffer: near ^u8
+    var index: u16
+    if bios_find_device() != 0
+        if bios_device == block_device.id
+            buffer = bios_arg
+            block_index_lo = 0
+            block_index_hi = 0
+            index = 0
+            while index != $0200
+                block_data = buffer^
+                buffer = buffer + 1
+                index = index + 1
+            end
+            block_command = BLOCK_COMMAND_WRITE
+            if block_error != 0
+                return u16(block_error)
+            else
+                return 0
+            end
+        else
+            return $ffff
+        end
+    else
+        return $ffff
+    end
+end
+
 export reentrant function bios_trap_dispatch(call: u16, dev: u16, arg: u16): u16
     bios_call = call
     bios_device = dev
@@ -463,6 +496,8 @@ export reentrant function bios_trap_dispatch(call: u16, dev: u16, arg: u16): u16
         return bios_dispatch_block_set_lba()
     elsif bios_call == BIOS_BREAD
         return bios_dispatch_block_read()
+    elsif bios_call == BIOS_BWRITE
+        return bios_dispatch_block_write()
     elsif bios_call == BIOS_DEV_FIRST
         bios_ensure_registry()
         return bios_first_device

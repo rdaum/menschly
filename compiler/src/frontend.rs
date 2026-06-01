@@ -3228,6 +3228,7 @@ mod tests {
         let source = "
             module Kernel
             metadata platform = \"c256\"
+            metadata code_segment = \"BANK1\"
             vector irq = vblank
             fixed($040005) volatile var io: u8
             export bank(2) var page: u16
@@ -3255,9 +3256,11 @@ mod tests {
         assert!(asm.contains("io = $040005\n"));
         assert!(asm.contains(".segment \"BANK2\"\n"));
         assert!(asm.contains(".export page\n"));
+        assert!(asm.contains(".segment \"BANK1\"\n\n.proc vblank\n"));
         assert!(asm.contains("__vector_irq: .addr vblank\n"));
         assert!(asm.contains(".segment \"MENSCH_META\"\n"));
         assert!(asm.contains("\t.asciiz \"platform=c256\"\n"));
+        assert!(asm.contains("\t.asciiz \"code_segment=BANK1\"\n"));
         assert!(asm.contains("\tnop\n"));
         assert!(asm.contains("\tphp\n"));
         assert!(asm.contains("\tphb\n"));

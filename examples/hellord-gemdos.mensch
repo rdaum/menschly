@@ -8,6 +8,15 @@ external reentrant function bios_device_first(): u16
 external reentrant function bios_device_next(dev: u16): u16
 external reentrant function bios_device_kind(dev: u16): u16
 external reentrant function bios_device_flags(dev: u16): u16
+external reentrant function dos_get_drive_index(): u16
+external reentrant function dos_set_drive_index(drive: u16): u16
+external reentrant function dos_set_path(path: near ^u8): u16
+external reentrant function dos_fsfirst(dta: near ^u8): u16
+external reentrant function dos_fsnext(dta: near ^u8): u16
+external reentrant function dos_fopen(path: near ^u8): u16
+external reentrant function dos_fread(handle: u16, count: u16, buffer: near ^u8): u16
+external reentrant function dos_fwrite(handle: u16, count: u16, buffer: near ^u8): u16
+external reentrant function dos_fclose(handle: u16): u16
 
 const DEVICE_KIND_CHAR = $0001
 const DEVICE_FLAG_READ = $0001
@@ -19,7 +28,16 @@ const GEMDOS_FAMILY = $01
 const GEMDOS_CCONIN = $0001
 const GEMDOS_CCONOUT = $0002
 const GEMDOS_CCONIS = $000b
+const GEMDOS_DSETDRV = $000e
+const GEMDOS_FCLOSE = $003e
+const GEMDOS_FREAD = $003f
+const GEMDOS_FWRITE = $0040
+const GEMDOS_FOPEN = $003d
 const GEMDOS_CCONOS = $0010
+const GEMDOS_DGETDRV = $0019
+const GEMDOS_DSETPATH = $003b
+const GEMDOS_FSFIRST = $004e
+const GEMDOS_FSNEXT = $004f
 const GEMDOS_GET_STDDEV = $0100
 const GEMDOS_SET_STDDEV = $0101
 
@@ -58,6 +76,44 @@ export reentrant procedure gemdos_set_stddev(stream: u16, dev: u16)
     var status: u16
     status = cop_call(GEMDOS_FAMILY, GEMDOS_SET_STDDEV, stream, dev)
     return
+end
+
+export reentrant function gemdos_dgetdrv(): u16
+    return cop_call(GEMDOS_FAMILY, GEMDOS_DGETDRV, 0, 0)
+end
+
+export reentrant function gemdos_dsetdrv(drive: u16): u16
+    return cop_call(GEMDOS_FAMILY, GEMDOS_DSETDRV, drive, 0)
+end
+
+export reentrant function gemdos_dsetpath(path: near ^u8): u16
+    return cop_call(GEMDOS_FAMILY, GEMDOS_DSETPATH, u16(path), 0)
+end
+
+export reentrant function gemdos_fsfirst(pattern: near ^u8, dta: near ^u8): u16
+    return cop_call(GEMDOS_FAMILY, GEMDOS_FSFIRST, u16(pattern), u16(dta))
+end
+
+export reentrant function gemdos_fsnext(dta: near ^u8): u16
+    return cop_call(GEMDOS_FAMILY, GEMDOS_FSNEXT, u16(dta), 0)
+end
+
+export reentrant function gemdos_fopen(path: near ^u8, mode: u16): u16
+    return cop_call(GEMDOS_FAMILY, GEMDOS_FOPEN, u16(path), mode)
+end
+
+export reentrant function gemdos_fread(handle: u16, count: u16, buffer: near ^u8): u16
+    gemdos_arg_word = count
+    return cop_call(GEMDOS_FAMILY, GEMDOS_FREAD, handle, u16(buffer))
+end
+
+export reentrant function gemdos_fwrite(handle: u16, count: u16, buffer: near ^u8): u16
+    gemdos_arg_word = count
+    return cop_call(GEMDOS_FAMILY, GEMDOS_FWRITE, handle, u16(buffer))
+end
+
+export reentrant function gemdos_fclose(handle: u16): u16
+    return cop_call(GEMDOS_FAMILY, GEMDOS_FCLOSE, handle, 0)
 end
 
 export reentrant procedure gemdos_init()
@@ -143,6 +199,42 @@ reentrant procedure gemdos_impl_cconout(ch: u8)
     return
 end
 
+reentrant function gemdos_impl_dgetdrv(): u16
+    return dos_get_drive_index()
+end
+
+reentrant function gemdos_impl_dsetdrv(drive: u16): u16
+    return dos_set_drive_index(drive)
+end
+
+reentrant function gemdos_impl_dsetpath(path: near ^u8): u16
+    return dos_set_path(path)
+end
+
+reentrant function gemdos_impl_fsfirst(pattern: near ^u8, dta: near ^u8): u16
+    return dos_fsfirst(dta)
+end
+
+reentrant function gemdos_impl_fsnext(dta: near ^u8): u16
+    return dos_fsnext(dta)
+end
+
+reentrant function gemdos_impl_fopen(path: near ^u8, mode: u16): u16
+    return dos_fopen(path)
+end
+
+reentrant function gemdos_impl_fread(handle: u16, buffer: near ^u8): u16
+    return dos_fread(handle, gemdos_arg_word, buffer)
+end
+
+reentrant function gemdos_impl_fwrite(handle: u16, buffer: near ^u8): u16
+    return dos_fwrite(handle, gemdos_arg_word, buffer)
+end
+
+reentrant function gemdos_impl_fclose(handle: u16): u16
+    return dos_fclose(handle)
+end
+
 export reentrant function gemdos_trap_dispatch(call: u16, arg0: u16, arg1: u16): u16
     if call == GEMDOS_CCONIS
         return gemdos_impl_cconis()
@@ -153,6 +245,24 @@ export reentrant function gemdos_trap_dispatch(call: u16, arg0: u16, arg1: u16):
     elsif call == GEMDOS_CCONOUT
         gemdos_impl_cconout(u8(arg0))
         return 0
+    elsif call == GEMDOS_DSETDRV
+        return gemdos_impl_dsetdrv(arg0)
+    elsif call == GEMDOS_DGETDRV
+        return gemdos_impl_dgetdrv()
+    elsif call == GEMDOS_DSETPATH
+        return gemdos_impl_dsetpath(arg0)
+    elsif call == GEMDOS_FOPEN
+        return gemdos_impl_fopen(arg0, arg1)
+    elsif call == GEMDOS_FCLOSE
+        return gemdos_impl_fclose(arg0)
+    elsif call == GEMDOS_FREAD
+        return gemdos_impl_fread(arg0, arg1)
+    elsif call == GEMDOS_FWRITE
+        return gemdos_impl_fwrite(arg0, arg1)
+    elsif call == GEMDOS_FSFIRST
+        return gemdos_impl_fsfirst(arg0, arg1)
+    elsif call == GEMDOS_FSNEXT
+        return gemdos_impl_fsnext(arg0)
     elsif call == GEMDOS_GET_STDDEV
         return gemdos_impl_get_stddev(arg0)
     elsif call == GEMDOS_SET_STDDEV
