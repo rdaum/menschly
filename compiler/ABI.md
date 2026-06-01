@@ -158,8 +158,23 @@ X = device      ; 2 is the console device
 
 It returns `$ffff` in `A` when the device can accept output and `0` otherwise.
 The BIOS implementation routes these calls through a small typed device
-registry. The initial registry has one character device, TOS `CON` device `2`,
-backed by the x65-alike USB UART.
+registry. The initial registry has two root/list devices:
+
+```text
+device 2        ; TOS CON-shaped character device
+kind = $0001    ; character I/O
+flags = $0003   ; readable and writable
+driver = $0001  ; x65-alike USB UART
+next = 8
+
+device 8        ; first block device
+kind = $0002    ; block I/O
+flags = $0003   ; readable and writable
+driver = $0002  ; x65-alike block disk registers
+next = 0
+```
+
+Both initial devices have parent and first child set to `0`.
 
 Hellord also reserves a small private BIOS range for walking that device
 registry:
@@ -174,18 +189,56 @@ A = $0105       ; device flags, X = device, returns flags or 0
 A = $0106       ; device driver, X = device, returns driver id or 0
 ```
 
-The initial device tree has a single root/list node: device `2`, kind
-`$0001` for character I/O, flags `$0003` for readable and writable, and driver
-`$0001` for the x65-alike serial UART. Parent, first child, and next sibling
-are all `0` until more devices are registered.
+The current BIOS block calls are deliberately small and device-oriented. They
+target physical BIOS device ids, not GEMDOS drive letters:
 
-Block storage is intended to follow the same BIOS/GEMDOS layering as TOS-like
-systems: BIOS owns physical block devices and media status, while GEMDOS owns
-drive letters, paths, and filesystem interpretation. The emulator now provides
-a simple 512-byte-sector block backend at `$9F60..$9F6D`; the next BIOS surface
-should be an `Rwabs`-style transfer call that accepts a device or drive number,
-a sector number, a count, and a memory buffer. FAT12/FAT16/FAT32 code should sit
-above that block API rather than talking directly to emulator registers or to a
+```text
+COP #$0d
+A = $0200       ; Bblkstat
+X = device      ; 8 is the first block device
+```
+
+`Bblkstat` returns the low byte of the x65-alike block status register in `A`.
+The current status bits are `$01` for media present and `$02` for writable.
+
+```text
+COP #$0d
+A = $0201       ; Bblkcount
+X = device
+```
+
+`Bblkcount` returns the attached media sector count in `A`. The current BIOS
+wrapper exposes the emulator's 16-bit sector-count register, so this is enough
+for small test images but not a final large-disk ABI.
+
+```text
+COP #$0d
+A = $0202       ; Bsetlba
+X = device
+Y = low 16 bits of LBA
+```
+
+`Bsetlba` selects the next sector for transfer. The current wrapper clears the
+high 16 bits of the emulator LBA, so it addresses only the first 65,536 sectors.
+
+```text
+COP #$0d
+A = $0203       ; Bread
+X = device
+Y = near pointer to a 512-byte destination buffer
+```
+
+`Bread` reads one 512-byte sector from the selected LBA into the destination
+buffer and returns `0` on success or a block-device error code in `A`.
+
+Block storage is still intended to follow the same BIOS/GEMDOS layering as
+TOS-like systems: BIOS owns physical block devices and media status, while
+GEMDOS owns drive letters, paths, and filesystem interpretation. Hellord's
+`BLKINFO` command currently calls the BIOS block surface directly as a bring-up
+test. The next DOS-facing surface should be an `Rwabs`-style transfer call that
+maps a drive or logical block device to BIOS device `8`, accepts a sector
+number, a count, and a memory buffer, and keeps FAT12/FAT16/FAT32 code above
+that raw block API rather than talking directly to emulator registers or to a
 future VERA/SPI transport.
 
 The Hellord GEMDOS layer owns the standard stream bindings instead of hardcoding
