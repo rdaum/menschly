@@ -156,22 +156,26 @@ The crate also provides a small runner binary:
 cargo run --manifest-path x65alike-emul/Cargo.toml --bin x65alike-emul -- path/to/image.xex
 ```
 
-The runner currently accepts raw binaries and ld65's Atari/XEX output format.
-Format auto-detection is intentionally conservative: `.xex` and `.obx` files
-are parsed as Atari/XEX, `.bin` and `.raw` files are treated as flat binaries,
-and extensionless files default to raw unless `--format xex` is supplied.
+The runner currently accepts raw binaries, ld65's Atari/XEX output format, and a
+small x65-native container format. Format auto-detection is intentionally
+conservative: `.xex` and `.obx` files are parsed as Atari/XEX, `.x65` and
+`.x65img` files are parsed as x65-native images, `.bin` and `.raw` files are
+treated as flat binaries, and extensionless files default to raw unless
+`--format` is supplied.
 
 For raw binaries, the image is loaded at `$02_0000` by default and execution
 starts at `PBR:PC = $02:$0000`. For Atari/XEX images, each block is loaded at
 its 16-bit address in bank zero, and the optional `RUNAD` block sets the initial
-PC. Stdin is queued as USB UART input, and bytes written to `USB_UART_DATA` are
-streamed to stdout.
+PC. For x65-native images, each block carries a 24-bit SRAM load address and the
+entry point carries both PBR and PC. Stdin is queued as USB UART input, and bytes
+written to `USB_UART_DATA` are streamed to stdout.
 
 Common options:
 
 ```sh
 x65alike-emul program.xex
 x65alike-emul --format xex program
+x65alike-emul --format x65 banked-os.x65
 x65alike-emul --format raw --load $020000 --pc $0000 --pbr $02 --max-steps 100000 image.bin
 x65alike-emul --stop-at $03:$1234 image.bin
 x65alike-emul --disk fat32.img program.xex
@@ -193,9 +197,18 @@ FORMATS {
 
 Atari/XEX is useful as a common ld65-emitted, address-bearing test image format,
 but it is still a 16-bit loader format. It cannot describe arbitrary 65816
-program banks. Use a raw image with an explicit `--load` address for simple
-24-bit bank tests until a 24-bit address-bearing format such as S-record is
-implemented.
+program banks. The x65-native image format fills that gap for emulator-backed
+OS work. Its current binary layout is:
+
+```text
+8 bytes  magic: "X65IMG01"
+3 bytes  little-endian 24-bit entry address
+2 bytes  little-endian block count
+repeat block count times:
+  3 bytes  little-endian 24-bit load address
+  4 bytes  little-endian byte count
+  n bytes  payload
+```
 
 The runner is deliberately minimal. It does not yet emulate reset-vector boot,
 NMI delivery, S-record/Intel HEX input, o65 host-side loading, SD-card SPI, or

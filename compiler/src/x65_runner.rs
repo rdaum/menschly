@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
 use x65alike_emul::{
-    image::{load_image, ImageFormat, LoadedImage},
+    image::{encode_x65_image, load_image, CpuStart, ImageFormat, LoadedImage, LoadedRange},
     Machine,
 };
 
@@ -23,6 +23,12 @@ static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 
 pub struct BuildOutput {
     pub image: LoadedImage,
+}
+
+#[derive(Debug, Clone)]
+pub struct X65ImageBlock {
+    pub address: u32,
+    pub path: PathBuf,
 }
 
 pub struct RunResult {
@@ -131,6 +137,99 @@ pub fn build_mensch_xex_sources(
     let xex = fs::read(&xex_path)
         .map_err(|error| format!("failed to read {}: {error}", xex_path.display()))?;
     let image = load_image(&xex_path, &xex, ImageFormat::Auto, DEFAULT_RAW_LOAD_ADDR)?;
+
+    Ok(BuildOutput { image })
+}
+
+pub fn build_mensch_x65_image_sources(
+    name: &str,
+    source_paths: &[PathBuf],
+    cfg_path: impl AsRef<Path>,
+    entry: CpuStart,
+    blocks: &[X65ImageBlock],
+) -> Result<BuildOutput, String> {
+    if blocks.is_empty() {
+        return Err("at least one x65 image block is required".to_owned());
+    }
+
+    let dir = temp_dir(name);
+    fs::create_dir_all(&dir).map_err(|error| format!("failed to create build dir: {error}"))?;
+    let mut obj_paths = Vec::new();
+    let mut storage_assignments = Vec::new();
+
+    for (index, source_path) in source_paths.iter().enumerate() {
+        let stem = source_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("source");
+        let asm_path = dir.join(format!("{index}-{stem}.a65"));
+        let obj_path = dir.join(format!("{index}-{stem}.o"));
+
+        let source = fs::read_to_string(source_path)
+            .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
+        let module = frontend::compile_source(&source).map_err(|error| error.to_string())?;
+        let used_direct_page = storage_assignments
+            .iter()
+            .map(|assignment: &storage::StorageAssignment| assignment.direct_page_bytes)
+            .sum::<u16>();
+        let remaining_direct_page =
+            storage::DEFAULT_DIRECT_PAGE_BUDGET.saturating_sub(used_direct_page);
+        let (lowered, assignment) =
+            lower_65816::lower_module_with_storage_budget(&module, remaining_direct_page)
+                .map_err(|error| error.to_string())?;
+        storage_assignments.push(assignment);
+        fs::write(&asm_path, ca65::emit_module(&lowered))
+            .map_err(|error| format!("failed to write {}: {error}", asm_path.display()))?;
+
+        run_command(
+            Command::new("ca65")
+                .arg("-g")
+                .arg("--cpu")
+                .arg("65816")
+                .arg(&asm_path)
+                .arg("-o")
+                .arg(&obj_path),
+        )?;
+        obj_paths.push(obj_path);
+    }
+
+    storage::validate_direct_page_budget(&storage_assignments, storage::DEFAULT_DIRECT_PAGE_BUDGET)
+        .map_err(|error| error.to_string())?;
+
+    let cfg_path = fs::canonicalize(cfg_path.as_ref())
+        .map_err(|error| format!("failed to resolve linker config: {error}"))?;
+    let mut ld65 = Command::new("ld65");
+    ld65.current_dir(&dir)
+        .arg("-C")
+        .arg(&cfg_path)
+        .arg("-o")
+        .arg("linked.bin");
+    for obj_path in &obj_paths {
+        ld65.arg(obj_path);
+    }
+    run_command(&mut ld65)?;
+
+    let ranges = blocks
+        .iter()
+        .map(|block| {
+            let bytes = fs::read(dir.join(&block.path)).map_err(|error| {
+                format!(
+                    "failed to read linked x65 block {}: {error}",
+                    block.path.display()
+                )
+            })?;
+            Ok(LoadedRange {
+                address: block.address,
+                bytes,
+                cpu_visible: false,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let bytes = encode_x65_image(entry, &ranges)?;
+    let image_path = dir.join(format!("{name}.x65"));
+    fs::write(&image_path, &bytes)
+        .map_err(|error| format!("failed to write {}: {error}", image_path.display()))?;
+    let image = load_image(&image_path, &bytes, ImageFormat::X65, DEFAULT_RAW_LOAD_ADDR)?;
 
     Ok(BuildOutput { image })
 }

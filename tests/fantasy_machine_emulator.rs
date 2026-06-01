@@ -4,13 +4,13 @@ use std::process::Command;
 use mensch_systems_tests::{ca65, frontend, lower_65816, storage, x65_runner};
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
 use x65alike_emul::{
-    Machine, RAMBLOCK_REG, ROMBLOCK_REG, USB_UART_CTRL, USB_UART_CTRL_IRQ_RX_NOT_EMPTY,
-    USB_UART_CTRL_IRQ_TX_NOT_FULL, USB_UART_DATA, USB_UART_STAT,
+    image::CpuStart, Machine, RAMBLOCK_REG, ROMBLOCK_REG, USB_UART_CTRL,
+    USB_UART_CTRL_IRQ_RX_NOT_EMPTY, USB_UART_CTRL_IRQ_TX_NOT_FULL, USB_UART_DATA, USB_UART_STAT,
 };
 
 use x65_runner::{
-    build_mensch_xex_sources, machine_with_loaded_image, run_image_until_output, temp_dir,
-    BlockDeviceConfig, RunConfig,
+    build_mensch_x65_image_sources, build_mensch_xex_sources, machine_with_loaded_image,
+    run_image_until_output, temp_dir, BlockDeviceConfig, RunConfig, X65ImageBlock,
 };
 
 const ROUTINE_ADDR: usize = 0x020000;
@@ -252,6 +252,70 @@ fn language_serial_program_runs_on_fantasy_machine() {
     let (_cpu, machine) = run_loaded_routine(machine);
 
     assert_eq!(machine.serial_output(), b"OK!");
+}
+
+#[test]
+fn language_banked_x65_image_loads_and_runs_from_24_bit_entry() {
+    let dir = temp_dir("language-banked-x65-image");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let source_path = dir.join("banked.mensch");
+    let cfg_path = dir.join("banked.cfg");
+
+    fs::write(
+        &source_path,
+        format!(
+            "
+            module BankedImage
+            application main
+            metadata code_segment = \"BANK1\"
+            fixed(${serial_data:06x}) volatile var serial_data: u8
+
+            procedure main()
+                serial_data = 'B'
+                serial_data = '1'
+                asm \"stp\"
+                return
+            end
+            ",
+            serial_data = USB_UART_DATA,
+        ),
+    )
+    .expect("banked source should be written");
+    fs::write(
+        &cfg_path,
+        "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  BANK1: start = $01c000, size = $004000, file = \"bank1.bin\";\n  META: start = $01ff00, size = $000100, file = \"meta.bin\";\n  BSS: start = $018000, size = $001000, type = rw;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  BANK1: load = BANK1, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n}\n",
+    )
+    .expect("banked linker config should be written");
+
+    let build = build_mensch_x65_image_sources(
+        "language-banked-x65-image",
+        &[source_path],
+        &cfg_path,
+        CpuStart {
+            pbr: 0x01,
+            pc: 0xc000,
+        },
+        &[X65ImageBlock {
+            address: 0x01c000,
+            path: "bank1.bin".into(),
+        }],
+    )
+    .expect("banked x65 image should build");
+
+    let run = x65_runner::run_image(
+        &build.image,
+        RunConfig {
+            serial_input: Vec::new(),
+            max_steps: 50_000,
+            stop_after_output_len: Some(2),
+            live_input: None,
+            block_device: None,
+        },
+        &mut Vec::new(),
+    )
+    .expect("banked x65 image should run");
+
+    assert_eq!(run.output, b"B1");
 }
 
 #[test]

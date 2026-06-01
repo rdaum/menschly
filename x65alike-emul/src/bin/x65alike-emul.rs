@@ -365,7 +365,7 @@ fn usage() -> String {
     "usage: x65alike-emul [options] <image>\n\
      \n\
      Options:\n\
-       --format FORMAT   Image format: auto, raw, xex; default auto\n\
+       --format FORMAT   Image format: auto, raw, xex, x65; default auto\n\
        --load ADDR       Raw image load address, default $020000\n\
        --pc PC           Initial 16-bit PC, default image entry or $0000\n\
        --pbr BANK        Initial program bank, default image entry or $00\n\
