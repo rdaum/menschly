@@ -254,10 +254,14 @@ perform initial setup, install interrupt and trap entry points, select the
 needed ROM/RAM page, and then transfer into banked or paged OS code. The
 compiler supports a temporary module-level placement hook for this bring-up:
 `metadata code_segment = "BANK1"` emits that module's static data and routines
-into the named ca65 segment. The remaining work is to pair that with an
-x65-alike image format/link flow that can load those banked segments and with
-explicit long-call or page-switching conventions for crossing between the boot
-home and banked OS pages.
+into the named ca65 segment. `metadata data_segment = "CODE"` can keep static
+near-pointer data in bank 0 while routines live elsewhere. The x65-native image
+format can carry those segments as 24-bit load blocks with a 24-bit entry point.
+Calls declared as `external far procedure` or `external far function` lower to
+`JSL`, and far callees return with `RTL`, including the current direct-parameter
+passing scheme. The remaining work is to continue splitting Hellord's modules
+and to decide where explicit ROMBLOCK page-switching trampolines are needed
+instead of plain same-address-space long calls.
 
 There is intentionally no GEMDOS raw-sector syscall in this ABI. TOS had
 `Rwabs` in XBIOS, not GEMDOS, and Hellord does not need a public equivalent yet.

@@ -1,5 +1,5 @@
 use crate::ir::{
-    Address, Const, IrInst, Label, Local, Module, Routine, Storage, Type, Value, Width,
+    Abi, Address, Const, IrInst, Label, Local, Module, Routine, Storage, Type, Value, Width,
 };
 
 pub const COPY_SRC: u32 = 0x1000;
@@ -127,6 +127,7 @@ pub fn call_internal_procedure() -> Module {
                 .with_body(vec![
                     IrInst::CallProcedure {
                         name: "store_helper".to_owned(),
+                        abi: Abi::Internal,
                     },
                     IrInst::Return,
                 ]),
@@ -153,6 +154,7 @@ pub fn call_internal_function() -> Module {
                 .with_body(vec![
                     IrInst::CallFunction {
                         name: "value_helper".to_owned(),
+                        abi: Abi::Internal,
                         dst: Value::Accumulator,
                     },
                     IrInst::Store {

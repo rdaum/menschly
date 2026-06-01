@@ -319,6 +319,96 @@ fn language_banked_x65_image_loads_and_runs_from_24_bit_entry() {
 }
 
 #[test]
+fn language_x65_image_calls_far_procedure_in_another_bank() {
+    let dir = temp_dir("language-x65-far-bank-call");
+    fs::create_dir_all(&dir).expect("temp dir should be created");
+    let caller_path = dir.join("caller.mensch");
+    let callee_path = dir.join("callee.mensch");
+    let cfg_path = dir.join("banked-call.cfg");
+
+    fs::write(
+        &caller_path,
+        format!(
+            "
+            module BankedCaller
+            application main
+            fixed(${serial_data:06x}) volatile var serial_data: u8
+
+            external far procedure banked_write(value: u8)
+
+            export far procedure main()
+                serial_data = 'A'
+                banked_write('B')
+                serial_data = 'C'
+                asm \"stp\"
+                return
+            end
+            ",
+            serial_data = USB_UART_DATA,
+        ),
+    )
+    .expect("caller source should be written");
+    fs::write(
+        &callee_path,
+        format!(
+            "
+            module BankedCallee
+            metadata code_segment = \"BANK1\"
+            fixed(${serial_data:06x}) volatile var serial_data: u8
+
+            export far procedure banked_write(value: u8)
+                serial_data = value
+                return
+            end
+            ",
+            serial_data = USB_UART_DATA,
+        ),
+    )
+    .expect("callee source should be written");
+    fs::write(
+        &cfg_path,
+        "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $028000, size = $002000, file = \"code.bin\";\n  BANK1: start = $01c000, size = $004000, file = \"bank1.bin\";\n  META: start = $02f000, size = $000100, file = \"meta.bin\";\n  BSS: start = $018000, size = $001000, type = rw;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  BANK1: load = BANK1, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n}\n",
+    )
+    .expect("banked call linker config should be written");
+
+    let build = build_mensch_x65_image_sources(
+        "language-x65-far-bank-call",
+        &[caller_path, callee_path],
+        &cfg_path,
+        CpuStart {
+            pbr: 0x02,
+            pc: 0x8000,
+        },
+        &[
+            X65ImageBlock {
+                address: 0x028000,
+                path: "code.bin".into(),
+            },
+            X65ImageBlock {
+                address: 0x01c000,
+                path: "bank1.bin".into(),
+            },
+        ],
+    )
+    .expect("banked far-call x65 image should build");
+
+    let run = x65_runner::run_image(
+        &build.image,
+        RunConfig {
+            serial_input: Vec::new(),
+            max_steps: 50_000,
+            stop_after_output_len: Some(3),
+            live_input: None,
+            block_device: None,
+        },
+        &mut Vec::new(),
+    )
+    .expect("banked far-call x65 image should run");
+
+    assert_eq!(run.output, b"ABC");
+}
+
+#[test]
 fn language_bios_bconout_runs_through_cop_syscall() {
     let dir = temp_dir("language-bios-bconout-cop");
     fs::create_dir_all(&dir).expect("temp dir should be created");
@@ -1867,7 +1957,7 @@ fn serial_write_buffers_until_tx_irq_drains_output() {
 
 fn build_hellord_example() -> x65_runner::BuildOutput {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    build_mensch_xex_sources(
+    build_mensch_x65_image_sources(
         "hellord-os",
         &[
             repo_root.join("examples/hellord-os.mensch"),
@@ -1880,6 +1970,28 @@ fn build_hellord_example() -> x65_runner::BuildOutput {
             repo_root.join("examples/hellord-traps.mensch"),
         ],
         repo_root.join("examples/hellord-os-x65.cfg"),
+        CpuStart {
+            pbr: 0x00,
+            pc: 0xa000,
+        },
+        &[
+            X65ImageBlock {
+                address: 0x00a000,
+                path: "code.bin".into(),
+            },
+            X65ImageBlock {
+                address: 0x01c000,
+                path: "bank1.bin".into(),
+            },
+            X65ImageBlock {
+                address: 0x009f00,
+                path: "meta.bin".into(),
+            },
+            X65ImageBlock {
+                address: 0x00ffe4,
+                path: "vectors.bin".into(),
+            },
+        ],
     )
     .expect("Hellord example should build")
 }
@@ -2115,7 +2227,7 @@ fn xex_linker_config() -> &'static str {
 }
 
 fn large_integration_xex_linker_config() -> &'static str {
-    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $002000, size = $007000, file = %O;\n  META: start = $00ffc0, size = $000024, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  VECTORS: start = $00ffe4, size = $00000c, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  VECTOR_COP: load = VECTORS, type = ro, optional = yes, offset = $0000;\n  VECTOR_BRK: load = VECTORS, type = ro, optional = yes, offset = $0002;\n  VECTOR_ABORT: load = VECTORS, type = ro, optional = yes, offset = $0004;\n  VECTOR_NMI: load = VECTORS, type = ro, optional = yes, offset = $0006;\n  VECTOR_IRQ: load = VECTORS, type = ro, optional = yes, offset = $000a;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
+    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $002000, size = $007000, file = %O;\n  META: start = $009f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  BANK1: start = $00c000, size = $003fe4, file = %O;\n  VECTORS: start = $00ffe4, size = $00000c, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  BANK1: load = BANK1, type = ro;\n  VECTOR_COP: load = VECTORS, type = ro, optional = yes, offset = $0000;\n  VECTOR_BRK: load = VECTORS, type = ro, optional = yes, offset = $0002;\n  VECTOR_ABORT: load = VECTORS, type = ro, optional = yes, offset = $0004;\n  VECTOR_NMI: load = VECTORS, type = ro, optional = yes, offset = $0006;\n  VECTOR_IRQ: load = VECTORS, type = ro, optional = yes, offset = $000a;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
 }
 
 fn cop_xex_linker_config() -> &'static str {

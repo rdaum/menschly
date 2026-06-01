@@ -61,9 +61,10 @@ pub fn emit_module(module: &AsmModule) -> String {
     }
 
     let code_segment = code_segment(module);
+    let data_segment = data_segment(module).unwrap_or(code_segment);
 
     if !module.static_data.is_empty() {
-        emit_code_segment(&mut out, code_segment);
+        emit_code_segment(&mut out, data_segment);
         for data in &module.static_data {
             out.push_str(&data.name);
             out.push_str(":\n");
@@ -125,6 +126,14 @@ fn code_segment(module: &AsmModule) -> &str {
         .find(|metadata| metadata.key == "code_segment")
         .map(|metadata| metadata.value.as_str())
         .unwrap_or("CODE")
+}
+
+fn data_segment(module: &AsmModule) -> Option<&str> {
+    module
+        .metadata
+        .iter()
+        .find(|metadata| metadata.key == "data_segment")
+        .map(|metadata| metadata.value.as_str())
 }
 
 fn emit_code_segment(out: &mut String, segment: &str) {
@@ -353,7 +362,7 @@ mod tests {
         assert!(asm.contains(".proc return_constant_u16\n"));
         assert!(asm.contains("\trep #$30\n\t.a16\n\t.i16\n"));
         assert!(asm.contains("\tlda #$1234\n"));
-        assert!(asm.contains("\trtl\n"));
+        assert!(asm.contains("\trts\n"));
     }
 
     #[test]
@@ -365,7 +374,7 @@ mod tests {
         assert!(asm.contains("\tsep #$20\n\t.a8\n\t.i16\n"));
         assert!(asm.contains("\tlda #$7f\n"));
         assert!(asm.contains("\tsta $040000\n"));
-        assert!(asm.contains("\trtl\n"));
+        assert!(asm.contains("\trts\n"));
     }
 
     #[test]

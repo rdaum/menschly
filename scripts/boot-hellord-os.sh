@@ -26,6 +26,13 @@ fi
 
 cargo run --quiet --manifest-path "$repo_root/Cargo.toml" --bin mensch-run-x65 -- \
   --config "$cfg" \
+  --format x65 \
+  --entry-bank 0 \
+  --entry a000 \
+  --block 00a000:code.bin \
+  --block 01c000:bank1.bin \
+  --block 009f00:meta.bin \
+  --block 00ffe4:vectors.bin \
   --max-steps "$max_steps" \
   "$src" \
   "$dos_src" \

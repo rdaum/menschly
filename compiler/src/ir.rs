@@ -454,9 +454,11 @@ pub enum IrInst {
     },
     CallProcedure {
         name: String,
+        abi: Abi,
     },
     CallFunction {
         name: String,
+        abi: Abi,
         dst: Value,
     },
     CleanupStack {

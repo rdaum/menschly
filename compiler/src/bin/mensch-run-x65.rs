@@ -5,10 +5,12 @@ use std::process;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mensch_systems_tests::x65_runner::{
-    build_mensch_xex_sources, run_image, BlockDeviceConfig, RunConfig,
+    build_mensch_x65_image_sources, build_mensch_xex_sources, run_image, BlockDeviceConfig,
+    RunConfig, X65ImageBlock,
 };
+use x65alike_emul::image::CpuStart;
 
 const DEFAULT_STEPS: usize = 1_000_000;
 
@@ -27,7 +29,28 @@ fn run() -> Result<(), String> {
         .and_then(|source| source.file_stem())
         .and_then(|stem| stem.to_str())
         .unwrap_or("mensch-image");
-    let build = build_mensch_xex_sources(build_name, &config.sources, &config.linker_config)?;
+    let build = match config.format {
+        BuildFormat::Xex => {
+            build_mensch_xex_sources(build_name, &config.sources, &config.linker_config)?
+        }
+        BuildFormat::X65 => build_mensch_x65_image_sources(
+            build_name,
+            &config.sources,
+            &config.linker_config,
+            CpuStart {
+                pbr: config.entry_bank,
+                pc: config.entry,
+            },
+            &config
+                .blocks
+                .iter()
+                .map(|block| X65ImageBlock {
+                    address: block.address,
+                    path: block.path.clone(),
+                })
+                .collect::<Vec<_>>(),
+        )?,
+    };
 
     let mut serial_input = Vec::new();
     let mut stdin = io::stdin();
@@ -96,7 +119,7 @@ fn spawn_stdin_reader() -> Receiver<u8> {
 
 #[derive(Debug, Clone, Parser)]
 #[command(
-    about = "Compile a Mensch source file, link it as an X65-style XEX, and boot it in x65alike-emul"
+    about = "Compile Mensch source files, link an x65-alike image, and boot it in x65alike-emul"
 )]
 struct Config {
     /// Mensch source files to compile and boot.
@@ -106,6 +129,22 @@ struct Config {
     /// ld65 linker config used to produce an Atari/XEX image.
     #[arg(short = 'C', long = "config")]
     linker_config: PathBuf,
+
+    /// Linked image format to boot.
+    #[arg(long = "format", value_enum, default_value_t = BuildFormat::Xex)]
+    format: BuildFormat,
+
+    /// Entry program bank for --format x65.
+    #[arg(long = "entry-bank", value_parser = parse_u8_hex, default_value = "0")]
+    entry_bank: u8,
+
+    /// Entry program counter for --format x65.
+    #[arg(long = "entry", value_parser = parse_u16_hex, default_value = "a000")]
+    entry: u16,
+
+    /// x65 load block as address:path. Repeat for each linked output file.
+    #[arg(long = "block", value_parser = parse_x65_block)]
+    blocks: Vec<CliX65Block>,
 
     /// Maximum CPU steps. Use 0 to run indefinitely.
     #[arg(long = "max-steps", default_value_t = DEFAULT_STEPS)]
@@ -118,4 +157,60 @@ struct Config {
     /// Attach --disk without writing changes back on exit.
     #[arg(long = "disk-read-only")]
     disk_read_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BuildFormat {
+    Xex,
+    X65,
+}
+
+impl std::fmt::Display for BuildFormat {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Xex => out.write_str("xex"),
+            Self::X65 => out.write_str("x65"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CliX65Block {
+    address: u32,
+    path: PathBuf,
+}
+
+fn parse_x65_block(value: &str) -> Result<CliX65Block, String> {
+    let (address, path) = value
+        .split_once(':')
+        .ok_or_else(|| "x65 block must be address:path".to_owned())?;
+    let address = parse_u24(address)?;
+    Ok(CliX65Block {
+        address,
+        path: path.into(),
+    })
+}
+
+fn parse_u24(value: &str) -> Result<u32, String> {
+    let trimmed = value
+        .strip_prefix('$')
+        .or_else(|| value.strip_prefix("0x"))
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    let address = u32::from_str_radix(trimmed, 16)
+        .map_err(|error| format!("invalid x65 block address {value}: {error}"))?;
+    if address > 0x00ff_ffff {
+        return Err(format!("x65 block address {value} exceeds 24 bits"));
+    }
+    Ok(address)
+}
+
+fn parse_u16_hex(value: &str) -> Result<u16, String> {
+    let value = parse_u24(value)?;
+    u16::try_from(value).map_err(|_| "entry must fit in 16 bits".to_owned())
+}
+
+fn parse_u8_hex(value: &str) -> Result<u8, String> {
+    let value = parse_u24(value)?;
+    u8::try_from(value).map_err(|_| "entry bank must fit in 8 bits".to_owned())
 }

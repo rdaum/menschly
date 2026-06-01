@@ -1,8 +1,10 @@
 module HellordFiles
+metadata code_segment = "BANK1"
+metadata data_segment = "CODE"
 
-external procedure console_write_text(text: near ^u8)
-external procedure console_write_hex16(value: u16)
-external procedure console_newline()
+external far procedure console_write_text(text: near ^u8)
+external far procedure console_write_hex16(value: u16)
+external far procedure console_newline()
 
 procedure files_write_entry(name: near ^u8, size: u16)
     console_write_text(name)
@@ -12,7 +14,7 @@ procedure files_write_entry(name: near ^u8, size: u16)
     return
 end
 
-export procedure files_write_root_dir()
+export far procedure files_write_root_dir()
     files_write_entry("README.TXT", 49)
     files_write_entry("SYSTEM.TXT", 65)
     files_write_entry("HELLO.PRG", 37)
@@ -21,49 +23,49 @@ export procedure files_write_root_dir()
     return
 end
 
-export procedure files_write_games_dir()
+export far procedure files_write_games_dir()
     files_write_entry("DEMO.TXT", 48)
     files_write_entry("DEMO.PRG", 36)
     console_write_text("2 file(s)  0 dir(s)\r\n")
     return
 end
 
-export procedure files_type_readme()
+export far procedure files_type_readme()
     console_write_text("Hellord is a tiny Mensch DOS for the x65-alike.\r\n")
     return
 end
 
-export procedure files_type_system()
+export far procedure files_type_system()
     console_write_text("CPU: 65816\r\nConsole: USB UART IRQ rings\r\nStorage: ROM file table\r\n")
     return
 end
 
-export procedure files_type_demo()
+export far procedure files_type_demo()
     console_write_text("No games yet, but the directory layer works.\r\n")
     return
 end
 
-export procedure files_write_not_found()
+export far procedure files_write_not_found()
     console_write_text("File not found\r\n")
     return
 end
 
-export procedure files_write_program_not_found()
+export far procedure files_write_program_not_found()
     console_write_text("Program not found\r\n")
     return
 end
 
-export procedure files_write_path_not_found()
+export far procedure files_write_path_not_found()
     console_write_text("Path not found\r\n")
     return
 end
 
-export procedure files_run_hello()
+export far procedure files_run_hello()
     console_write_text("HELLO.PRG says: Hello from ROM.\r\n")
     return
 end
 
-export procedure files_run_demo()
+export far procedure files_run_demo()
     console_write_text("DEMO.PRG says: sprites someday.\r\n")
     return
 end

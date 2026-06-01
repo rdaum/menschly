@@ -4,29 +4,29 @@ external reentrant function gemdos_cconis(): u16
 external reentrant function gemdos_cconin(): u8
 external reentrant procedure gemdos_cconout(ch: u8)
 
-export procedure console_write(value: u8)
+export far procedure console_write(value: u8)
     gemdos_cconout(value)
     return
 end
 
-export procedure console_newline()
+export far procedure console_newline()
     console_write_text("\r\n")
     return
 end
 
-export procedure console_prompt_drive(drive: u8)
+export far procedure console_prompt_drive(drive: u8)
     console_write(drive)
     console_write_text("> ")
     return
 end
 
-export function console_read(): u8
+export far function console_read(): u8
     while gemdos_cconis() == 0
     end
     return gemdos_cconin()
 end
 
-export procedure console_write_text(text: near ^u8)
+export far procedure console_write_text(text: near ^u8)
     var ch: u8
     ch = text^
     while ch != 0
@@ -88,7 +88,7 @@ procedure console_write_hex_place(value: u16, place: u16)
     return
 end
 
-export procedure console_write_hex16(value: u16)
+export far procedure console_write_hex16(value: u16)
     var remainder: u16
     remainder = value
     console_write_hex_place(remainder, $1000)
@@ -107,7 +107,7 @@ export procedure console_write_hex16(value: u16)
     return
 end
 
-export procedure console_write_hex8(value: u8)
+export far procedure console_write_hex8(value: u8)
     var digit: u8
     digit = 0
     while value >= $10
@@ -119,32 +119,32 @@ export procedure console_write_hex8(value: u8)
     return
 end
 
-export procedure console_write_greeting()
+export far procedure console_write_greeting()
     console_write_text("Hellord DOS 0.1\r\nType H for help.\r\n")
     return
 end
 
-export procedure console_write_help()
+export far procedure console_write_help()
     console_write_text("Commands:\r\nH  help\r\nV  version\r\nD  dir\r\nT  type\r\nR  run\r\nE  echo\r\nS  status\r\nP  pwd\r\nM  map\r\nMEM status\r\nBLKINFO disk\r\nC  cls\r\nPATH mode\r\nSET name value\r\nPROMPT mode\r\nCD path\r\nPEEK addr\r\nPOKE addr byte\r\nDUMP addr len\r\nFILL addr len byte\r\nA:-Z: drive\r\nCtrl-P recall\r\n")
     return
 end
 
-export procedure console_write_version()
+export far procedure console_write_version()
     console_write_text("Hellord DOS 0.1\r\n")
     return
 end
 
-export procedure console_clear()
+export far procedure console_clear()
     console_write_text("\x1b[2J\x1b[H")
     return
 end
 
-export procedure console_write_unknown()
+export far procedure console_write_unknown()
     console_write_text("?SYNTAX\r\n")
     return
 end
 
-export procedure console_write_flag(name: u8, value: u8)
+export far procedure console_write_flag(name: u8, value: u8)
     console_write(name)
     console_write(':')
     console_write(' ')

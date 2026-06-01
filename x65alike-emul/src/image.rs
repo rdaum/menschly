@@ -175,7 +175,7 @@ fn parse_x65_image(bytes: &[u8]) -> Result<LoadedImage, String> {
         ranges.push(LoadedRange {
             address,
             bytes: bytes[pos..block_end].to_vec(),
-            cpu_visible: false,
+            cpu_visible: true,
         });
         pos = block_end;
     }
@@ -308,12 +308,12 @@ mod tests {
                 LoadedRange {
                     address: 0x028000,
                     bytes: vec![0xa9, 0x21, 0xdb],
-                    cpu_visible: false,
+                    cpu_visible: true,
                 },
                 LoadedRange {
                     address: 0x01c000,
                     bytes: vec![0xea, 0xdb],
-                    cpu_visible: false,
+                    cpu_visible: true,
                 },
             ],
         )

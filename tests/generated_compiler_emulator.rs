@@ -52,6 +52,12 @@ fn run_generated_routine(binary: &[u8]) -> (Processor, Memory) {
     run_loaded_generated_routine(memory)
 }
 
+fn run_generated_near_routine(binary: &[u8]) -> (Processor, Memory) {
+    let mut memory = Memory::new();
+    memory.load(ROUTINE_ADDR, binary);
+    run_loaded_generated_near_routine(memory)
+}
+
 fn run_loaded_generated_routine(mut memory: Memory) -> (Processor, Memory) {
     let mut cpu = Processor::new();
     cpu.p = StatusRegister::from_byte(0x00, false);
@@ -73,6 +79,28 @@ fn run_loaded_generated_routine(mut memory: Memory) -> (Processor, Memory) {
     }
 
     panic!("generated routine did not return; cpu={cpu:?}");
+}
+
+fn run_loaded_generated_near_routine(mut memory: Memory) -> (Processor, Memory) {
+    let mut cpu = Processor::new();
+    cpu.p = StatusRegister::from_byte(0x00, false);
+    cpu.pbr = (ROUTINE_ADDR >> 16) as u8;
+    cpu.dbr = (ROUTINE_ADDR >> 16) as u8;
+    cpu.pc = ROUTINE_ADDR as u16;
+    cpu.s = 0x01fc;
+
+    let return_minus_one = RETURN_ADDR.wrapping_sub(1).to_le_bytes();
+    memory.write(0x01fd, return_minus_one[0]);
+    memory.write(0x01fe, return_minus_one[1]);
+
+    for _ in 0..1_000 {
+        if cpu.pbr == (ROUTINE_ADDR >> 16) as u8 && cpu.pc == RETURN_ADDR {
+            return (cpu, memory);
+        }
+        cpu.step(&mut memory);
+    }
+
+    panic!("generated near routine did not return; cpu={cpu:?}");
 }
 
 fn assemble_fixture(name: &str, asm: &str) -> Vec<u8> {
@@ -157,7 +185,7 @@ fn temp_dir(name: &str) -> PathBuf {
 fn generated_return_constant_routine_runs() {
     let binary = assemble_ir_fixture("return-constant", &fixtures::return_constant_u16());
 
-    let (cpu, _memory) = run_generated_routine(&binary);
+    let (cpu, _memory) = run_generated_near_routine(&binary);
 
     assert_eq!(cpu.c_true(), 0x1234);
 }
@@ -166,7 +194,7 @@ fn generated_return_constant_routine_runs() {
 fn generated_store_byte_routine_runs() {
     let binary = assemble_ir_fixture("store-byte", &fixtures::store_byte());
 
-    let (_cpu, memory) = run_generated_routine(&binary);
+    let (_cpu, memory) = run_generated_near_routine(&binary);
 
     assert_eq!(memory.byte(fixtures::STORE_BYTE_ADDR as usize), 0x7f);
 }
@@ -181,7 +209,7 @@ fn generated_copy_bytes_near_routine_runs() {
         &[0x10, 0x20, 0x30, 0x40],
     );
 
-    let (_cpu, memory) = run_loaded_generated_routine(memory);
+    let (_cpu, memory) = run_loaded_generated_near_routine(memory);
 
     assert_eq!(memory.byte(0x020000 + fixtures::COPY_DST as usize), 0x10);
     assert_eq!(
@@ -208,7 +236,7 @@ fn generated_clear_memory_routine_runs() {
         &[0xaa, 0xbb, 0xcc, 0xdd],
     );
 
-    let (_cpu, memory) = run_loaded_generated_routine(memory);
+    let (_cpu, memory) = run_loaded_generated_near_routine(memory);
 
     assert_eq!(memory.byte(0x020000 + fixtures::CLEAR_DST as usize), 0x00);
     assert_eq!(
@@ -232,7 +260,7 @@ fn generated_internal_procedure_call_runs() {
         &fixtures::call_internal_procedure(),
     );
 
-    let (_cpu, memory) = run_generated_routine(&binary);
+    let (_cpu, memory) = run_generated_near_routine(&binary);
 
     assert_eq!(memory.byte(fixtures::HELPER_STORE_ADDR as usize), 0x42);
 }
@@ -244,7 +272,7 @@ fn generated_internal_function_call_runs() {
         &fixtures::call_internal_function(),
     );
 
-    let (_cpu, memory) = run_generated_routine(&binary);
+    let (_cpu, memory) = run_generated_near_routine(&binary);
 
     assert_eq!(memory.byte(fixtures::FUNCTION_STORE_ADDR as usize), 0x55);
 }
@@ -253,7 +281,7 @@ fn generated_internal_function_call_runs() {
 fn generated_exported_main_routine_runs() {
     let binary = assemble_ir_fixture("exported-main", &fixtures::exported_main());
 
-    let (_cpu, memory) = run_generated_routine(&binary);
+    let (_cpu, memory) = run_generated_near_routine(&binary);
 
     assert_eq!(memory.byte(fixtures::MAIN_STORE_ADDR as usize), 0x99);
 }
@@ -262,7 +290,7 @@ fn generated_exported_main_routine_runs() {
 fn generated_direct_local_storage_routine_runs() {
     let binary = assemble_storage_fixture("direct-local-store", &fixtures::direct_local_store());
 
-    let (_cpu, memory) = run_generated_routine(&binary);
+    let (_cpu, memory) = run_generated_near_routine(&binary);
 
     assert_eq!(memory.byte(fixtures::DIRECT_STORE_ADDR as usize), 0x66);
 }
@@ -912,7 +940,7 @@ fn generated_frontend_application_result_program_runs() {
         ",
     );
 
-    let (_cpu, memory) = run_generated_routine(&binary);
+    let (_cpu, memory) = run_generated_near_routine(&binary);
 
     assert_eq!(memory.byte(0x040006), 0x00);
     assert_eq!(memory.byte(0x040007), 0x2a);

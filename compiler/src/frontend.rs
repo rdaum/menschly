@@ -1812,7 +1812,10 @@ impl<'a> RoutineLowerer<'a> {
             Stmt::Call { name, args } => {
                 let sig = self.check_call(name, args, true)?;
                 self.lower_call_args(name, args, &sig.params)?;
-                self.body.push(IrInst::CallProcedure { name: name.clone() });
+                self.body.push(IrInst::CallProcedure {
+                    name: name.clone(),
+                    abi: sig.abi,
+                });
                 self.cleanup_call_args(name, &sig.params)?;
                 Ok(())
             }
@@ -2114,6 +2117,7 @@ impl<'a> RoutineLowerer<'a> {
                 };
                 self.body.push(IrInst::CallFunction {
                     name: name.clone(),
+                    abi: sig.abi,
                     dst: call_dst.clone(),
                 });
                 self.cleanup_call_args(name, &sig.params)?;
@@ -3469,9 +3473,11 @@ mod tests {
             external procedure serial_init()
             external procedure serial_write(value: u8)
             external function serial_has_data(): u8
+            external far procedure banked_init()
 
             export procedure main()
                 serial_init()
+                banked_init()
                 serial_write('!')
                 if serial_has_data() != 0
                     serial_data = serial_has_data()
@@ -3493,9 +3499,11 @@ mod tests {
         assert!(asm.contains(".import serial_init\n"));
         assert!(asm.contains(".import serial_write\n"));
         assert!(asm.contains(".import serial_has_data\n"));
+        assert!(asm.contains(".import banked_init\n"));
         assert!(asm.contains(".importzp __dp_serial_write_param_value\n"));
         assert!(asm.contains("__vector_irq: .addr serial_irq\n"));
         assert!(asm.contains("\tjsr serial_init\n"));
+        assert!(asm.contains("\tjsl banked_init\n"));
         assert!(asm.contains("\tsta __dp_serial_write_param_value\n"));
         assert!(asm.contains("\tjsr serial_write\n"));
         assert!(asm.contains("\tjsr serial_has_data\n"));
@@ -3503,6 +3511,7 @@ mod tests {
         assert!(!asm.contains(".proc serial_init\n"));
         assert!(!asm.contains(".proc serial_write\n"));
         assert!(!asm.contains(".proc serial_has_data\n"));
+        assert!(!asm.contains(".proc banked_init\n"));
     }
 
     #[test]

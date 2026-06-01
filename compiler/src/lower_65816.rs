@@ -422,9 +422,9 @@ fn lower_inst(
             load_value_to_a(out, value, outgoing_stack_bytes)?;
             out.push(AsmInst::Pha);
         }
-        IrInst::CallProcedure { name } => out.push(AsmInst::Jsr(name.clone())),
-        IrInst::CallFunction { name, dst } => {
-            out.push(AsmInst::Jsr(name.clone()));
+        IrInst::CallProcedure { name, abi } => out.push(call_inst(name, *abi)),
+        IrInst::CallFunction { name, abi, dst } => {
+            out.push(call_inst(name, *abi));
             store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }
         IrInst::CleanupStack { bytes } => {
@@ -580,11 +580,20 @@ fn cop_register_symbol(register: CopRegister) -> &'static str {
 
 fn return_inst(routine: &Routine) -> AsmInst {
     match routine.abi {
-        Abi::Exported | Abi::Far => AsmInst::Rtl,
+        Abi::Far => AsmInst::Rtl,
         Abi::Interrupt => AsmInst::Rti,
-        Abi::Internal | Abi::Reentrant => match routine.kind {
+        Abi::Internal | Abi::Exported | Abi::Reentrant => match routine.kind {
             RoutineKind::Procedure | RoutineKind::Function { .. } => AsmInst::Rts,
         },
+    }
+}
+
+fn call_inst(name: &str, abi: Abi) -> AsmInst {
+    match abi {
+        Abi::Far => AsmInst::Jsl(name.to_owned()),
+        Abi::Internal | Abi::Exported | Abi::Interrupt | Abi::Reentrant => {
+            AsmInst::Jsr(name.to_owned())
+        }
     }
 }
 

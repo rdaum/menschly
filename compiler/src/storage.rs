@@ -905,8 +905,9 @@ fn rewrite_inst(
             width: *width,
             value: rewrite_value(value, layout, direct_aliases),
         },
-        IrInst::CallFunction { name, dst } => IrInst::CallFunction {
+        IrInst::CallFunction { name, abi, dst } => IrInst::CallFunction {
             name: name.clone(),
+            abi: *abi,
             dst: rewrite_value(dst, layout, direct_aliases),
         },
         IrInst::CopSignature { dst } => IrInst::CopSignature {
@@ -1632,7 +1633,9 @@ impl fmt::Display for StorageAssignment {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::ir::{Const, IrInst, Label, Local, Module, Routine, Storage, Type, Value, Width};
+    use crate::ir::{
+        Abi, Const, IrInst, Label, Local, Module, Routine, Storage, Type, Value, Width,
+    };
 
     use super::{
         apply_storage, assign_storage, assign_storage_with_budget, validate_direct_page_budget,
@@ -1785,6 +1788,7 @@ mod tests {
                 },
                 IrInst::CallProcedure {
                     name: "callee".to_owned(),
+                    abi: Abi::Internal,
                 },
                 IrInst::Store {
                     width: Width::Word,
@@ -2100,6 +2104,7 @@ mod tests {
                         },
                         IrInst::CallProcedure {
                             name: "callee".to_owned(),
+                            abi: Abi::Internal,
                         },
                         IrInst::Store {
                             width: Width::Word,
@@ -2349,6 +2354,7 @@ mod tests {
                 },
                 IrInst::CallProcedure {
                     name: "callee".to_owned(),
+                    abi: Abi::Internal,
                 },
             ]))
             .with_routine(
@@ -2387,6 +2393,7 @@ mod tests {
                 },
                 IrInst::CallProcedure {
                     name: "callee".to_owned(),
+                    abi: Abi::Internal,
                 },
             ]))
             .with_routine(
@@ -2439,6 +2446,7 @@ mod tests {
                     },
                     IrInst::CallProcedure {
                         name: "callee".to_owned(),
+                        abi: Abi::Internal,
                     },
                     IrInst::Store {
                         width: Width::Word,
@@ -2477,6 +2485,7 @@ mod tests {
                     },
                     IrInst::CallProcedure {
                         name: "callee".to_owned(),
+                        abi: Abi::Internal,
                     },
                     IrInst::Store {
                         width: Width::Word,
