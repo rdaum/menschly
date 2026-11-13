@@ -459,6 +459,9 @@ pub enum IrInst {
     CallFunction {
         name: String,
         abi: Abi,
+        /// Width of the function result, so backends need not rely on
+        /// machine state left behind by the callee.
+        width: Width,
         dst: Value,
     },
     CleanupStack {
@@ -494,6 +497,16 @@ pub enum Width {
     Byte,
     Word,
     Long,
+}
+
+impl Width {
+    pub fn size_bytes(self) -> u16 {
+        match self {
+            Self::Byte => 1,
+            Self::Word => 2,
+            Self::Long => 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

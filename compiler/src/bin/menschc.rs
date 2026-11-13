@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::Parser;
-use mensch_systems_tests::{ca65, frontend, lower_65816, storage};
+use mensch_systems_tests::driver::{self, Target};
+use mensch_systems_tests::storage;
 
 fn main() {
     if let Err(error) = run() {
@@ -33,7 +34,12 @@ fn run() -> Result<(), String> {
             let remaining_direct_page = config
                 .direct_page_budget
                 .saturating_sub(assignments_direct_page_bytes(&assignments));
-            let compiled = compile_path(source_path, config.storage_report, remaining_direct_page)?;
+            let compiled = compile_path(
+                source_path,
+                config.target,
+                config.storage_report,
+                remaining_direct_page,
+            )?;
             let stem = source_path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
@@ -56,6 +62,7 @@ fn run() -> Result<(), String> {
 
     let compiled = compile_path(
         &config.sources[0],
+        config.target,
         config.storage_report,
         config.direct_page_budget,
     )?;
@@ -84,6 +91,7 @@ struct CompiledSource {
 
 fn compile_path(
     path: &Path,
+    target: Target,
     storage_report: bool,
     direct_page_budget: u16,
 ) -> Result<CompiledSource, String> {
@@ -97,10 +105,8 @@ fn compile_path(
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     }
 
-    let module = frontend::compile_source(&source).map_err(|error| error.to_string())?;
-    let (lowered, assignment) =
-        lower_65816::lower_module_with_storage_budget(&module, direct_page_budget)
-            .map_err(|error| error.to_string())?;
+    let compiled = driver::compile_source(&source, target, direct_page_budget)?;
+    let assignment = compiled.assignment;
     if storage_report {
         if path == Path::new("-") {
             eprintln!("{assignment}");
@@ -109,7 +115,7 @@ fn compile_path(
         }
     }
     Ok(CompiledSource {
-        asm: ca65::emit_module(&lowered),
+        asm: compiled.asm,
         assignment,
     })
 }
@@ -138,6 +144,10 @@ struct Config {
     /// Direct-page bytes available to compiler-managed storage.
     #[arg(long, default_value_t = storage::DEFAULT_DIRECT_PAGE_BUDGET)]
     direct_page_budget: u16,
+
+    /// Target CPU/machine: `65816` (x65-alike) or `mega65` (45GS02).
+    #[arg(long, default_value = "65816")]
+    target: Target,
 }
 
 #[cfg(test)]
@@ -169,7 +179,8 @@ mod tests {
         )
         .expect("source fixture should be written");
 
-        let compiled = compile_path(&path, false, 2).expect("source should compile");
+        let compiled =
+            compile_path(&path, Target::W65816, false, 2).expect("source should compile");
 
         assert_eq!(compiled.assignment.direct_page_bytes, 2);
         assert!(compiled.asm.contains("$01,s"));

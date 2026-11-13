@@ -1,8 +1,42 @@
-use crate::target_65816::{AsmInst, AsmModule, AsmRoutine, Immediate, Operand, Symbol};
+use crate::target_65816::{AsmInst, AsmModule, Immediate, Operand, Symbol};
 
+/// An instruction type that can be printed as ca65 source.
+pub trait Ca65Inst {
+    /// The `.setcpu`-style directive that starts every module for this target.
+    const CPU_DIRECTIVE: &'static str;
+
+    /// Returns the label name if this instruction is a label definition.
+    fn label(&self) -> Option<&str>;
+
+    /// Returns the instruction text (may span several lines, tab-separated).
+    fn emit(&self) -> String;
+}
+
+impl Ca65Inst for AsmInst {
+    const CPU_DIRECTIVE: &'static str = ".p816";
+
+    fn label(&self) -> Option<&str> {
+        match self {
+            AsmInst::Label(label) => Some(label),
+            _ => None,
+        }
+    }
+
+    fn emit(&self) -> String {
+        emit_inst(self)
+    }
+}
+
+/// Emits a 65816 module. Kept as the familiar entry point for 65816 callers.
 pub fn emit_module(module: &AsmModule) -> String {
+    emit(module)
+}
+
+/// Emits a module for any target whose instructions implement [`Ca65Inst`].
+pub fn emit<I: Ca65Inst>(module: &crate::asm::AsmModule<I>) -> String {
     let mut out = String::new();
-    out.push_str(".p816\n");
+    out.push_str(I::CPU_DIRECTIVE);
+    out.push('\n');
 
     for routine in &module.external_routines {
         out.push_str(".import ");
@@ -119,7 +153,7 @@ pub fn emit_module(module: &AsmModule) -> String {
     out
 }
 
-fn code_segment(module: &AsmModule) -> &str {
+fn code_segment<I>(module: &crate::asm::AsmModule<I>) -> &str {
     module
         .metadata
         .iter()
@@ -128,7 +162,7 @@ fn code_segment(module: &AsmModule) -> &str {
         .unwrap_or("CODE")
 }
 
-fn data_segment(module: &AsmModule) -> Option<&str> {
+fn data_segment<I>(module: &crate::asm::AsmModule<I>) -> Option<&str> {
     module
         .metadata
         .iter()
@@ -157,14 +191,14 @@ fn vector_segment(name: &str) -> &'static str {
     }
 }
 
-fn has_module_metadata(module: &AsmModule) -> bool {
+fn has_module_metadata<I>(module: &crate::asm::AsmModule<I>) -> bool {
     module.entry.is_some()
         || !module.imports.is_empty()
         || !module.libraries.is_empty()
         || !module.metadata.is_empty()
 }
 
-fn emit_module_metadata(out: &mut String, module: &AsmModule) {
+fn emit_module_metadata<I>(out: &mut String, module: &crate::asm::AsmModule<I>) {
     if let Some(entry) = &module.entry {
         emit_metadata(out, &format!("entry.{}={}", entry.kind, entry.routine));
     }
@@ -216,7 +250,7 @@ fn quoted(value: &str) -> String {
     out
 }
 
-fn emit_routine(out: &mut String, routine: &AsmRoutine) {
+fn emit_routine<I: Ca65Inst>(out: &mut String, routine: &crate::asm::AsmRoutine<I>) {
     if routine.export {
         out.push_str(".export ");
         out.push_str(&routine.name);
@@ -227,16 +261,13 @@ fn emit_routine(out: &mut String, routine: &AsmRoutine) {
     out.push('\n');
 
     for inst in &routine.insts {
-        match inst {
-            AsmInst::Label(label) => {
-                out.push_str(label);
-                out.push_str(":\n");
-            }
-            _ => {
-                out.push('\t');
-                out.push_str(&emit_inst(inst));
-                out.push('\n');
-            }
+        if let Some(label) = inst.label() {
+            out.push_str(label);
+            out.push_str(":\n");
+        } else {
+            out.push('\t');
+            out.push_str(&inst.emit());
+            out.push('\n');
         }
     }
 

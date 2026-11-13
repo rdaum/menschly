@@ -155,6 +155,7 @@ pub fn call_internal_function() -> Module {
                     IrInst::CallFunction {
                         name: "value_helper".to_owned(),
                         abi: Abi::Internal,
+                        width: Width::Byte,
                         dst: Value::Accumulator,
                     },
                     IrInst::Store {

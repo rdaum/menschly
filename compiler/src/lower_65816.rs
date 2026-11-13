@@ -1,9 +1,8 @@
-use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, CopRegister, EntryKind, GlobalPlacement, InterruptPreserve, IrInst, Label,
-    Module, Routine, RoutineKind, Type, Value, Width,
+    Abi, Address, Const, CopRegister, InterruptPreserve, IrInst, Label, Module, Routine,
+    RoutineKind, Type, Value, Width,
 };
 use crate::optimize_65816::optimize_module;
 use crate::storage::{
@@ -30,32 +29,7 @@ fn lower_module_unoptimized(module: &Module) -> Result<AsmModule, LowerError> {
 }
 
 fn lower_module_declarations(module: &Module, out: &mut AsmModule) {
-    for global in &module.globals {
-        match global.placement {
-            GlobalPlacement::Static => {
-                out.static_symbols.push(crate::target_65816::StaticSymbol {
-                    name: global.name.clone(),
-                    size: global.ty.size_bytes(),
-                });
-            }
-            GlobalPlacement::Fixed(address) => {
-                out.fixed_symbols.push(crate::target_65816::FixedSymbol {
-                    name: global.name.clone(),
-                    address,
-                    size: global.ty.size_bytes(),
-                    export: global.export,
-                });
-            }
-            GlobalPlacement::Bank(bank) => {
-                out.banked_symbols.push(crate::target_65816::BankedSymbol {
-                    name: global.name.clone(),
-                    bank,
-                    size: global.ty.size_bytes(),
-                    export: global.export,
-                });
-            }
-        }
-    }
+    *out = AsmModule::declarations_from(module);
     if module.routines.iter().any(|routine| routine.interrupt_cop) {
         out.static_symbols.push(crate::target_65816::StaticSymbol {
             name: COP_SIGNATURE_SYMBOL.to_owned(),
@@ -68,59 +42,6 @@ fn lower_module_declarations(module: &Module, out: &mut AsmModule) {
             });
         }
     }
-    out.static_data = module
-        .static_data
-        .iter()
-        .map(|data| crate::target_65816::StaticData {
-            name: data.name.clone(),
-            bytes: data.bytes.clone(),
-        })
-        .collect();
-
-    out.vectors = module
-        .vectors
-        .iter()
-        .map(|vector| crate::target_65816::VectorEntry {
-            name: vector.name.clone(),
-            routine: vector.routine.clone(),
-        })
-        .collect();
-    out.metadata = module
-        .metadata
-        .iter()
-        .map(|metadata| crate::target_65816::ModuleMetadata {
-            key: metadata.key.clone(),
-            value: metadata.value.clone(),
-        })
-        .collect();
-    out.imports = module
-        .imports
-        .iter()
-        .map(|import| crate::target_65816::ModuleImport {
-            module: import.module.clone(),
-            alias: import.alias.clone(),
-        })
-        .collect();
-    out.libraries = module
-        .libraries
-        .iter()
-        .map(|library| crate::target_65816::ModuleLibrary {
-            name: library.name.clone(),
-        })
-        .collect();
-    out.external_routines = module.external_routines.clone();
-    out.external_direct_symbols = module.external_direct_symbols.clone();
-    out.entry = module
-        .entry
-        .as_ref()
-        .map(|entry| crate::target_65816::ModuleEntry {
-            kind: match entry.kind {
-                EntryKind::Application => "application",
-                EntryKind::Command => "command",
-            }
-            .to_owned(),
-            routine: entry.routine.clone(),
-        });
 }
 
 pub fn lower_module_with_storage(
@@ -144,59 +65,7 @@ fn lower_module_with_assignment(
 ) -> Result<(AsmModule, StorageAssignment), LowerError> {
     let assigned = apply_storage(module, &assignment);
     let mut lowered = lower_module_unoptimized(&assigned)?;
-    let routine_exports = assigned
-        .routines
-        .iter()
-        .map(|routine| (routine.name.clone(), routine.export))
-        .collect::<BTreeMap<_, _>>();
-    let direct_symbols = assignment
-        .routines
-        .iter()
-        .flat_map(|routine| {
-            let routine_export = routine_exports
-                .get(&routine.name)
-                .copied()
-                .unwrap_or_default();
-            routine
-                .direct_slots
-                .iter()
-                .map(move |slot| (routine_export, slot))
-        })
-        .fold(
-            BTreeMap::<String, (u16, bool)>::new(),
-            |mut symbols, (routine_export, slot)| {
-                let export =
-                    routine_export && matches!(slot.source, crate::storage::BindingKey::Param(_));
-                symbols
-                    .entry(slot.symbol.clone())
-                    .and_modify(|(size, existing_export)| {
-                        *size = (*size).max(slot.size);
-                        *existing_export |= export;
-                    })
-                    .or_insert((slot.size, export));
-                symbols
-            },
-        );
-    lowered.direct_symbols = direct_symbols
-        .into_iter()
-        .map(|(name, (size, export))| crate::target_65816::DirectSymbol { name, size, export })
-        .collect();
-    let static_symbols = assignment
-        .routines
-        .iter()
-        .flat_map(|routine| routine.static_locals.iter())
-        .fold(BTreeMap::<String, u16>::new(), |mut symbols, local| {
-            symbols
-                .entry(local.symbol.clone())
-                .and_modify(|size| *size = (*size).max(local.size))
-                .or_insert(local.size);
-            symbols
-        });
-    lowered.static_symbols.extend(
-        static_symbols
-            .into_iter()
-            .map(|(name, size)| crate::target_65816::StaticSymbol { name, size }),
-    );
+    lowered.add_storage_symbols(&assigned, &assignment);
     Ok((optimize_module(&lowered), assignment))
 }
 
@@ -423,7 +292,7 @@ fn lower_inst(
             out.push(AsmInst::Pha);
         }
         IrInst::CallProcedure { name, abi } => out.push(call_inst(name, *abi)),
-        IrInst::CallFunction { name, abi, dst } => {
+        IrInst::CallFunction { name, abi, dst, .. } => {
             out.push(call_inst(name, *abi));
             store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }

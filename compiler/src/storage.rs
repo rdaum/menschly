@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::ir::{
-    param_symbol, Abi, Address, Const, IrInst, Local, Module, Param, Routine, Storage, Value, Width,
+    param_symbol, Abi, Address, Const, IrInst, Local, Module, Param, Routine, Storage, Value,
 };
 
 pub const DEFAULT_DIRECT_PAGE_BUDGET: u16 = 0x80;
@@ -905,9 +905,15 @@ fn rewrite_inst(
             width: *width,
             value: rewrite_value(value, layout, direct_aliases),
         },
-        IrInst::CallFunction { name, abi, dst } => IrInst::CallFunction {
+        IrInst::CallFunction {
+            name,
+            abi,
+            width,
+            dst,
+        } => IrInst::CallFunction {
             name: name.clone(),
             abi: *abi,
+            width: *width,
             dst: rewrite_value(dst, layout, direct_aliases),
         },
         IrInst::CopSignature { dst } => IrInst::CopSignature {
@@ -1307,7 +1313,9 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
             collect_temp_value(value, 2, &mut out);
         }
         IrInst::Push { width, value } => collect_temp_value(value, width.size_bytes(), &mut out),
-        IrInst::CallFunction { dst, .. } => collect_temp_value(dst, 2, &mut out),
+        IrInst::CallFunction { width, dst, .. } => {
+            collect_temp_value(dst, width.size_bytes(), &mut out)
+        }
         IrInst::CopSignature { dst } => collect_temp_value(dst, 1, &mut out),
         IrInst::CopRegister { dst, .. } => collect_temp_value(dst, 2, &mut out),
         IrInst::CopCall {
@@ -1481,16 +1489,6 @@ fn const_size(value: Const) -> u16 {
         Const::U8(_) => 1,
         Const::U16(_) => 2,
         Const::U24(_) => 3,
-    }
-}
-
-impl Width {
-    fn size_bytes(self) -> u16 {
-        match self {
-            Self::Byte => 1,
-            Self::Word => 2,
-            Self::Long => 3,
-        }
     }
 }
 

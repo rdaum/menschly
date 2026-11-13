@@ -2118,6 +2118,7 @@ impl<'a> RoutineLowerer<'a> {
                 self.body.push(IrInst::CallFunction {
                     name: name.clone(),
                     abi: sig.abi,
+                    width: width_for_type(&result)?,
                     dst: call_dst.clone(),
                 });
                 self.cleanup_call_args(name, &sig.params)?;
