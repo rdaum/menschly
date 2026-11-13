@@ -945,3 +945,75 @@ fn generated_frontend_application_result_program_runs() {
     assert_eq!(memory.byte(0x040006), 0x00);
     assert_eq!(memory.byte(0x040007), 0x2a);
 }
+
+#[test]
+fn generated_frontend_shifts_and_bitwise_or_run() {
+    let binary = assemble_source_fixture(
+        "frontend-shifts-or",
+        "
+        module ShiftsDemo
+        fixed($040020) volatile var out: [9]u8
+
+        export far procedure main()
+            var w: u16
+            var b: u8
+            w = $1234
+            out[0] = u8(w << 4)
+            out[1] = u8(w >> 4)
+            w = w << 5
+            out[2] = u8(w)
+            out[3] = u8(w >> 8)
+            w = $00ab
+            w = w << 8 | $00cd
+            out[4] = u8(w)
+            out[5] = u8(w >> 8)
+            w = $8001 >> 15
+            out[6] = u8(w)
+            b = $81
+            out[7] = b << 1 | b >> 7
+            out[8] = $f0 | $0f
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    let out = (0..9)
+        .map(|i| memory.byte(0x040020 + i))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        out,
+        vec![0x40, 0x23, 0x80, 0x46, 0xcd, 0xab, 0x01, 0x03, 0xff]
+    );
+}
+
+#[test]
+fn generated_frontend_reentrant_indexing_uses_stack_index() {
+    let binary = assemble_source_fixture(
+        "frontend-reentrant-indexing",
+        "
+        module ReentrantIndexDemo
+        fixed($040030) volatile var out: u8
+        var table: [8]u8
+
+        export far procedure main()
+            fill(3)
+            return
+        end
+
+        reentrant procedure fill(start: u16)
+            var i: u16
+            i = start
+            table[i + 1] = 'R'
+            table[2] = 'C'
+            out = table[i + 1]
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    assert_eq!(memory.byte(0x040030), b'R');
+}

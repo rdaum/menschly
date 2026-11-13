@@ -884,6 +884,39 @@ fn rewrite_inst(
             lhs: rewrite_value(lhs, layout, direct_aliases),
             rhs: rewrite_value(rhs, layout, direct_aliases),
         },
+        IrInst::BitOr {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => IrInst::BitOr {
+            width: *width,
+            dst: rewrite_value(dst, layout, direct_aliases),
+            lhs: rewrite_value(lhs, layout, direct_aliases),
+            rhs: rewrite_value(rhs, layout, direct_aliases),
+        },
+        IrInst::ShiftLeft {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => IrInst::ShiftLeft {
+            width: *width,
+            dst: rewrite_value(dst, layout, direct_aliases),
+            lhs: rewrite_value(lhs, layout, direct_aliases),
+            rhs: rewrite_value(rhs, layout, direct_aliases),
+        },
+        IrInst::ShiftRight {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => IrInst::ShiftRight {
+            width: *width,
+            dst: rewrite_value(dst, layout, direct_aliases),
+            lhs: rewrite_value(lhs, layout, direct_aliases),
+            rhs: rewrite_value(rhs, layout, direct_aliases),
+        },
         IrInst::Dec { width, value } => IrInst::Dec {
             width: *width,
             value: rewrite_value(value, layout, direct_aliases),
@@ -923,13 +956,13 @@ fn rewrite_inst(
             register: *register,
             dst: rewrite_value(dst, layout, direct_aliases),
         },
-        IrInst::CopCall {
+        IrInst::Trap {
             family,
             call,
             x,
             y,
             dst,
-        } => IrInst::CopCall {
+        } => IrInst::Trap {
             family: *family,
             call: rewrite_value(call, layout, direct_aliases),
             x: rewrite_value(x, layout, direct_aliases),
@@ -955,6 +988,10 @@ fn rewrite_address(
         },
         Address::NearPtr(value) => Address::NearPtr(rewrite_value(value, layout, direct_aliases)),
         Address::FarPtr(value) => Address::FarPtr(rewrite_value(value, layout, direct_aliases)),
+        Address::Indexed { base, index } => Address::Indexed {
+            base: base.clone(),
+            index: rewrite_value(index, layout, direct_aliases),
+        },
         other => other.clone(),
     }
 }
@@ -1177,7 +1214,7 @@ fn direct_required_bindings(routine: &Routine) -> BTreeSet<BindingKey> {
 fn is_call_barrier(inst: &IrInst) -> bool {
     matches!(
         inst,
-        IrInst::CallProcedure { .. } | IrInst::CallFunction { .. } | IrInst::CopCall { .. }
+        IrInst::CallProcedure { .. } | IrInst::CallFunction { .. } | IrInst::Trap { .. }
     )
 }
 
@@ -1216,6 +1253,24 @@ fn param_uses(inst: &IrInst) -> Vec<String> {
             dst,
             lhs,
             rhs,
+        }
+        | IrInst::BitOr {
+            width: _,
+            dst,
+            lhs,
+            rhs,
+        }
+        | IrInst::ShiftLeft {
+            width: _,
+            dst,
+            lhs,
+            rhs,
+        }
+        | IrInst::ShiftRight {
+            width: _,
+            dst,
+            lhs,
+            rhs,
         } => {
             collect_param_value(dst, &mut out);
             collect_param_value(lhs, &mut out);
@@ -1235,7 +1290,7 @@ fn param_uses(inst: &IrInst) -> Vec<String> {
         IrInst::CallFunction { dst, .. } => collect_param_value(dst, &mut out),
         IrInst::CopSignature { dst } => collect_param_value(dst, &mut out),
         IrInst::CopRegister { dst, .. } => collect_param_value(dst, &mut out),
-        IrInst::CopCall {
+        IrInst::Trap {
             call, x, y, dst, ..
         } => {
             collect_param_value(call, &mut out);
@@ -1295,6 +1350,24 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
             dst,
             lhs,
             rhs,
+        }
+        | IrInst::BitOr {
+            width,
+            dst,
+            lhs,
+            rhs,
+        }
+        | IrInst::ShiftLeft {
+            width,
+            dst,
+            lhs,
+            rhs,
+        }
+        | IrInst::ShiftRight {
+            width,
+            dst,
+            lhs,
+            rhs,
         } => {
             let size = width.size_bytes();
             collect_temp_value(dst, size, &mut out);
@@ -1318,7 +1391,7 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
         }
         IrInst::CopSignature { dst } => collect_temp_value(dst, 1, &mut out),
         IrInst::CopRegister { dst, .. } => collect_temp_value(dst, 2, &mut out),
-        IrInst::CopCall {
+        IrInst::Trap {
             call, x, y, dst, ..
         } => {
             collect_temp_value(call, 2, &mut out);
@@ -1376,6 +1449,24 @@ fn local_uses(inst: &IrInst) -> Vec<String> {
             dst,
             lhs,
             rhs,
+        }
+        | IrInst::BitOr {
+            width: _,
+            dst,
+            lhs,
+            rhs,
+        }
+        | IrInst::ShiftLeft {
+            width: _,
+            dst,
+            lhs,
+            rhs,
+        }
+        | IrInst::ShiftRight {
+            width: _,
+            dst,
+            lhs,
+            rhs,
         } => {
             collect_local_value(dst, &mut out);
             collect_local_value(lhs, &mut out);
@@ -1395,7 +1486,7 @@ fn local_uses(inst: &IrInst) -> Vec<String> {
         IrInst::CallFunction { dst, .. } => collect_local_value(dst, &mut out),
         IrInst::CopSignature { dst } => collect_local_value(dst, &mut out),
         IrInst::CopRegister { dst, .. } => collect_local_value(dst, &mut out),
-        IrInst::CopCall {
+        IrInst::Trap {
             call, x, y, dst, ..
         } => {
             collect_local_value(call, &mut out);
@@ -1423,6 +1514,7 @@ fn collect_temp_address(addr: &Address, out: &mut Vec<(String, u16)>) {
         Address::ValueOffset { base, .. } => collect_temp_value(base, 2, out),
         Address::NearPtr(value) => collect_temp_value(value, 2, out),
         Address::FarPtr(value) => collect_temp_value(value, 3, out),
+        Address::Indexed { index, .. } => collect_temp_value(index, 2, out),
         _ => {}
     }
 }
@@ -1453,6 +1545,7 @@ fn collect_local_address(addr: &Address, out: &mut Vec<String>) {
         Address::ValueOffset { base, .. } => collect_local_value(base, out),
         Address::NearPtr(value) => collect_local_value(value, out),
         Address::FarPtr(value) => collect_local_value(value, out),
+        Address::Indexed { index, .. } => collect_local_value(index, out),
         _ => {}
     }
 }
@@ -1462,6 +1555,7 @@ fn collect_param_address(addr: &Address, out: &mut Vec<String>) {
         Address::ValueOffset { base, .. } => collect_param_value(base, out),
         Address::NearPtr(value) => collect_param_value(value, out),
         Address::FarPtr(value) => collect_param_value(value, out),
+        Address::Indexed { index, .. } => collect_param_value(index, out),
         _ => {}
     }
 }

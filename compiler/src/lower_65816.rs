@@ -160,6 +160,7 @@ fn lower_inst(
         IrInst::Load { width, dst, addr } => {
             set_mode_for_width(out, *width);
             let operand = load_operand_for_address(out, addr, outgoing_stack_bytes)?;
+            set_mode_for_width(out, *width);
             match dst {
                 Value::Accumulator => out.push(AsmInst::Lda(operand)),
                 Value::IndexX => out.push(AsmInst::Ldx(operand)),
@@ -178,10 +179,15 @@ fn lower_inst(
         }
         IrInst::Store { width, addr, src } => {
             set_mode_for_width(out, *width);
+            if matches!(src, Value::Accumulator) && address_clobbers_a(addr) {
+                return Err(LowerError::UnsupportedValue(src.clone()));
+            }
+            // Prepare the address first: indexing may need A to load X.
+            let operand = store_operand_for_address(out, addr, outgoing_stack_bytes)?;
+            set_mode_for_width(out, *width);
             if !matches!(src, Value::Accumulator) {
                 load_value_to_a(out, src, outgoing_stack_bytes)?;
             }
-            let operand = store_operand_for_address(out, addr, outgoing_stack_bytes)?;
             out.push(AsmInst::Sta(operand));
         }
         IrInst::Add {
@@ -217,6 +223,51 @@ fn lower_inst(
             set_mode_for_width(out, *width);
             load_value_to_a(out, lhs, outgoing_stack_bytes)?;
             out.push(AsmInst::And(operand_for_value(rhs, outgoing_stack_bytes)?));
+            store_a_to_value(out, dst, outgoing_stack_bytes)?;
+        }
+        IrInst::BitOr {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => {
+            set_mode_for_width(out, *width);
+            load_value_to_a(out, lhs, outgoing_stack_bytes)?;
+            out.push(AsmInst::Ora(operand_for_value(rhs, outgoing_stack_bytes)?));
+            store_a_to_value(out, dst, outgoing_stack_bytes)?;
+        }
+        IrInst::ShiftLeft {
+            width,
+            dst,
+            lhs,
+            rhs,
+        }
+        | IrInst::ShiftRight {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => {
+            let left = matches!(inst, IrInst::ShiftLeft { .. });
+            let Value::Const(count) = rhs else {
+                return Err(LowerError::UnsupportedValue(rhs.clone()));
+            };
+            let mut count = const_u16(*count);
+            if matches!(width, Width::Long) {
+                return Err(LowerError::UnsupportedWidth(3));
+            }
+            set_mode_for_width(out, *width);
+            load_value_to_a(out, lhs, outgoing_stack_bytes)?;
+            if matches!(width, Width::Word) && count >= 8 {
+                // Swap bytes, then clear the byte that moved out of range.
+                out.push(AsmInst::Xba);
+                let mask = if left { 0xff00 } else { 0x00ff };
+                out.push(AsmInst::And(Operand::Immediate(Immediate::Word(mask))));
+                count -= 8;
+            }
+            for _ in 0..count {
+                out.push(if left { AsmInst::AslA } else { AsmInst::LsrA });
+            }
             store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }
         IrInst::Dec { width, value } => {
@@ -319,7 +370,7 @@ fn lower_inst(
             ))));
             store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }
-        IrInst::CopCall {
+        IrInst::Trap {
             family,
             call,
             x,
@@ -552,6 +603,14 @@ fn set_mode_for_width(out: &mut Vec<AsmInst>, width: Width) {
     }
 }
 
+fn const_u16(value: Const) -> u16 {
+    match value {
+        Const::U8(value) => u16::from(value),
+        Const::U16(value) => value,
+        Const::U24(value) => value as u16,
+    }
+}
+
 fn width_for_type(ty: &Type) -> Result<Width, LowerError> {
     width_for_size(ty.size_bytes())
 }
@@ -593,6 +652,7 @@ fn operand_for_address(addr: &Address, outgoing_stack_bytes: u16) -> Result<Oper
     match addr {
         Address::Symbol(name) => Ok(Operand::Absolute(Symbol::Named(name.clone()))),
         Address::SymbolIndexedX(name) => Ok(Operand::AbsoluteIndexedX(Symbol::Named(name.clone()))),
+        Address::Indexed { .. } => unreachable!("indexed addresses are prepared by the caller"),
         Address::Direct(name) => Ok(Operand::Direct(Symbol::Named(name.clone()))),
         Address::ValueOffset { base, offset } => {
             operand_for_value_offset(base, *offset, outgoing_stack_bytes)
@@ -641,12 +701,57 @@ fn symbol_with_offset(name: &str, offset: u16) -> Symbol {
     }
 }
 
+/// Whether preparing `addr` has to go through the accumulator.
+fn address_clobbers_a(addr: &Address) -> bool {
+    matches!(
+        addr,
+        Address::Indexed {
+            index: Value::Stack { .. } | Value::Accumulator,
+            ..
+        }
+    )
+}
+
+/// Loads a 16-bit index into X and returns `base,x`, or folds a constant
+/// index into an absolute operand.
+fn indexed_operand(
+    out: &mut Vec<AsmInst>,
+    base: &str,
+    index: &Value,
+    outgoing_stack_bytes: u16,
+) -> Result<Operand, LowerError> {
+    if let Value::Const(value) = index {
+        let offset = match value {
+            Const::U8(value) => u16::from(*value),
+            Const::U16(value) => *value,
+            Const::U24(_) => return Err(LowerError::UnsupportedValue(index.clone())),
+        };
+        return Ok(Operand::Absolute(symbol_with_offset(base, offset)));
+    }
+    match index {
+        Value::Stack { .. } | Value::Accumulator => {
+            out.push(AsmInst::Mode(Mode::Acc16Index16));
+            load_value_to_a(out, index, outgoing_stack_bytes)?;
+            out.push(AsmInst::Tax);
+        }
+        Value::IndexX => {}
+        other => {
+            out.push(AsmInst::Ldx(operand_for_value(
+                other,
+                outgoing_stack_bytes,
+            )?));
+        }
+    }
+    Ok(Operand::AbsoluteIndexedX(Symbol::Named(base.to_owned())))
+}
+
 fn load_operand_for_address(
     out: &mut Vec<AsmInst>,
     addr: &Address,
     outgoing_stack_bytes: u16,
 ) -> Result<Operand, LowerError> {
     match addr {
+        Address::Indexed { base, index } => indexed_operand(out, base, index, outgoing_stack_bytes),
         Address::NearPtr(Value::Direct(name)) => {
             Ok(Operand::IndirectDirect(Symbol::Named(name.clone())))
         }
@@ -668,6 +773,7 @@ fn store_operand_for_address(
     outgoing_stack_bytes: u16,
 ) -> Result<Operand, LowerError> {
     match addr {
+        Address::Indexed { base, index } => indexed_operand(out, base, index, outgoing_stack_bytes),
         Address::NearPtr(Value::Direct(name)) => {
             Ok(Operand::IndirectDirect(Symbol::Named(name.clone())))
         }

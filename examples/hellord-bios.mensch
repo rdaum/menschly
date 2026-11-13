@@ -76,75 +76,73 @@ var block_device: BiosDevice
 var bios_call: u16
 var bios_device: u16
 var bios_arg: u16
-var bios_arg_byte: u8
-var bios_status: u16
 
 export reentrant function bios_bconstat(dev: u16): u16
-    return cop_call(BIOS_FAMILY, BIOS_BCONSTAT, dev, 0)
+    return trap(BIOS_FAMILY, BIOS_BCONSTAT, dev, 0)
 end
 
 export reentrant function bios_bconin(dev: u16): u8
-    return u8(cop_call(BIOS_FAMILY, BIOS_BCONIN, dev, 0))
+    return u8(trap(BIOS_FAMILY, BIOS_BCONIN, dev, 0))
 end
 
 export procedure bios_bconout(dev: u16, ch: u16)
     var status: u16
-    status = cop_call(BIOS_FAMILY, BIOS_BCONOUT, dev, ch)
+    status = trap(BIOS_FAMILY, BIOS_BCONOUT, dev, ch)
     return
 end
 
 export reentrant function bios_bcostat(dev: u16): u16
-    return cop_call(BIOS_FAMILY, BIOS_BCOSTAT, dev, 0)
+    return trap(BIOS_FAMILY, BIOS_BCOSTAT, dev, 0)
 end
 
 export reentrant function bios_device_first(): u16
-    return cop_call(BIOS_FAMILY, BIOS_DEV_FIRST, 0, 0)
+    return trap(BIOS_FAMILY, BIOS_DEV_FIRST, 0, 0)
 end
 
 export reentrant function bios_device_next(dev: u16): u16
-    return cop_call(BIOS_FAMILY, BIOS_DEV_NEXT, dev, 0)
+    return trap(BIOS_FAMILY, BIOS_DEV_NEXT, dev, 0)
 end
 
 export reentrant function bios_device_parent(dev: u16): u16
-    return cop_call(BIOS_FAMILY, BIOS_DEV_PARENT, dev, 0)
+    return trap(BIOS_FAMILY, BIOS_DEV_PARENT, dev, 0)
 end
 
 export reentrant function bios_device_child(dev: u16): u16
-    return cop_call(BIOS_FAMILY, BIOS_DEV_CHILD, dev, 0)
+    return trap(BIOS_FAMILY, BIOS_DEV_CHILD, dev, 0)
 end
 
 export reentrant function bios_device_kind(dev: u16): u16
-    return cop_call(BIOS_FAMILY, BIOS_DEV_KIND, dev, 0)
+    return trap(BIOS_FAMILY, BIOS_DEV_KIND, dev, 0)
 end
 
 export reentrant function bios_device_flags(dev: u16): u16
-    return cop_call(BIOS_FAMILY, BIOS_DEV_FLAGS, dev, 0)
+    return trap(BIOS_FAMILY, BIOS_DEV_FLAGS, dev, 0)
 end
 
 export reentrant function bios_device_driver(dev: u16): u16
-    return cop_call(BIOS_FAMILY, BIOS_DEV_DRIVER, dev, 0)
+    return trap(BIOS_FAMILY, BIOS_DEV_DRIVER, dev, 0)
 end
 
 export reentrant function bios_block_status(dev: u16): u16
-    return cop_call(BIOS_FAMILY, BIOS_BBLKSTAT, dev, 0)
+    return trap(BIOS_FAMILY, BIOS_BBLKSTAT, dev, 0)
 end
 
 export reentrant function bios_block_sector_count(dev: u16): u16
-    return cop_call(BIOS_FAMILY, BIOS_BBLKCOUNT, dev, 0)
+    return trap(BIOS_FAMILY, BIOS_BBLKCOUNT, dev, 0)
 end
 
 export reentrant procedure bios_block_set_lba(dev: u16, lba: u16)
     var status: u16
-    status = cop_call(BIOS_FAMILY, BIOS_BSETLBA, dev, lba)
+    status = trap(BIOS_FAMILY, BIOS_BSETLBA, dev, lba)
     return
 end
 
 export reentrant function bios_block_read(dev: u16, buffer: near ^u8): u16
-    return cop_call(BIOS_FAMILY, BIOS_BREAD, dev, u16(buffer))
+    return trap(BIOS_FAMILY, BIOS_BREAD, dev, u16(buffer))
 end
 
 export reentrant function bios_block_write(dev: u16, buffer: near ^u8): u16
-    return cop_call(BIOS_FAMILY, BIOS_BWRITE, dev, u16(buffer))
+    return trap(BIOS_FAMILY, BIOS_BWRITE, dev, u16(buffer))
 end
 
 export procedure bios_init_registry()
@@ -223,15 +221,7 @@ reentrant function bios_dispatch_bconin(): u16
             if driver == DEVICE_DRIVER_SERIAL
                 if serial_device.flags & DEVICE_FLAG_READ != 0
                     if serial_has_data() != 0
-                        bios_arg_byte = serial_read()
-                        bios_status = 0
-                        asm "sep #$20"
-                        asm ".a8"
-                        asm "lda bios_arg_byte"
-                        asm "sta bios_status"
-                        asm "rep #$20"
-                        asm ".a16"
-                        return bios_status
+                        return u16(serial_read())
                     else
                         return 0
                     end
@@ -381,16 +371,7 @@ end
 reentrant function bios_dispatch_block_sector_count(): u16
     if bios_find_device() != 0
         if bios_device == block_device.id
-            bios_status = 0
-            asm "sep #$20"
-            asm ".a8"
-            asm "lda block_sector_count1"
-            asm "sta bios_status+1"
-            asm "lda block_sector_count0"
-            asm "sta bios_status"
-            asm "rep #$20"
-            asm ".a16"
-            return bios_status
+            return u16(block_sector_count1) << 8 | u16(block_sector_count0)
         else
             return 0
         end
@@ -403,15 +384,9 @@ reentrant function bios_dispatch_block_set_lba(): u16
     if bios_find_device() != 0
         if bios_device == block_device.id
             block_lba0 = u8(bios_arg)
-            bios_status = bios_arg
-            asm "sep #$20"
-            asm ".a8"
-            asm "lda bios_status+1"
-            asm "sta block_lba1"
-            asm "stz block_lba2"
-            asm "stz block_lba3"
-            asm "rep #$20"
-            asm ".a16"
+            block_lba1 = u8(bios_arg >> 8)
+            block_lba2 = 0
+            block_lba3 = 0
             return 0
         else
             return $ffff
@@ -479,7 +454,6 @@ export reentrant function bios_trap_dispatch(call: u16, dev: u16, arg: u16): u16
     bios_call = call
     bios_device = dev
     bios_arg = arg
-    bios_arg_byte = u8(arg)
     if bios_call == BIOS_BCONSTAT
         return bios_dispatch_bconstat()
     elsif bios_call == BIOS_BCONIN

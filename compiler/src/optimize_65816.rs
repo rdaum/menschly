@@ -86,6 +86,7 @@ fn map_operands(inst: &AsmInst, map: &mut impl FnMut(&Operand) -> Operand) -> As
         AsmInst::Adc(operand) => AsmInst::Adc(map(operand)),
         AsmInst::Sbc(operand) => AsmInst::Sbc(map(operand)),
         AsmInst::And(operand) => AsmInst::And(map(operand)),
+        AsmInst::Ora(operand) => AsmInst::Ora(map(operand)),
         AsmInst::Inc(operand) => AsmInst::Inc(map(operand)),
         AsmInst::Dec(operand) => AsmInst::Dec(map(operand)),
         AsmInst::Cmp(operand) => AsmInst::Cmp(map(operand)),
@@ -280,7 +281,12 @@ fn remove_redundant_accumulator_loads(insts: &[AsmInst]) -> Vec<AsmInst> {
                 out.push(inst.clone());
                 state.store_a_to(operand);
             }
-            AsmInst::Adc(_) | AsmInst::Sbc(_) | AsmInst::And(_) => {
+            AsmInst::Adc(_)
+            | AsmInst::Sbc(_)
+            | AsmInst::And(_)
+            | AsmInst::Ora(_)
+            | AsmInst::AslA
+            | AsmInst::LsrA => {
                 out.push(inst.clone());
                 state.a_changed_with_matching_flags();
             }
@@ -525,7 +531,13 @@ impl IndexLoadState {
                 self.x.flags_match = true;
                 self.y.flags_no_longer_match();
             }
-            AsmInst::Lda(_) | AsmInst::Adc(_) | AsmInst::Sbc(_) | AsmInst::And(_) => {
+            AsmInst::Lda(_)
+            | AsmInst::Adc(_)
+            | AsmInst::Sbc(_)
+            | AsmInst::And(_)
+            | AsmInst::Ora(_)
+            | AsmInst::AslA
+            | AsmInst::LsrA => {
                 self.x.flags_no_longer_match();
                 self.y.flags_no_longer_match();
             }
@@ -710,7 +722,13 @@ impl IndexTransferState {
                 self.invalidate_a_memory_aliases_for_unrelated_store(operand);
                 self.invalidate_x_memory_aliases_for_unrelated_store(operand);
             }
-            AsmInst::Adc(_) | AsmInst::Sbc(_) | AsmInst::And(_) | AsmInst::Tya => {
+            AsmInst::Adc(_)
+            | AsmInst::Sbc(_)
+            | AsmInst::And(_)
+            | AsmInst::Ora(_)
+            | AsmInst::AslA
+            | AsmInst::LsrA
+            | AsmInst::Tya => {
                 self.a_aliases.clear();
             }
             AsmInst::Inx => {

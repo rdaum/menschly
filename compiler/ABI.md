@@ -93,9 +93,28 @@ interrupt fires while foreground code is preparing or using the same call.
 
 ## System Calls
 
-Hellord system calls use the 65816 `COP` software-interrupt instruction as the
-machine equivalent of the TOS `TRAP` families. The immediate byte selects the
-call family:
+Mensch code makes a system call with the target-neutral builtin
+
+```text
+trap(family, call, arg0, arg1): u16      ; `cop_call` is an older alias
+```
+
+Each family has one dispatcher, an ordinary
+`reentrant function(call: u16, arg0: u16, arg1: u16): u16`. How a trap
+reaches the dispatcher depends on the target:
+
+- 65816: the `COP` instruction, described below.
+- MEGA65 (45GS02): the CPU has no software trap outside the hypervisor, so
+  `trap` pushes the arguments with the reentrant ABI and calls the dispatcher
+  through a fixed vector table: `jsr ($FF00 + 2 * family)`. A module fills
+  table slots with `vector trap_XX = dispatcher` (families `$00`-`$0f`); see
+  `examples/hellord-traps-mega65.mensch`. The table address is part of the
+  MEGA65 kernel ABI, so separately loaded programs can call the kernel
+  without linking against it.
+
+On the 65816, Hellord system calls use the `COP` software-interrupt
+instruction as the machine equivalent of the TOS `TRAP` families. The
+immediate byte selects the call family:
 
 ```text
 COP #$01   GEMDOS-like process, file, path, and memory services
@@ -442,3 +461,31 @@ A = $0100       ; get stddev, X = stdin=0/stdout=1/stderr=2
 COP #$01
 A = $0101       ; set stddev, X = stream, Y = BIOS device id
 ```
+
+## MEGA65 (45GS02) Target
+
+The MEGA65 backend (`menschc --target mega65`) shares the IR and storage
+assignment with the 65816 backend but lowers everything byte by byte:
+
+- Z is zero between instructions; `(bp),z` and `[bp],z` sequences restore it.
+- The IR's virtual accumulator lives in base page (`__m65_acc`, 4 bytes).
+  Scratch pointers `__m65_ptr` and `__m65_farp` and the frame pointer
+  `__m65_fp` are also runtime base-page registers.
+- Function results come back in `A` (byte 0), `X` (byte 1) and `Y` (byte 2).
+- Internal and exported routines use direct-page parameters, as on the 65816.
+  `far` currently means nothing: every call is `jsr`/`rts`.
+- The runtime runs with a 16-bit stack pointer. Routines with stack storage
+  address their frame through `__m65_fp` with `(fp),y`:
+
+  ```text
+  fp+1 .. fp+F        locals and spilled scratch (zeroed on entry)
+  fp+F+1, fp+F+2      caller's fp
+  fp+F+3, fp+F+4      return address
+  fp+F+5 ..           stack arguments, first parameter lowest
+  ```
+
+  Reentrant callees pop their own arguments with `rtn #n`.
+- Array indexing forms the full 16-bit address `base + index` in
+  `__m65_ptr`, so indexes are not limited to the 8-bit X register.
+- Interrupt routines save A/X/Y/Z and re-establish Z = 0. They do not yet
+  save the base-page runtime registers.

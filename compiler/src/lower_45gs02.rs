@@ -52,6 +52,10 @@ pub const FP_SYMBOL: &str = "__m65_fp";
 
 pub const RUNTIME_DIRECT_SYMBOLS: [&str; 4] = [ACC_SYMBOL, PTR_SYMBOL, FARP_SYMBOL, FP_SYMBOL];
 
+/// Fixed address of the trap vector table: family `n`'s dispatcher address
+/// is the word at `TRAP_TABLE + 2n`. Part of the MEGA65 kernel ABI.
+pub const TRAP_TABLE: u16 = 0xff00;
+
 /// Bytes between the locals and the return address (the saved fp).
 const SAVED_FP_BYTES: u16 = 2;
 
@@ -343,6 +347,24 @@ impl<'a> RoutineLowerer<'a> {
                 lhs,
                 rhs,
             } => self.byte_op(*width, Op::And, dst, lhs, rhs)?,
+            IrInst::BitOr {
+                width,
+                dst,
+                lhs,
+                rhs,
+            } => self.byte_op(*width, Op::Ora, dst, lhs, rhs)?,
+            IrInst::ShiftLeft {
+                width,
+                dst,
+                lhs,
+                rhs,
+            } => self.shift(*width, true, dst, lhs, rhs)?,
+            IrInst::ShiftRight {
+                width,
+                dst,
+                lhs,
+                rhs,
+            } => self.shift(*width, false, dst, lhs, rhs)?,
             IrInst::Inc { width, value } => self.inc(*width, value)?,
             IrInst::Dec { width, value } => self.dec(*width, value)?,
             IrInst::Compare { width, lhs, rhs } => self.compare(*width, lhs, rhs)?,
@@ -388,8 +410,27 @@ impl<'a> RoutineLowerer<'a> {
                 self.load_result(width, value)?;
                 self.emit_return();
             }
-            IrInst::CopSignature { .. } | IrInst::CopRegister { .. } | IrInst::CopCall { .. } => {
-                return Err(self.unsupported("COP traps (65816-only)"));
+            IrInst::Trap {
+                family,
+                call,
+                x,
+                y,
+                dst,
+            } => {
+                // Call the family dispatcher with the reentrant ABI:
+                // dispatcher(call, arg0, arg1), arguments pushed last-first.
+                for value in [y, x, call] {
+                    self.lower_inst(&IrInst::Push {
+                        width: Width::Word,
+                        value: value.clone(),
+                    })?;
+                }
+                let vector = TRAP_TABLE + u16::from(*family) * 2;
+                self.emit(Op::Jsr, Operand::Indirect(format!("${vector:04x}")));
+                self.store_result(Width::Word, dst)?;
+            }
+            IrInst::CopSignature { .. } | IrInst::CopRegister { .. } => {
+                return Err(self.unsupported("COP trap frames (65816-only)"));
             }
         }
         Ok(())
@@ -495,6 +536,62 @@ impl<'a> RoutineLowerer<'a> {
             self.load_byte_to_a(lhs, i)?;
             self.value_op(op, rhs, i)?;
             self.store_a_to_byte(dst, i)?;
+        }
+        Ok(())
+    }
+
+    /// Constant shifts: whole bytes move first, then the remaining bits
+    /// ripple through the bytes in the base-page accumulator.
+    fn shift(
+        &mut self,
+        width: Width,
+        left: bool,
+        dst: &Value,
+        lhs: &Value,
+        rhs: &Value,
+    ) -> Result<(), LowerError> {
+        let Value::Const(count) = rhs else {
+            return Err(self.unsupported("shifting by a non-constant count"));
+        };
+        let count = u16::from(const_byte(*count, 0));
+        let bytes = width.size_bytes();
+        let (byte_shift, bit_shift) = (count / 8, count % 8);
+        let acc = Value::Accumulator;
+        // Iterate so each source byte is read before the same location is written.
+        let order: Vec<u16> = if left {
+            (0..bytes).rev().collect()
+        } else {
+            (0..bytes).collect()
+        };
+        for i in order {
+            let source = if left {
+                i.checked_sub(byte_shift)
+            } else {
+                Some(i + byte_shift).filter(|source| *source < bytes)
+            };
+            match source {
+                Some(source) => {
+                    self.load_byte_to_a(lhs, source)?;
+                    self.store_a_to_byte(&acc, i)?;
+                }
+                None => self.emit(Op::Stz, Operand::Base(offset(ACC_SYMBOL, i))),
+            }
+        }
+        for _ in 0..bit_shift {
+            if left {
+                for i in 0..bytes {
+                    let op = if i == 0 { Op::Asl } else { Op::Rol };
+                    self.emit(op, Operand::Base(offset(ACC_SYMBOL, i)));
+                }
+            } else {
+                for i in (0..bytes).rev() {
+                    let op = if i + 1 == bytes { Op::Lsr } else { Op::Ror };
+                    self.emit(op, Operand::Base(offset(ACC_SYMBOL, i)));
+                }
+            }
+        }
+        if dst != &acc {
+            self.copy_value(width, dst, &acc)?;
         }
         Ok(())
     }
@@ -634,6 +731,23 @@ impl<'a> RoutineLowerer<'a> {
             Address::Symbol(name) => (AddressForm::Absolute(name.clone()), false),
             Address::Direct(name) => (AddressForm::Base(name.clone()), false),
             Address::SymbolIndexedX(name) => (AddressForm::AbsoluteX(name.clone()), false),
+            Address::Indexed { base, index } => {
+                if let Value::Const(value) = index {
+                    let offset_bytes =
+                        u16::from(const_byte(*value, 0)) | u16::from(const_byte(*value, 1)) << 8;
+                    (AddressForm::Absolute(offset(base, offset_bytes)), false)
+                } else {
+                    // X is only 8 bits, so form the full 16-bit address.
+                    self.implied(Op::Clc);
+                    for (i, part) in ["<", ">"].into_iter().enumerate() {
+                        let i = i as u16;
+                        self.emit(Op::Lda, Operand::Immediate(format!("{part}{base}")));
+                        self.value_op(Op::Adc, index, i)?;
+                        self.emit(Op::Sta, Operand::Base(offset(PTR_SYMBOL, i)));
+                    }
+                    (AddressForm::IndirectZ(PTR_SYMBOL.to_owned()), true)
+                }
+            }
             Address::Absolute(address) => {
                 (AddressForm::Absolute(self.near_address(*address)?), false)
             }

@@ -182,6 +182,9 @@ pub enum Expr {
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     BitAnd(Box<Expr>, Box<Expr>),
+    BitOr(Box<Expr>, Box<Expr>),
+    ShiftLeft(Box<Expr>, Box<Expr>),
+    ShiftRight(Box<Expr>, Box<Expr>),
     Deref(Box<Expr>),
     Index(Box<Expr>, Box<Expr>),
     Field(Box<Expr>, String),
@@ -228,6 +231,9 @@ enum TokenKind {
     Plus,
     Minus,
     Amp,
+    Pipe,
+    ShiftLeft,
+    ShiftRight,
     Less,
     LessEqual,
     Greater,
@@ -272,8 +278,12 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             '+' => out.push(token(TokenKind::Plus, offset)),
             '-' => out.push(token(TokenKind::Minus, offset)),
             '&' => out.push(token(TokenKind::Amp, offset)),
+            '|' => out.push(token(TokenKind::Pipe, offset)),
             '<' => {
-                if matches!(chars.peek(), Some((_, '='))) {
+                if matches!(chars.peek(), Some((_, '<'))) {
+                    chars.next();
+                    out.push(token(TokenKind::ShiftLeft, offset));
+                } else if matches!(chars.peek(), Some((_, '='))) {
                     chars.next();
                     out.push(token(TokenKind::LessEqual, offset));
                 } else {
@@ -281,7 +291,10 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                 }
             }
             '>' => {
-                if matches!(chars.peek(), Some((_, '='))) {
+                if matches!(chars.peek(), Some((_, '>'))) {
+                    chars.next();
+                    out.push(token(TokenKind::ShiftRight, offset));
+                } else if matches!(chars.peek(), Some((_, '='))) {
                     chars.next();
                     out.push(token(TokenKind::GreaterEqual, offset));
                 } else {
@@ -1174,11 +1187,37 @@ impl Parser {
         Ok(Cond::Compare(CondCompare { lhs, op, rhs }))
     }
 
+    /// Binary operator precedence follows C: `|` < `&` < shifts < `+`/`-`.
     fn parse_expr(&mut self) -> Result<Expr, FrontendError> {
-        let mut expr = self.parse_add()?;
+        let mut expr = self.parse_bit_and()?;
+        while self.take(TokenKind::Pipe) {
+            let rhs = self.parse_bit_and()?;
+            expr = Expr::BitOr(Box::new(expr), Box::new(rhs));
+        }
+        Ok(expr)
+    }
+
+    fn parse_bit_and(&mut self) -> Result<Expr, FrontendError> {
+        let mut expr = self.parse_shift()?;
         while self.take(TokenKind::Amp) {
-            let rhs = self.parse_add()?;
+            let rhs = self.parse_shift()?;
             expr = Expr::BitAnd(Box::new(expr), Box::new(rhs));
+        }
+        Ok(expr)
+    }
+
+    fn parse_shift(&mut self) -> Result<Expr, FrontendError> {
+        let mut expr = self.parse_add()?;
+        loop {
+            if self.take(TokenKind::ShiftLeft) {
+                let rhs = self.parse_add()?;
+                expr = Expr::ShiftLeft(Box::new(expr), Box::new(rhs));
+            } else if self.take(TokenKind::ShiftRight) {
+                let rhs = self.parse_add()?;
+                expr = Expr::ShiftRight(Box::new(expr), Box::new(rhs));
+            } else {
+                break;
+            }
         }
         Ok(expr)
     }
@@ -1697,7 +1736,17 @@ impl Lowerer {
                     vector.name, vector.routine
                 )));
             };
-            if !matches!(sig.abi, Abi::Interrupt) {
+            if let Some(family) = trap_vector_family(&vector.name) {
+                // Trap vectors point at a family dispatcher with the trap ABI:
+                // reentrant function(call: u16, arg0: u16, arg1: u16): u16.
+                family.map_err(FrontendError::Type)?;
+                if !matches!(sig.abi, Abi::Reentrant) {
+                    return Err(FrontendError::Type(format!(
+                        "trap vector {} references non-reentrant routine {}",
+                        vector.name, vector.routine
+                    )));
+                }
+            } else if !matches!(sig.abi, Abi::Interrupt) {
                 return Err(FrontendError::Type(format!(
                     "vector {} references non-interrupt routine {}",
                     vector.name, vector.routine
@@ -2097,7 +2146,7 @@ impl<'a> RoutineLowerer<'a> {
                     self.body.push(IrInst::CopRegister { register, dst });
                     return Ok(());
                 }
-                if name == "cop_call" {
+                if is_trap_builtin(name) {
                     self.lower_cop_call(args, expected, dst)?;
                     return Ok(());
                 }
@@ -2199,6 +2248,45 @@ impl<'a> RoutineLowerer<'a> {
                     dst,
                     lhs,
                     rhs,
+                });
+                Ok(())
+            }
+            Expr::BitOr(lhs, rhs) => {
+                let lhs_ty = self.infer_expr(lhs)?;
+                let rhs_ty = self.infer_expr(rhs)?;
+                let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
+                ensure_assignable(expected, &lhs_ty)?;
+                let lhs = self.expr_value(lhs, &lhs_ty)?;
+                let rhs = self.expr_value(rhs, &lhs_ty)?;
+                self.body.push(IrInst::BitOr {
+                    width,
+                    dst,
+                    lhs,
+                    rhs,
+                });
+                Ok(())
+            }
+            Expr::ShiftLeft(lhs, rhs) | Expr::ShiftRight(lhs, rhs) => {
+                let lhs_ty = self.infer_expr(lhs)?;
+                let count = self.shift_count(&lhs_ty, rhs)?;
+                let width = width_for_type(&lhs_ty)?;
+                ensure_assignable(expected, &lhs_ty)?;
+                let lhs = self.expr_value(lhs, &lhs_ty)?;
+                let rhs = Value::Const(Const::U8(count));
+                self.body.push(if matches!(expr, Expr::ShiftLeft(..)) {
+                    IrInst::ShiftLeft {
+                        width,
+                        dst,
+                        lhs,
+                        rhs,
+                    }
+                } else {
+                    IrInst::ShiftRight {
+                        width,
+                        dst,
+                        lhs,
+                        rhs,
+                    }
                 });
                 Ok(())
             }
@@ -2337,15 +2425,23 @@ impl<'a> RoutineLowerer<'a> {
                 "array indexes currently need a 16-bit scalar".to_owned(),
             ));
         }
-        self.lower_expr_to(index, &index_ty, Value::Accumulator)?;
-        self.body.push(IrInst::Move {
-            width: Width::Word,
-            dst: Value::IndexX,
-            src: Value::Accumulator,
-        });
+        // Names and constants are used in place; computed indexes are left in
+        // the accumulator, which every backend can index from directly.
+        let index = if matches!(index, Expr::Name(_) | Expr::Number(_)) {
+            self.expr_value(index, &index_ty)?
+        } else {
+            self.lower_expr_to(index, &index_ty, Value::Accumulator)?;
+            Value::Accumulator
+        };
 
         match binding.value {
-            Value::Global(symbol) => Ok((Address::SymbolIndexedX(symbol), *element)),
+            Value::Global(symbol) => Ok((
+                Address::Indexed {
+                    base: symbol,
+                    index,
+                },
+                *element,
+            )),
             other => Err(FrontendError::Type(format!(
                 "indexed access currently requires a global array, got {other:?}"
             ))),
@@ -2393,7 +2489,7 @@ impl<'a> RoutineLowerer<'a> {
                 self.check_cop_register_call(name, args)?;
                 Ok(Type::U16)
             }
-            Expr::Call { name, args } if name == "cop_call" => {
+            Expr::Call { name, args } if is_trap_builtin(name) => {
                 self.check_cop_call(args)?;
                 Ok(Type::U16)
             }
@@ -2412,10 +2508,15 @@ impl<'a> RoutineLowerer<'a> {
                 compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
                 Ok(lhs_ty)
             }
-            Expr::BitAnd(lhs, rhs) => {
+            Expr::BitAnd(lhs, rhs) | Expr::BitOr(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 let rhs_ty = self.infer_expr(rhs)?;
                 compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
+                Ok(lhs_ty)
+            }
+            Expr::ShiftLeft(lhs, rhs) | Expr::ShiftRight(lhs, rhs) => {
+                let lhs_ty = self.infer_expr(lhs)?;
+                self.shift_count(&lhs_ty, rhs)?;
                 Ok(lhs_ty)
             }
             Expr::Deref(ptr) => {
@@ -2615,7 +2716,7 @@ impl<'a> RoutineLowerer<'a> {
         let call = self.expr_value(&args[1], &Type::U16)?;
         let x = self.expr_value(&args[2], &Type::U16)?;
         let y = self.expr_value(&args[3], &Type::U16)?;
-        self.body.push(IrInst::CopCall {
+        self.body.push(IrInst::Trap {
             family,
             call,
             x,
@@ -2706,6 +2807,23 @@ impl<'a> RoutineLowerer<'a> {
         self.bindings
             .get(name)
             .ok_or_else(|| FrontendError::Type(format!("unknown variable {name}")))
+    }
+
+    /// Shift counts must be constants smaller than the shifted value's width.
+    fn shift_count(&self, lhs_ty: &Type, rhs: &Expr) -> Result<u8, FrontendError> {
+        let Some(bytes) = integer_width(lhs_ty) else {
+            return Err(FrontendError::Type(format!("cannot shift a {lhs_ty:?}")));
+        };
+        let count = self
+            .const_expr_value(rhs)
+            .map_err(|_| FrontendError::Type("shift counts must be constants".to_owned()))?;
+        if count >= u32::from(bytes) * 8 {
+            return Err(FrontendError::Type(format!(
+                "shift count {count} is not smaller than the {}-bit operand",
+                bytes * 8
+            )));
+        }
+        Ok(count as u8)
     }
 
     fn is_const_expr(&self, expr: &Expr) -> Result<bool, FrontendError> {
@@ -2804,6 +2922,31 @@ fn record_field<'a>(ty: &'a Type, name: &str) -> Result<&'a Field, FrontendError
         .find(|field| field.name == name)
         .ok_or_else(|| FrontendError::Type(format!("record has no field {name}")))
 }
+
+/// `trap(family, call, arg0, arg1)` makes a numbered system call; `cop_call`
+/// is its original, 65816-flavoured name.
+fn is_trap_builtin(name: &str) -> bool {
+    name == "trap" || name == "cop_call"
+}
+
+/// For a vector named `trap_XX`, returns the family number (hex, $00-$0f).
+fn trap_vector_family(name: &str) -> Option<Result<u8, String>> {
+    let digits = name.strip_prefix("trap_")?;
+    Some(
+        u8::from_str_radix(digits, 16)
+            .ok()
+            .filter(|family| *family < TRAP_FAMILIES)
+            .ok_or_else(|| {
+                format!(
+                    "trap vector {name} needs a hex family $00-${:02x}",
+                    TRAP_FAMILIES - 1
+                )
+            }),
+    )
+}
+
+/// Number of trap families a trap vector table can hold.
+pub const TRAP_FAMILIES: u8 = 16;
 
 fn compatible_expr_width(
     lhs: &Type,
@@ -3189,16 +3332,16 @@ mod tests {
         assert!(body.iter().any(|inst| matches!(
             inst,
             IrInst::Store {
-                addr: Address::SymbolIndexedX(name),
+                addr: Address::Indexed { base, .. },
                 ..
-            } if name == "buffer"
+            } if base == "buffer"
         )));
         assert!(body.iter().any(|inst| matches!(
             inst,
             IrInst::Load {
-                addr: Address::SymbolIndexedX(name),
+                addr: Address::Indexed { base, .. },
                 ..
-            } if name == "buffer"
+            } if base == "buffer"
         )));
     }
 

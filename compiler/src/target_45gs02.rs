@@ -60,6 +60,10 @@ pub enum Op {
     Cpx,
     Inc,
     Dec,
+    Asl,
+    Rol,
+    Lsr,
+    Ror,
     /// 16-bit increment of a base-page word.
     Inw,
     /// 16-bit decrement of a base-page word.
@@ -113,6 +117,10 @@ impl Op {
             Self::Cmp => "cmp",
             Self::Cpx => "cpx",
             Self::Inc => "inc",
+            Self::Asl => "asl",
+            Self::Rol => "rol",
+            Self::Lsr => "lsr",
+            Self::Ror => "ror",
             Self::Dec => "dec",
             Self::Inw => "inw",
             Self::Dew => "dew",
@@ -157,6 +165,8 @@ pub enum Operand {
     FlatZ(String),
     /// Branch/jump target.
     Label(String),
+    /// `(addr)` — indirect jump/call through a vector.
+    Indirect(String),
 }
 
 impl Operand {
@@ -195,6 +205,7 @@ impl Ca65Inst for Inst {
                     Operand::IndirectY(symbol) => format!("{mnemonic} ({symbol}),y"),
                     Operand::FlatZ(symbol) => format!("{mnemonic} [{symbol}],z"),
                     Operand::Label(label) => format!("{mnemonic} {label}"),
+                    Operand::Indirect(address) => format!("{mnemonic} ({address})"),
                 }
             }
         }

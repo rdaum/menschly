@@ -448,3 +448,108 @@ fn reports_unsupported_cop_traps() {
     .expect_err("COP traps have no 45GS02 lowering");
     assert!(error.contains("45GS02 backend does not support"), "{error}");
 }
+
+#[test]
+fn shifts_and_bitwise_or() {
+    let Some(run) = run_source(
+        "shifts",
+        "
+        module Shifts
+        fixed($0870) volatile var out: [12]u8
+
+        export function main(): u8
+            var w: u16
+            var b: u8
+            w = $1234
+            out[0] = u8(w << 4)
+            out[1] = u8(w >> 4)
+            w = w << 5
+            out[2] = u8(w)
+            out[3] = u8(w >> 8)
+            w = $00ab
+            w = w << 8 | $00cd
+            out[4] = u8(w)
+            out[5] = u8(w >> 8)
+            w = $8001 >> 15
+            out[6] = u8(w)
+            b = $81
+            out[7] = b << 1 | b >> 7
+            out[8] = $f0 | $0f
+            return out[7]
+        end
+        ",
+    ) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 0x03);
+    let out = &run.memory[0x0870..0x0879];
+    assert_eq!(out, &[0x40, 0x23, 0x80, 0x46, 0xcd, 0xab, 0x01, 0x03, 0xff]);
+}
+
+#[test]
+fn indexing_beyond_255_bytes() {
+    let Some(run) = run_source(
+        "wide-index",
+        "
+        module WideIndex
+        fixed($2000) var sector: [512]u8
+
+        export function main(): u8
+            var i: u16
+            i = 0
+            while i != 512
+                sector[i] = u8(i >> 1)
+                i = i + 1
+            end
+            sector[511] = $5a
+            return sector[300]
+        end
+        ",
+    ) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 150);
+    assert_eq!(run.memory[0x2000 + 2], 1);
+    assert_eq!(run.memory[0x2000 + 300], 150);
+    assert_eq!(run.memory[0x2000 + 510], 255);
+    assert_eq!(run.memory[0x2000 + 511], 0x5a);
+}
+
+#[test]
+fn traps_dispatch_through_the_vector_table() {
+    let Some(run) = run_source(
+        "traps",
+        "
+        module Traps
+        vector trap_01 = gemdos
+        vector trap_0d = bios
+        fixed($0880) volatile var out: [6]u8
+
+        export function main(): u8
+            var r: u16
+            r = trap($0d, 7, $0100, $0023)
+            out[0] = u8(r)
+            out[1] = u8(r >> 8)
+            r = trap($01, 2, 40, 2)
+            out[2] = u8(r)
+            out[3] = u8(trap($0d, 9, 0, 0))
+            return out[0]
+        end
+
+        reentrant function bios(call: u16, arg0: u16, arg1: u16): u16
+            if call == 7
+                return arg0 | arg1
+            end
+            return $ffff
+        end
+
+        reentrant function gemdos(call: u16, arg0: u16, arg1: u16): u16
+            return arg0 + arg1 + call
+        end
+        ",
+    ) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 0x23);
+    assert_eq!(&run.memory[0x0880..0x0884], &[0x23, 0x01, 44, 0xff]);
+}

@@ -86,7 +86,9 @@ __m65_reset:
 pub const LINKER_CONFIG: &str = r#"MEMORY {
   ZP:   start = $0002,  size = $00fe, type = rw;
   PAD:  start = $0000,  size = $e000, file = %O, fill = yes;
-  ROM:  start = $e000,  size = $1ffa, file = %O, fill = yes;
+  ROM:  start = $e000,  size = $1f00, file = %O, fill = yes;
+  TRAP: start = $ff00,  size = $0020, file = %O, fill = yes;
+  TAIL: start = $ff20,  size = $00da, file = %O, fill = yes;
   VEC:  start = $fffa,  size = $0006, file = %O, fill = yes;
   HIGH: start = $10000, size = $10000, file = %O, fill = yes;
   BSS:  start = $1000,  size = $6000, type = rw;
@@ -99,6 +101,22 @@ SEGMENTS {
   RODATA:       load = ROM, type = ro, optional = yes;
   MENSCH_META:  load = ROM, type = ro, optional = yes;
   BSS:          load = BSS, type = bss, define = yes;
+  VECTOR_TRAP_00: load = TRAP, type = ro, optional = yes, offset = $0000;
+  VECTOR_TRAP_01: load = TRAP, type = ro, optional = yes, offset = $0002;
+  VECTOR_TRAP_02: load = TRAP, type = ro, optional = yes, offset = $0004;
+  VECTOR_TRAP_03: load = TRAP, type = ro, optional = yes, offset = $0006;
+  VECTOR_TRAP_04: load = TRAP, type = ro, optional = yes, offset = $0008;
+  VECTOR_TRAP_05: load = TRAP, type = ro, optional = yes, offset = $000a;
+  VECTOR_TRAP_06: load = TRAP, type = ro, optional = yes, offset = $000c;
+  VECTOR_TRAP_07: load = TRAP, type = ro, optional = yes, offset = $000e;
+  VECTOR_TRAP_08: load = TRAP, type = ro, optional = yes, offset = $0010;
+  VECTOR_TRAP_09: load = TRAP, type = ro, optional = yes, offset = $0012;
+  VECTOR_TRAP_0A: load = TRAP, type = ro, optional = yes, offset = $0014;
+  VECTOR_TRAP_0B: load = TRAP, type = ro, optional = yes, offset = $0016;
+  VECTOR_TRAP_0C: load = TRAP, type = ro, optional = yes, offset = $0018;
+  VECTOR_TRAP_0D: load = TRAP, type = ro, optional = yes, offset = $001a;
+  VECTOR_TRAP_0E: load = TRAP, type = ro, optional = yes, offset = $001c;
+  VECTOR_TRAP_0F: load = TRAP, type = ro, optional = yes, offset = $001e;
   VECTOR_NMI:   load = VEC, type = ro, optional = yes, offset = $0000;
   VECTOR_RESET: load = VEC, type = ro, offset = $0002;
   VECTOR_IRQ:   load = VEC, type = ro, optional = yes, offset = $0004;

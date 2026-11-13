@@ -1589,14 +1589,7 @@ reentrant function fat_entry_size(entry: u16): u16
 end
 
 reentrant function fat_entry_offset(index: u16): u16
-    asm "lda $03,s"
-    asm "asl a"
-    asm "asl a"
-    asm "asl a"
-    asm "asl a"
-    asm "asl a"
-    asm "sta $03,s"
-    return index
+    return index << 5
 end
 
 reentrant function fat_boot_u16(offset: u16): u16
@@ -1604,15 +1597,7 @@ reentrant function fat_boot_u16(offset: u16): u16
 end
 
 reentrant function byte_to_high_word(value: u16): u16
-    asm "sep #$20"
-    asm ".a8"
-    asm "lda $03,s"
-    asm "sta $04,s"
-    asm "lda #$00"
-    asm "sta $03,s"
-    asm "rep #$20"
-    asm ".a16"
-    return value
+    return value << 8
 end
 
 reentrant procedure fat_write_search_entry(dta: near ^u8, entry: u16)

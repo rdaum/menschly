@@ -126,7 +126,7 @@ pub fn emit<I: Ca65Inst>(module: &crate::asm::AsmModule<I>) -> String {
     if !module.vectors.is_empty() {
         for vector in &module.vectors {
             out.push_str(".segment \"");
-            out.push_str(vector_segment(&vector.name));
+            out.push_str(&vector_segment(&vector.name));
             out.push_str("\"\n");
             out.push_str("__vector_");
             out.push_str(&vector.name);
@@ -180,14 +180,16 @@ fn emit_code_segment(out: &mut String, segment: &str) {
     }
 }
 
-fn vector_segment(name: &str) -> &'static str {
+fn vector_segment(name: &str) -> String {
     match name {
-        "cop" => "VECTOR_COP",
-        "brk" => "VECTOR_BRK",
-        "abort" => "VECTOR_ABORT",
-        "nmi" => "VECTOR_NMI",
-        "irq" => "VECTOR_IRQ",
-        _ => "VECTORS",
+        "cop" => "VECTOR_COP".to_owned(),
+        "brk" => "VECTOR_BRK".to_owned(),
+        "abort" => "VECTOR_ABORT".to_owned(),
+        "nmi" => "VECTOR_NMI".to_owned(),
+        "irq" => "VECTOR_IRQ".to_owned(),
+        // Trap table entries: `trap_0d` -> `VECTOR_TRAP_0D`.
+        _ if name.starts_with("trap_") => format!("VECTOR_{}", name.to_ascii_uppercase()),
+        _ => "VECTORS".to_owned(),
     }
 }
 
@@ -297,6 +299,9 @@ fn emit_inst(inst: &AsmInst) -> String {
         AsmInst::Adc(operand) => one_operand("adc", operand),
         AsmInst::Sbc(operand) => one_operand("sbc", operand),
         AsmInst::And(operand) => one_operand("and", operand),
+        AsmInst::Ora(operand) => one_operand("ora", operand),
+        AsmInst::AslA => "asl a".to_owned(),
+        AsmInst::LsrA => "lsr a".to_owned(),
         AsmInst::Xba => "xba".to_owned(),
         AsmInst::Pha => "pha".to_owned(),
         AsmInst::Phx => "phx".to_owned(),

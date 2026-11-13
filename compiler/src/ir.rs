@@ -416,6 +416,26 @@ pub enum IrInst {
         lhs: Value,
         rhs: Value,
     },
+    BitOr {
+        width: Width,
+        dst: Value,
+        lhs: Value,
+        rhs: Value,
+    },
+    /// `lhs << rhs`; `rhs` is always a constant bit count.
+    ShiftLeft {
+        width: Width,
+        dst: Value,
+        lhs: Value,
+        rhs: Value,
+    },
+    /// Logical `lhs >> rhs`; `rhs` is always a constant bit count.
+    ShiftRight {
+        width: Width,
+        dst: Value,
+        lhs: Value,
+        rhs: Value,
+    },
     Dec {
         width: Width,
         value: Value,
@@ -474,7 +494,7 @@ pub enum IrInst {
         register: CopRegister,
         dst: Value,
     },
-    CopCall {
+    Trap {
         family: u8,
         call: Value,
         x: Value,
@@ -514,7 +534,16 @@ pub enum Address {
     Symbol(String),
     Direct(String),
     SymbolIndexedX(String),
-    ValueOffset { base: Value, offset: u16 },
+    /// `base + index`, where `index` is a 16-bit byte offset. Each backend
+    /// picks its own indexing strategy (X register, computed pointer, ...).
+    Indexed {
+        base: String,
+        index: Value,
+    },
+    ValueOffset {
+        base: Value,
+        offset: u16,
+    },
     NearPtr(Value),
     FarPtr(Value),
     Absolute(u32),

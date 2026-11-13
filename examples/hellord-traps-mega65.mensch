@@ -1,0 +1,9 @@
+module HellordTrapsMega65
+
+# MEGA65 trap entry: the 45GS02 has no COP, so trap(family, ...) calls the
+# family dispatcher through the fixed vector table at $FF00 (see ABI.md).
+vector trap_01 = gemdos_trap_dispatch
+vector trap_0d = bios_trap_dispatch
+
+external reentrant function bios_trap_dispatch(call: u16, arg0: u16, arg1: u16): u16
+external reentrant function gemdos_trap_dispatch(call: u16, arg0: u16, arg1: u16): u16

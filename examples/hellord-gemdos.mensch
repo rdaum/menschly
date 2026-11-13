@@ -49,71 +49,71 @@ var gemdos_arg_byte: u8
 var gemdos_arg_word: u16
 
 export reentrant function gemdos_cconis(): u16
-    return cop_call(GEMDOS_FAMILY, GEMDOS_CCONIS, 0, 0)
+    return trap(GEMDOS_FAMILY, GEMDOS_CCONIS, 0, 0)
 end
 
 export reentrant function gemdos_cconin(): u8
-    return u8(cop_call(GEMDOS_FAMILY, GEMDOS_CCONIN, 0, 0))
+    return u8(trap(GEMDOS_FAMILY, GEMDOS_CCONIN, 0, 0))
 end
 
 export reentrant function gemdos_cconos(): u16
-    return cop_call(GEMDOS_FAMILY, GEMDOS_CCONOS, 0, 0)
+    return trap(GEMDOS_FAMILY, GEMDOS_CCONOS, 0, 0)
 end
 
 export reentrant procedure gemdos_cconout(ch: u8)
     var status: u16
     gemdos_arg_byte = ch
     gemdos_arg_word = u16(gemdos_arg_byte)
-    status = cop_call(GEMDOS_FAMILY, GEMDOS_CCONOUT, gemdos_arg_word, 0)
+    status = trap(GEMDOS_FAMILY, GEMDOS_CCONOUT, gemdos_arg_word, 0)
     return
 end
 
 export reentrant function gemdos_get_stddev(stream: u16): u16
-    return cop_call(GEMDOS_FAMILY, GEMDOS_GET_STDDEV, stream, 0)
+    return trap(GEMDOS_FAMILY, GEMDOS_GET_STDDEV, stream, 0)
 end
 
 export reentrant procedure gemdos_set_stddev(stream: u16, dev: u16)
     var status: u16
-    status = cop_call(GEMDOS_FAMILY, GEMDOS_SET_STDDEV, stream, dev)
+    status = trap(GEMDOS_FAMILY, GEMDOS_SET_STDDEV, stream, dev)
     return
 end
 
 export reentrant function gemdos_dgetdrv(): u16
-    return cop_call(GEMDOS_FAMILY, GEMDOS_DGETDRV, 0, 0)
+    return trap(GEMDOS_FAMILY, GEMDOS_DGETDRV, 0, 0)
 end
 
 export reentrant function gemdos_dsetdrv(drive: u16): u16
-    return cop_call(GEMDOS_FAMILY, GEMDOS_DSETDRV, drive, 0)
+    return trap(GEMDOS_FAMILY, GEMDOS_DSETDRV, drive, 0)
 end
 
 export reentrant function gemdos_dsetpath(path: near ^u8): u16
-    return cop_call(GEMDOS_FAMILY, GEMDOS_DSETPATH, u16(path), 0)
+    return trap(GEMDOS_FAMILY, GEMDOS_DSETPATH, u16(path), 0)
 end
 
 export reentrant function gemdos_fsfirst(pattern: near ^u8, dta: near ^u8): u16
-    return cop_call(GEMDOS_FAMILY, GEMDOS_FSFIRST, u16(pattern), u16(dta))
+    return trap(GEMDOS_FAMILY, GEMDOS_FSFIRST, u16(pattern), u16(dta))
 end
 
 export reentrant function gemdos_fsnext(dta: near ^u8): u16
-    return cop_call(GEMDOS_FAMILY, GEMDOS_FSNEXT, u16(dta), 0)
+    return trap(GEMDOS_FAMILY, GEMDOS_FSNEXT, u16(dta), 0)
 end
 
 export reentrant function gemdos_fopen(path: near ^u8, mode: u16): u16
-    return cop_call(GEMDOS_FAMILY, GEMDOS_FOPEN, u16(path), mode)
+    return trap(GEMDOS_FAMILY, GEMDOS_FOPEN, u16(path), mode)
 end
 
 export reentrant function gemdos_fread(handle: u16, count: u16, buffer: near ^u8): u16
     gemdos_arg_word = count
-    return cop_call(GEMDOS_FAMILY, GEMDOS_FREAD, handle, u16(buffer))
+    return trap(GEMDOS_FAMILY, GEMDOS_FREAD, handle, u16(buffer))
 end
 
 export reentrant function gemdos_fwrite(handle: u16, count: u16, buffer: near ^u8): u16
     gemdos_arg_word = count
-    return cop_call(GEMDOS_FAMILY, GEMDOS_FWRITE, handle, u16(buffer))
+    return trap(GEMDOS_FAMILY, GEMDOS_FWRITE, handle, u16(buffer))
 end
 
 export reentrant function gemdos_fclose(handle: u16): u16
-    return cop_call(GEMDOS_FAMILY, GEMDOS_FCLOSE, handle, 0)
+    return trap(GEMDOS_FAMILY, GEMDOS_FCLOSE, handle, 0)
 end
 
 export reentrant procedure gemdos_init()
