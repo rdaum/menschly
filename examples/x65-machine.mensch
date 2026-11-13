@@ -4,7 +4,8 @@ module X65Machine
 # The console lives in serial-ring.mensch. A machine driver exports:
 #   blockdev_status(): u16           raw device status (bit 0 present, bit 1 ready)
 #   blockdev_sector_count(): u16     size in 512-byte sectors
-#   blockdev_set_lba(lba: u16)
+#   blockdev_set_lba(lba: u16)        selects a block, clearing bits 16-31
+#   blockdev_set_lba_high(high: u16)  sets bits 16-31 of the selected block
 #   blockdev_read(buffer): u16       0, or a device error code
 #   blockdev_write(buffer): u16      0, or a device error code
 #   machine_reboot()
@@ -38,6 +39,12 @@ export reentrant procedure blockdev_set_lba(lba: u16)
     block_lba1 = u8(lba >> 8)
     block_lba2 = 0
     block_lba3 = 0
+    return
+end
+
+export reentrant procedure blockdev_set_lba_high(high: u16)
+    block_lba2 = u8(high)
+    block_lba3 = u8(high >> 8)
     return
 end
 

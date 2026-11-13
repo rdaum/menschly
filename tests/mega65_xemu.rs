@@ -652,9 +652,10 @@ fn interrupts_preserve_runtime_registers_and_scratch() {
     );
 }
 
-const HELLORD_MEGA65_MODULES: [&str; 8] = [
+const HELLORD_MEGA65_MODULES: [&str; 9] = [
     "hellord-os",
     "hellord-dos",
+    "hellord-fat",
     "hellord-console",
     "hellord-files",
     "mega65-machine",
@@ -842,5 +843,205 @@ fn hellord_blkinfo_reads_the_sd_card_partition() {
         run.screen.contains("Sector0: EB 58 90 4D 45 47 41 36 35"),
         "screen:\n{}",
         run.screen
+    );
+}
+
+fn hellord_library_rom(name: &str, caller: &str) -> (PathBuf, Vec<u8>) {
+    let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let mut sources = vec![("0-caller".to_owned(), caller.to_owned())];
+    for (index, module) in HELLORD_MEGA65_MODULES.iter().enumerate() {
+        if *module == "hellord-os" {
+            continue;
+        }
+        let source = std::fs::read_to_string(examples.join(format!("{module}.mensch")))
+            .expect("Hellord source should be readable");
+        sources.push((format!("{}-{module}", index + 1), source));
+    }
+    let modules = mega65::compile_modules(&sources).expect("program should compile");
+    let refs = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect::<Vec<_>>();
+    let dir = temp_dir(name);
+    let rom = mega65::build_rom(&dir, &refs).expect("program should link");
+    (dir, rom)
+}
+
+fn big_file() -> Vec<u8> {
+    (0..10_000u32).map(|i| (i * 7 + i / 251) as u8).collect()
+}
+
+#[test]
+fn gemdos_reads_fat32_files_from_the_sd_card() {
+    let (dir, rom) = hellord_library_rom(
+        "fat32-gemdos",
+        "
+        module Fat32Caller
+        vector irq = serial_irq
+        external interrupt procedure serial_irq()
+        external procedure serial_init()
+        external reentrant procedure gemdos_init()
+        external reentrant function gemdos_dsetdrv(drive: u16): u16
+        external reentrant function gemdos_fsfirst(pattern: near ^u8, dta: near ^u8): u16
+        external reentrant function gemdos_fsnext(dta: near ^u8): u16
+        external reentrant function gemdos_fopen(path: near ^u8, mode: u16): u16
+        external reentrant function gemdos_fread(handle: u16, count: u16, buffer: near ^u8): u16
+        external reentrant function gemdos_fclose(handle: u16): u16
+        fixed($0900) volatile var entries: u16
+        fixed($0902) volatile var handle: u16
+        fixed($0904) volatile var total: u16
+        fixed($0906) volatile var sum: u16
+        fixed($0908) volatile var small_handle: u16
+        fixed($090a) volatile var small_count: u16
+        fixed($0a00) var dta: [32]u8
+        fixed($0b00) var chunk: [300]u8
+        fixed($0c40) var small: [64]u8
+
+        export function main(): u8
+            var got: u16
+            var i: u16
+            serial_init()
+            gemdos_init()
+            got = gemdos_dsetdrv(18)
+            entries = 0
+            got = gemdos_fsfirst(\"*.*\", $0a00)
+            while got == 0
+                entries = entries + 1
+                got = gemdos_fsnext($0a00)
+            end
+            small_handle = gemdos_fopen(\"hello.txt\", 0)
+            small_count = gemdos_fread(small_handle, 64, $0c40)
+            got = gemdos_fclose(small_handle)
+            handle = gemdos_fopen(\"BIG.DAT\", 0)
+            total = 0
+            sum = 0
+            got = 1
+            while got != 0 and got < $fff0
+                got = gemdos_fread(handle, 300, $0b00)
+                if got < $fff0
+                    i = 0
+                    while i != got
+                        sum = sum + u16(chunk[i])
+                        i = i + 1
+                    end
+                    total = total + got
+                end
+            end
+            got = gemdos_fclose(handle)
+            return 0
+        end
+        ",
+    );
+    let Some(xemu) = mega65::find_xemu() else {
+        return;
+    };
+    let mut sd_files = vec![
+        (
+            "HELLO.TXT".to_owned(),
+            b"Hello from the SD card!\n".to_vec(),
+        ),
+        ("BIG.DAT".to_owned(), big_file()),
+    ];
+    // Enough entries that the root directory spans several sectors.
+    for n in 0..20 {
+        sd_files.push((format!("F{n:02}.TXT"), format!("file {n}\n").into_bytes()));
+    }
+    let run = mega65::run_rom_with(
+        &xemu,
+        &dir,
+        &rom,
+        &mega65::XemuOptions {
+            sd_files,
+            ..mega65::XemuOptions::default()
+        },
+    )
+    .unwrap();
+    let word = |addr: usize| u16::from_le_bytes([run.memory[addr], run.memory[addr + 1]]);
+    assert_eq!(run.exit_code, 0, "log: {}", run.log);
+    assert_eq!(word(0x0900), 22, "root directory entries");
+    assert_eq!(word(0x090a), 24, "HELLO.TXT bytes read");
+    assert_eq!(&run.memory[0x0c40..0x0c58], b"Hello from the SD card!\n");
+    assert_eq!(word(0x0904), 10_000, "BIG.DAT bytes read");
+    let expected = big_file()
+        .iter()
+        .fold(0u16, |sum, byte| sum.wrapping_add(u16::from(*byte)));
+    assert_eq!(word(0x0906), expected, "BIG.DAT checksum");
+}
+
+#[test]
+fn hellord_lists_and_types_files_on_the_sd_card() {
+    let (dir, rom) = hellord_rom("hellord-fat32");
+    let Some(xemu) = mega65::find_xemu() else {
+        return;
+    };
+    if !mega65::xemu_supports_type_in(&xemu) {
+        eprintln!("skipping: this Xemu build has no -typein option");
+        return;
+    }
+    let run = mega65::run_rom_with(
+        &xemu,
+        &dir,
+        &rom,
+        &mega65::XemuOptions {
+            type_in: Some("S:\\rDIR\\rTYPE hello.txt\\rTYPE NOPE.TXT\\rREBOOT\\r".to_owned()),
+            sd_files: vec![
+                (
+                    "HELLO.TXT".to_owned(),
+                    b"Hello from the SD card!\r\nSecond line.\n".to_vec(),
+                ),
+                ("BIG.DAT".to_owned(), big_file()),
+            ],
+            ..mega65::XemuOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(!run.timed_out, "REBOOT should end the run");
+    let expected = "S> DIR\nDirectory of S:/\nHELLO.TXT    $0026\nBIG.DAT      $2710\n02 file(s)  00 dir(s)\nS> TYPE hello.txt\nHello from the SD card!\nSecond line.\nS> TYPE NOPE.TXT\nFile not found\n";
+    assert!(run.screen.contains(expected), "screen:\n{}", run.screen);
+}
+
+#[test]
+fn word_arrays_index_by_element_and_compares_keep_their_left_side() {
+    let Some(run) = run_source(
+        "index-scaling",
+        "
+        module IndexScaling
+        fixed($08a0) volatile var words: [4]u16
+        fixed($08c0) volatile var bytes: [8]u8
+        fixed($08d0) volatile var flags: u8
+
+        function twice(value: u8): u8
+            return value + value
+        end
+
+        export function main(): u8
+            var i: u16
+            i = 0
+            while i != 4
+                words[i] = $1100 + i
+                i = i + 1
+            end
+            bytes[5] = 10
+            bytes[6] = 11
+            i = 3
+            flags = 0
+            # The right-hand side computes an index, which must not clobber
+            # the left-hand call result.
+            if twice(5) == bytes[i + 2]
+                flags = flags + 1
+            end
+            if twice(5) == bytes[i + 3]
+                flags = flags + 2
+            end
+            return flags
+        end
+        ",
+    ) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 1);
+    assert_eq!(
+        &run.memory[0x08a0..0x08a8],
+        &[0x00, 0x11, 0x01, 0x11, 0x02, 0x11, 0x03, 0x11]
     );
 }

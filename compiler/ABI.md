@@ -522,8 +522,22 @@ with the console entry points (`serial_init`, `serial_write`,
   screen and the `$D610` keyboard queue. The block device is the SD card,
   driven through the SD controller at `$D680` with the sector buffer mapped
   at `$DE00`; it presents the card's first FAT partition (or the whole card
-  without a partition table). Block numbers are 16-bit, so only the first
-  32 MiB of the partition is reachable through the current BIOS calls.
+  without a partition table), adding the partition offset to 32-bit block
+  numbers.
+
+BIOS block numbers are 32-bit: `bios_block_set_lba(dev, lba)` selects a
+block and clears bits 16-31, and `bios_block_set_lba_high(dev, high)`
+(BIOS call `$0205`) sets them. Drivers implement `blockdev_set_lba_high`.
+
+### Hellord filesystems
+
+Drive `A:` is the built-in ROM filesystem. Drive `S:` is the BIOS block
+device mounted as a FAT volume by `hellord-fat.mensch`, which supports FAT16
+and FAT32 (FAT12 is rejected): root-directory listing across multiple
+sectors and clusters, opening 8.3 names case-insensitively, reading through
+cluster chains, and in-place writes within a file's existing size. File
+offsets are 16-bit for now, so reads stop at 64 KiB, and subdirectories are
+not yet supported.
 
 Mensch's `addr(global)` builtin gives a near byte pointer to a global
 variable, so buffers such as the DOS sector buffer live in BSS instead of at

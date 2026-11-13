@@ -9,6 +9,7 @@ fi
 
 src="$repo_root/examples/hellord-os.mensch"
 dos_src="$repo_root/examples/hellord-dos.mensch"
+fat_src="$repo_root/examples/hellord-fat.mensch"
 console_src="$repo_root/examples/hellord-console.mensch"
 files_src="$repo_root/examples/hellord-files.mensch"
 serial_src="$repo_root/examples/serial-ring.mensch"
@@ -30,6 +31,7 @@ cargo run --quiet --manifest-path "$repo_root/Cargo.toml" --bin mensch-run-x65 -
   --format x65 \
   --entry-bank 0 \
   --entry a000 \
+  --block 002000:lowcode.bin \
   --block 00a000:code.bin \
   --block 01c000:bank1.bin \
   --block 009f00:meta.bin \
@@ -37,6 +39,7 @@ cargo run --quiet --manifest-path "$repo_root/Cargo.toml" --bin mensch-run-x65 -
   --max-steps "$max_steps" \
   "$src" \
   "$dos_src" \
+  "$fat_src" \
   "$console_src" \
   "$files_src" \
   "$serial_src" \

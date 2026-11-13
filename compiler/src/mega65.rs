@@ -171,6 +171,7 @@ pub const LINKER_CONFIG: &str = r#"MEMORY {
 SEGMENTS {
   ZEROPAGE:     load = ZP,    type = zp;
   KERNEL_START: load = IMAGE, type = ro;
+  LOWCODE:      load = IMAGE, type = ro, optional = yes;
   CODE:         load = IMAGE, type = ro;
   RODATA:       load = IMAGE, type = ro, optional = yes;
   MENSCH_META:  load = IMAGE, type = ro, optional = yes;
@@ -328,6 +329,9 @@ pub struct XemuOptions {
     /// screen dumps) and return the run instead of an error. For kernels
     /// that never exit by themselves.
     pub stop_at_timeout: bool,
+    /// Files placed in the root directory of the virtual SD card's FAT32
+    /// partition, as `(8.3 name, contents)`.
+    pub sd_files: Vec<(String, Vec<u8>)>,
 }
 
 impl Default for XemuOptions {
@@ -336,6 +340,7 @@ impl Default for XemuOptions {
             timeout: Duration::from_secs(30),
             type_in: None,
             stop_at_timeout: false,
+            sd_files: Vec::new(),
         }
     }
 }
@@ -373,7 +378,12 @@ pub fn run_rom_with(
     let screen_path = dir.join("screen.txt");
     let _ = fs::remove_file(&screen_path);
     let sd_dir = dir.join("sd");
+    let _ = fs::remove_dir_all(&sd_dir);
     fs::create_dir_all(&sd_dir).map_err(|error| format!("create {}: {error}", sd_dir.display()))?;
+    for (name, contents) in &options.sd_files {
+        let path = sd_dir.join(name);
+        fs::write(&path, contents).map_err(|error| format!("write {}: {error}", path.display()))?;
+    }
     let _ = fs::remove_file(&mem_path);
     fs::write(&rom_path, rom).map_err(|error| format!("write {}: {error}", rom_path.display()))?;
 

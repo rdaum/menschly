@@ -2047,7 +2047,12 @@ impl<'a> RoutineLowerer<'a> {
         let lhs_ty = self.infer_expr(&cond.lhs)?;
         let rhs_ty = self.infer_expr(&cond.rhs)?;
         let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(&cond.rhs)?)?;
-        let lhs = if matches!(cond.lhs, Expr::Number(_) | Expr::String(_) | Expr::Name(_)) {
+        // The left side may stay in the accumulator only if evaluating the
+        // right side cannot disturb it.
+        let rhs_is_simple = matches!(cond.rhs, Expr::Number(_) | Expr::Name(_));
+        let lhs = if matches!(cond.lhs, Expr::Number(_) | Expr::String(_) | Expr::Name(_))
+            || !rhs_is_simple
+        {
             self.expr_value(&cond.lhs, &lhs_ty)?
         } else {
             self.lower_expr_to(&cond.lhs, &lhs_ty, Value::Accumulator)?;
@@ -2430,7 +2435,7 @@ impl<'a> RoutineLowerer<'a> {
             ));
         };
 
-        let index_ty = if matches!(index, Expr::Number(_)) {
+        let index_ty = if matches!(index, Expr::Number(_)) || self.is_const_expr(index)? {
             Type::U16
         } else {
             self.infer_expr(index)?
@@ -2448,6 +2453,7 @@ impl<'a> RoutineLowerer<'a> {
             self.lower_expr_to(index, &index_ty, Value::Accumulator)?;
             Value::Accumulator
         };
+        let index = self.scale_index(index, element.size_bytes())?;
 
         match binding.value {
             Value::Global(symbol) => Ok((
@@ -2461,6 +2467,69 @@ impl<'a> RoutineLowerer<'a> {
                 "indexed access currently requires a global array, got {other:?}"
             ))),
         }
+    }
+
+    /// Turns an element index into a byte offset: `index * element_size`,
+    /// as shifts and adds (Mensch has no multiply).
+    fn scale_index(&mut self, index: Value, element_size: u16) -> Result<Value, FrontendError> {
+        if element_size == 1 {
+            return Ok(index);
+        }
+        if let Value::Const(value) = index {
+            let offset = u32::from(const_to_u32(value)? as u16) * u32::from(element_size);
+            return Ok(Value::Const(Const::U16(offset as u16)));
+        }
+        let source = if matches!(index, Value::Accumulator) {
+            let temp = self.parent.temp();
+            self.body.push(IrInst::Move {
+                width: Width::Word,
+                dst: temp.clone(),
+                src: Value::Accumulator,
+            });
+            temp
+        } else {
+            index
+        };
+        let mut first = true;
+        for bit in (0..16u8).rev() {
+            if element_size & (1 << bit) == 0 {
+                continue;
+            }
+            let term = if bit == 0 {
+                source.clone()
+            } else {
+                let dst = if first {
+                    Value::Accumulator
+                } else {
+                    self.parent.temp()
+                };
+                self.body.push(IrInst::ShiftLeft {
+                    width: Width::Word,
+                    dst: dst.clone(),
+                    lhs: source.clone(),
+                    rhs: Value::Const(Const::U8(bit)),
+                });
+                dst
+            };
+            if first {
+                if term != Value::Accumulator {
+                    self.body.push(IrInst::Move {
+                        width: Width::Word,
+                        dst: Value::Accumulator,
+                        src: term,
+                    });
+                }
+                first = false;
+            } else {
+                self.body.push(IrInst::Add {
+                    width: Width::Word,
+                    dst: Value::Accumulator,
+                    lhs: Value::Accumulator,
+                    rhs: term,
+                });
+            }
+        }
+        Ok(Value::Accumulator)
     }
 
     fn address_for_field(
@@ -2549,11 +2618,12 @@ impl<'a> RoutineLowerer<'a> {
             }
             Expr::Index(base, index) => {
                 let base_ty = self.infer_expr(base)?;
-                let index_ty = if matches!(index.as_ref(), Expr::Number(_)) {
-                    Type::U16
-                } else {
-                    self.infer_expr(index)?
-                };
+                let index_ty =
+                    if matches!(index.as_ref(), Expr::Number(_)) || self.is_const_expr(index)? {
+                        Type::U16
+                    } else {
+                        self.infer_expr(index)?
+                    };
                 if integer_width(&index_ty) != Some(2) {
                     return Err(FrontendError::Type(
                         "array indexes currently need a 16-bit scalar".to_owned(),

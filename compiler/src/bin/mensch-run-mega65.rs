@@ -23,6 +23,11 @@ struct Config {
     #[arg(long = "type-in")]
     type_in: Option<String>,
 
+    /// Put this host file in the root directory of the virtual SD card
+    /// (repeatable; use 8.3 file names).
+    #[arg(long = "sd-file")]
+    sd_files: Vec<PathBuf>,
+
     /// Also write the 128 KiB ROM image here (usable as MEGA65.ROM).
     #[arg(long)]
     rom: Option<PathBuf>,
@@ -75,6 +80,17 @@ fn run(config: Config) -> Result<(), String> {
         return Ok(());
     }
     let xemu = mega65::find_xemu().ok_or("Xemu not found (set MENSCH_XMEGA65)")?;
+    let mut sd_files = Vec::new();
+    for path in &config.sd_files {
+        let contents = fs::read(path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("bad file name: {}", path.display()))?
+            .to_owned();
+        sd_files.push((name, contents));
+    }
     let run = mega65::run_rom_with(
         &xemu,
         &dir,
@@ -83,6 +99,7 @@ fn run(config: Config) -> Result<(), String> {
             timeout: Duration::from_secs(config.timeout),
             type_in: config.type_in,
             stop_at_timeout: true,
+            sd_files,
         },
     )?;
     print!("{}", run.screen);

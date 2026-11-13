@@ -62,6 +62,7 @@ var partition_lo: u16
 var partition_hi: u16
 var partition_sectors: u16
 var block_lba: u16
+var block_lba_high: u16
 
 export procedure serial_init()
     vic_irq_mask = 0
@@ -269,7 +270,7 @@ procedure sd_select_block()
     var lo: u16
     var hi: u16
     lo = partition_lo + block_lba
-    hi = partition_hi
+    hi = partition_hi + block_lba_high
     if lo < block_lba
         hi = hi + 1
     end
@@ -298,6 +299,12 @@ end
 
 export reentrant procedure blockdev_set_lba(lba: u16)
     block_lba = lba
+    block_lba_high = 0
+    return
+end
+
+export reentrant procedure blockdev_set_lba_high(high: u16)
+    block_lba_high = high
     return
 end
 

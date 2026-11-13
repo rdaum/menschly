@@ -1017,3 +1017,48 @@ fn generated_frontend_reentrant_indexing_uses_stack_index() {
 
     assert_eq!(memory.byte(0x040030), b'R');
 }
+
+#[test]
+fn generated_frontend_word_arrays_and_compare_operands_run() {
+    let binary = assemble_source_fixture(
+        "frontend-word-arrays-compare",
+        "
+        module WordArrayDemo
+        fixed($040040) volatile var words: [4]u16
+        fixed($040050) volatile var bytes: [8]u8
+        fixed($040058) volatile var flags: u8
+
+        export far procedure main()
+            var i: u16
+            i = 0
+            while i != 4
+                words[i] = $1100 + i
+                i = i + 1
+            end
+            bytes[5] = 10
+            bytes[6] = 11
+            i = 3
+            flags = 0
+            if twice(5) == bytes[i + 2]
+                flags = flags + 1
+            end
+            if twice(5) == bytes[i + 3]
+                flags = flags + 2
+            end
+            return
+        end
+
+        function twice(value: u8): u8
+            return value + value
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    let words = (0..8)
+        .map(|i| memory.byte(0x040040 + i))
+        .collect::<Vec<_>>();
+    assert_eq!(words, vec![0x00, 0x11, 0x01, 0x11, 0x02, 0x11, 0x03, 0x11]);
+    assert_eq!(memory.byte(0x040058), 1);
+}

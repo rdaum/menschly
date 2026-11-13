@@ -648,6 +648,7 @@ fn language_fat_sector_helpers_use_dos_drive_mapping() {
         &[
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-fat.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
             repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
@@ -743,6 +744,7 @@ fn language_gemdos_fsfirst_enumerates_fat_root_directory() {
         &[
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-fat.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
             repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
@@ -758,6 +760,11 @@ fn language_gemdos_fsfirst_enumerates_fat_root_directory() {
     let mut disk = vec![0; 2048];
     disk[11] = 0x00;
     disk[12] = 0x02;
+    // FAT16 by cluster count (5000 sectors) and the boot sector signature.
+    disk[19] = 0x88;
+    disk[20] = 0x13;
+    disk[510] = 0x55;
+    disk[511] = 0xaa;
     disk[13] = 1;
     disk[14] = 1;
     disk[16] = 1;
@@ -876,6 +883,7 @@ fn language_gemdos_fread_reads_fat_root_file() {
         &[
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-fat.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
             repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
@@ -891,6 +899,11 @@ fn language_gemdos_fread_reads_fat_root_file() {
     let mut disk = vec![0; 4096];
     disk[11] = 0x00;
     disk[12] = 0x02;
+    // FAT16 by cluster count (5000 sectors) and the boot sector signature.
+    disk[19] = 0x88;
+    disk[20] = 0x13;
+    disk[510] = 0x55;
+    disk[511] = 0xaa;
     disk[13] = 1;
     disk[14] = 1;
     disk[16] = 1;
@@ -998,6 +1011,7 @@ fn language_gemdos_fwrite_updates_fat_root_file_sector() {
         &[
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-fat.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
             repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
@@ -1013,6 +1027,11 @@ fn language_gemdos_fwrite_updates_fat_root_file_sector() {
     let mut disk = vec![0; 2048];
     disk[11] = 0x00;
     disk[12] = 0x02;
+    // FAT16 by cluster count (5000 sectors) and the boot sector signature.
+    disk[19] = 0x88;
+    disk[20] = 0x13;
+    disk[510] = 0x55;
+    disk[511] = 0xaa;
     disk[13] = 1;
     disk[14] = 1;
     disk[16] = 1;
@@ -1099,6 +1118,7 @@ fn language_gemdos_console_discovers_bios_device() {
         &[
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-fat.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
             repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
@@ -1180,6 +1200,7 @@ fn language_gemdos_drive_syscalls_update_dos_current_drive() {
         &[
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-fat.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
             repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
@@ -1277,6 +1298,7 @@ fn language_gemdos_file_syscalls_read_romfs_file() {
         &[
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-fat.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
             repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
@@ -1971,6 +1993,7 @@ fn build_hellord_example() -> x65_runner::BuildOutput {
         &[
             repo_root.join("examples/hellord-os.mensch"),
             repo_root.join("examples/hellord-dos.mensch"),
+            repo_root.join("examples/hellord-fat.mensch"),
             repo_root.join("examples/hellord-console.mensch"),
             repo_root.join("examples/hellord-files.mensch"),
             repo_root.join("examples/serial-ring.mensch"),
@@ -1985,6 +2008,10 @@ fn build_hellord_example() -> x65_runner::BuildOutput {
             pc: 0xa000,
         },
         &[
+            X65ImageBlock {
+                address: 0x002000,
+                path: "lowcode.bin".into(),
+            },
             X65ImageBlock {
                 address: 0x00a000,
                 path: "code.bin".into(),
@@ -2237,7 +2264,7 @@ fn xex_linker_config() -> &'static str {
 }
 
 fn large_integration_xex_linker_config() -> &'static str {
-    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $002000, size = $007000, file = %O;\n  META: start = $009f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  BANK1: start = $00c000, size = $003fe4, file = %O;\n  VECTORS: start = $00ffe4, size = $00000c, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  BANK1: load = BANK1, type = ro;\n  VECTOR_COP: load = VECTORS, type = ro, optional = yes, offset = $0000;\n  VECTOR_BRK: load = VECTORS, type = ro, optional = yes, offset = $0002;\n  VECTOR_ABORT: load = VECTORS, type = ro, optional = yes, offset = $0004;\n  VECTOR_NMI: load = VECTORS, type = ro, optional = yes, offset = $0006;\n  VECTOR_IRQ: load = VECTORS, type = ro, optional = yes, offset = $000a;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
+    "MEMORY {\n  ZP: start = $000080, size = $000080, type = rw;\n  CODE: start = $002000, size = $007000, file = %O;\n  META: start = $009f00, size = $000100, file = %O;\n  BSS: start = $009000, size = $000f00, type = rw;\n  BANK1: start = $00c000, size = $003fe4, file = %O;\n  VECTORS: start = $00ffe4, size = $00000c, file = %O;\n}\nFILES {\n  %O: format = atari;\n}\nFORMATS {\n  atari: runad = main;\n}\nSEGMENTS {\n  ZEROPAGE: load = ZP, type = zp;\n  LOWCODE: load = CODE, type = ro, optional = yes;\n  CODE: load = CODE, type = ro;\n  MENSCH_META: load = META, type = ro, optional = yes;\n  BSS: load = BSS, type = bss;\n  BANK1: load = BANK1, type = ro;\n  VECTOR_COP: load = VECTORS, type = ro, optional = yes, offset = $0000;\n  VECTOR_BRK: load = VECTORS, type = ro, optional = yes, offset = $0002;\n  VECTOR_ABORT: load = VECTORS, type = ro, optional = yes, offset = $0004;\n  VECTOR_NMI: load = VECTORS, type = ro, optional = yes, offset = $0006;\n  VECTOR_IRQ: load = VECTORS, type = ro, optional = yes, offset = $000a;\n  VECTORS: load = VECTORS, type = ro, optional = yes;\n}\n"
 }
 
 fn cop_xex_linker_config() -> &'static str {

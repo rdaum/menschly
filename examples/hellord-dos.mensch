@@ -1,4 +1,6 @@
 module HellordDos
+# Bank-0 code below the I/O window; the DOS is the largest module.
+metadata code_segment = "LOWCODE"
 
 external far procedure console_write(value: u8)
 external far procedure console_newline()
@@ -29,6 +31,13 @@ external function serial_tx_overflow(): u8
 external reentrant function bios_block_status(dev: u16): u16
 external reentrant function bios_block_sector_count(dev: u16): u16
 external reentrant procedure bios_block_set_lba(dev: u16, lba: u16)
+external reentrant function fat_mount(dev: u16, base: u16): u16
+external reentrant procedure fat_dir_rewind()
+external reentrant function fat_dir_next(dta: near ^u8): u16
+external reentrant function fat_open(path: near ^u8, slot: u16): u16
+external reentrant function fat_file_size(slot: u16): u16
+external reentrant function fat_file_byte(slot: u16, offset: u16): u8
+external reentrant function fat_write(slot: u16, offset: u16, count: u16, buffer: near ^u8): u16
 external reentrant function bios_block_read(dev: u16, buffer: near ^u8): u16
 external reentrant function bios_block_write(dev: u16, buffer: near ^u8): u16
 
@@ -83,6 +92,7 @@ const DRIVE_BACKEND_BIOS_BLOCK = 2
 const FS_DRIVER_NONE = 0
 const FS_DRIVER_ROMFS = 1
 const FS_DRIVER_FAT = 2
+const FAT_DRIVE = 18
 const DOS_BLOCK_OK = 0
 const DOS_BLOCK_ERR_NO_DEVICE = $ffff
 const DOS_OK = 0
@@ -129,6 +139,8 @@ var current_path: [16]u8
 var command_buffer: [32]u8
 var history_buffer: [32]u8
 var block_sector_buffer: [512]u8
+var fat_name: [16]u8
+var fat_dta: [16]u8
 
 export procedure dos_boot()
     current_drive = 'A'
@@ -201,14 +213,33 @@ export reentrant function dos_fsfirst(dta: near ^u8): u16
     dos_ensure_init()
     dos_search_dir = current_dir
     dos_search_next = 0
+    if dos_current_fs_driver() == FS_DRIVER_FAT
+        if dos_mount_current_fat() != DOS_OK
+            return DOS_ERR_NO_MORE_FILES
+        end
+        fat_dir_rewind()
+    end
     return dos_fsnext(dta)
+end
+
+# Mounts the current drive's FAT volume (a no-op when already mounted).
+reentrant function dos_mount_current_fat(): u16
+    var index: u16
+    index = dos_drive_index(current_drive)
+    if fat_mount(drive_bios_device[index], drive_partition_lba[index]) != 0
+        return DOS_ERR_PATH_NOT_FOUND
+    end
+    return DOS_OK
 end
 
 export reentrant function dos_fsnext(dta: near ^u8): u16
     if dos_current_fs_driver() == FS_DRIVER_ROMFS
         return romfs_search_next(dta)
     elsif dos_current_fs_driver() == FS_DRIVER_FAT
-        return fat_search_next(dta)
+        if dos_search_dir != DIR_ROOT
+            return DOS_ERR_NO_MORE_FILES
+        end
+        return fat_dir_next(dta)
     else
         return DOS_ERR_NO_MORE_FILES
     end
@@ -220,7 +251,7 @@ export reentrant function dos_fopen(path: near ^u8): u16
     dos_ensure_init()
     driver = dos_current_fs_driver()
     if driver == FS_DRIVER_FAT
-        return fat_fopen(path)
+        return dos_fat_open(path)
     end
     code = dos_fs_file_code(path)
     if code == FILE_UNKNOWN
@@ -269,6 +300,7 @@ end
 
 export reentrant function dos_fwrite(handle: u16, count: u16, buffer: near ^u8): u16
     var slot: u16
+    var written: u16
     dos_ensure_init()
     if dos_handle_slot_valid(handle) == 0
         return DOS_ERR_BAD_HANDLE
@@ -277,11 +309,9 @@ export reentrant function dos_fwrite(handle: u16, count: u16, buffer: near ^u8):
     if dos_handle_file[slot] == FILE_UNKNOWN
         return DOS_ERR_BAD_HANDLE
     elsif dos_handle_driver[slot] == FS_DRIVER_FAT
-        if fat_write_sector(u16(dos_handle_drive[slot]), dos_handle_lba[slot], buffer) == DOS_BLOCK_OK
-            return count
-        else
-            return 0
-        end
+        written = fat_write(slot, dos_handle_offset[slot], count, buffer)
+        dos_handle_offset[slot] = dos_handle_offset[slot] + written
+        return written
     else
         return DOS_ERR_ACCESS_DENIED
     end
@@ -302,6 +332,28 @@ export reentrant function dos_fclose(handle: u16): u16
         dos_handle_size[slot] = 0
         return DOS_OK
     end
+end
+
+reentrant function dos_fat_open(path: near ^u8): u16
+    var handle: u16
+    var slot: u16
+    if current_dir != DIR_ROOT
+        return DOS_ERR_FILE_NOT_FOUND
+    end
+    if dos_mount_current_fat() != DOS_OK
+        return DOS_ERR_FILE_NOT_FOUND
+    end
+    handle = dos_alloc_handle(FS_DRIVER_FAT, 1)
+    if handle < DOS_HANDLE_BASE or handle >= DOS_HANDLE_LIMIT
+        return handle
+    end
+    slot = handle - DOS_HANDLE_BASE
+    if fat_open(path, slot) != 0
+        dos_handle_driver[slot] = FS_DRIVER_NONE
+        dos_handle_file[slot] = FILE_UNKNOWN
+        return DOS_ERR_FILE_NOT_FOUND
+    end
+    return handle
 end
 
 export reentrant function fat_read_sector(drive: u16, lba: u16, buffer: near ^u8): u16
@@ -531,6 +583,11 @@ procedure dos_init_drives()
     drive_backend[0] = DRIVE_BACKEND_BIOS_BLOCK
     drive_bios_device[0] = BIOS_BLOCK0
     drive_partition_lba[0] = 0
+    # S: is the block device as a FAT volume (the SD card on the MEGA65).
+    drive_backend[FAT_DRIVE] = DRIVE_BACKEND_BIOS_BLOCK
+    drive_fs_driver[FAT_DRIVE] = FS_DRIVER_FAT
+    drive_bios_device[FAT_DRIVE] = BIOS_BLOCK0
+    drive_partition_lba[FAT_DRIVE] = 0
     block_cache_valid = 0
     index = 0
     while index != DOS_MAX_HANDLES
@@ -1453,9 +1510,75 @@ end
 procedure dos_fs_write_dir()
     if dos_current_fs_driver() == FS_DRIVER_ROMFS
         romfs_write_dir()
+    elsif dos_current_fs_driver() == FS_DRIVER_FAT
+        fat_write_dir()
     else
         files_write_path_not_found()
     end
+    return
+end
+
+reentrant procedure fat_write_dir()
+    var files: u16
+    var dirs: u16
+    var status: u16
+    var index: u16
+    files = 0
+    dirs = 0
+    status = dos_fsfirst(addr(fat_dta))
+    while status == DOS_OK
+        index = 3
+        while fat_dta[index] != 0
+            console_write(fat_dta[index])
+            index = index + 1
+        end
+        while index != 16
+            console_write(' ')
+            index = index + 1
+        end
+        if fat_dta[0] & GEMDOS_ATTR_DIR != 0
+            console_write_text("<DIR>")
+            dirs = dirs + 1
+        else
+            console_write('$')
+            console_write_hex16(u16(fat_dta[1]) | u16(fat_dta[2]) << 8)
+            files = files + 1
+        end
+        console_newline()
+        status = dos_fsnext(addr(fat_dta))
+    end
+    console_write_hex8(u8(files))
+    console_write_text(" file(s)  ")
+    console_write_hex8(u8(dirs))
+    console_write_text(" dir(s)\r\n")
+    return
+end
+
+reentrant procedure fat_type_file(start: u16)
+    var index: u16
+    var handle: u16
+    var ch: u8
+    index = 0
+    while start < line_len and index != 15
+        fat_name[index] = command_buffer[start]
+        start = start + 1
+        index = index + 1
+    end
+    fat_name[index] = 0
+    handle = dos_fopen(addr(fat_name))
+    if handle < DOS_HANDLE_BASE or handle >= DOS_HANDLE_LIMIT
+        files_write_not_found()
+        return
+    end
+    while dos_fread(handle, 1, addr(fat_dta)) == 1
+        ch = fat_dta[0]
+        if ch == '\n'
+            console_newline()
+        elsif ch != '\r'
+            console_write(ch)
+        end
+    end
+    handle = dos_fclose(handle)
     return
 end
 
@@ -1502,198 +1625,6 @@ reentrant function romfs_search_next(dta: near ^u8): u16
             return DOS_ERR_NO_MORE_FILES
         end
     end
-end
-
-reentrant function fat_search_next(dta: near ^u8): u16
-    var root_lba: u16
-    var entry: u16
-    var attr: u8
-    var first: u8
-    if dos_search_dir != DIR_ROOT
-        return DOS_ERR_NO_MORE_FILES
-    end
-    if fat_read_sector(dos_drive_index(current_drive), 0, addr(block_sector_buffer)) != DOS_BLOCK_OK
-        return DOS_ERR_NO_MORE_FILES
-    end
-    root_lba = fat_root_dir_lba()
-    if fat_read_sector(dos_drive_index(current_drive), root_lba, addr(block_sector_buffer)) != DOS_BLOCK_OK
-        return DOS_ERR_NO_MORE_FILES
-    end
-    while dos_search_next != 16
-        entry = fat_entry_offset(u16(dos_search_next))
-        dos_search_next = dos_search_next + 1
-        first = block_sector_buffer[entry]
-        attr = block_sector_buffer[entry + 11]
-        if first == 0
-            return DOS_ERR_NO_MORE_FILES
-        elsif first == $e5
-        elsif attr == FAT_ATTR_LONG_NAME
-        elsif attr & FAT_ATTR_VOLUME != 0
-        else
-            fat_write_search_entry(dta, entry)
-            return DOS_OK
-        end
-    end
-    return DOS_ERR_NO_MORE_FILES
-end
-
-reentrant function fat_fopen(path: near ^u8): u16
-    var root_lba: u16
-    var entry: u16
-    var index: u8
-    var attr: u8
-    var first: u8
-    var handle: u16
-    var slot: u16
-    if current_dir != DIR_ROOT
-        return DOS_ERR_FILE_NOT_FOUND
-    end
-    if fat_read_sector(dos_drive_index(current_drive), 0, addr(block_sector_buffer)) != DOS_BLOCK_OK
-        return DOS_ERR_FILE_NOT_FOUND
-    end
-    root_lba = fat_root_dir_lba()
-    if fat_read_sector(dos_drive_index(current_drive), root_lba, addr(block_sector_buffer)) != DOS_BLOCK_OK
-        return DOS_ERR_FILE_NOT_FOUND
-    end
-    index = 0
-    while index != 16
-        entry = fat_entry_offset(u16(index))
-        first = block_sector_buffer[entry]
-        attr = block_sector_buffer[entry + 11]
-        if first == 0
-            return DOS_ERR_FILE_NOT_FOUND
-        elsif first == $e5
-        elsif attr == FAT_ATTR_LONG_NAME
-        elsif attr & FAT_ATTR_VOLUME != 0
-        elsif attr & FAT_ATTR_DIRECTORY != 0
-        elsif fat_entry_name_matches(path, entry) != 0
-            handle = dos_alloc_handle(FS_DRIVER_FAT, 1)
-            if handle >= DOS_HANDLE_BASE and handle < DOS_HANDLE_LIMIT
-                slot = handle - DOS_HANDLE_BASE
-                dos_handle_drive[slot] = u8(dos_drive_index(current_drive))
-                dos_handle_lba[slot] = root_lba + fat_entry_cluster(entry) - 1
-                dos_handle_size[slot] = fat_entry_size(entry)
-            end
-            return handle
-        end
-        index = index + 1
-    end
-    return DOS_ERR_FILE_NOT_FOUND
-end
-
-reentrant function fat_root_dir_lba(): u16
-    return fat_boot_u16(14) + fat_boot_u16(22)
-end
-
-reentrant function fat_entry_cluster(entry: u16): u16
-    return u16(block_sector_buffer[entry + 26]) + byte_to_high_word(u16(block_sector_buffer[entry + 27]))
-end
-
-reentrant function fat_entry_size(entry: u16): u16
-    return u16(block_sector_buffer[entry + 28]) + byte_to_high_word(u16(block_sector_buffer[entry + 29]))
-end
-
-reentrant function fat_entry_offset(index: u16): u16
-    return index << 5
-end
-
-reentrant function fat_boot_u16(offset: u16): u16
-    return u16(block_sector_buffer[offset]) + byte_to_high_word(u16(block_sector_buffer[offset + 1]))
-end
-
-reentrant function byte_to_high_word(value: u16): u16
-    return value << 8
-end
-
-reentrant procedure fat_write_search_entry(dta: near ^u8, entry: u16)
-    var size: u16
-    var attr: u8
-    attr = block_sector_buffer[entry + 11]
-    size = fat_entry_size(entry)
-    if attr & FAT_ATTR_DIRECTORY != 0
-        dta^ = GEMDOS_ATTR_DIR
-    else
-        dta^ = 0
-    end
-    dta = dta + 1
-    dta^ = u8(size)
-    dta = dta + 1
-    dta^ = block_sector_buffer[entry + 29]
-    dta = dta + 1
-    fat_write_83_name(dta, entry)
-    return
-end
-
-reentrant function fat_entry_name_matches(path: near ^u8, entry: u16): u8
-    var index: u16
-    index = 0
-    while index != 8
-        if path^ == '.' or path^ == 0
-            if block_sector_buffer[entry + index] != ' '
-                return 0
-            else
-                index = index + 1
-            end
-        elsif normalized_drive(path^) != block_sector_buffer[entry + index]
-            return 0
-        else
-            path = path + 1
-            index = index + 1
-        end
-    end
-    if path^ == '.'
-        path = path + 1
-    end
-    index = 8
-    while index != 11
-        if path^ == 0
-            if block_sector_buffer[entry + index] != ' '
-                return 0
-            else
-                index = index + 1
-            end
-        elsif normalized_drive(path^) != block_sector_buffer[entry + index]
-            return 0
-        else
-            path = path + 1
-            index = index + 1
-        end
-    end
-    if path^ == 0
-        return 1
-    else
-        return 0
-    end
-end
-
-reentrant procedure fat_write_83_name(dta: near ^u8, entry: u16)
-    var index: u16
-    index = 0
-    while index != 8
-        if block_sector_buffer[entry + index] == ' '
-            index = 8
-        else
-            dta^ = block_sector_buffer[entry + index]
-            dta = dta + 1
-            index = index + 1
-        end
-    end
-    if block_sector_buffer[entry + 8] != ' '
-        dta^ = '.'
-        dta = dta + 1
-        index = 8
-        while index != 11
-            if block_sector_buffer[entry + index] == ' '
-                index = 11
-            else
-                dta^ = block_sector_buffer[entry + index]
-                dta = dta + 1
-                index = index + 1
-            end
-        end
-    end
-    dta^ = 0
-    return
 end
 
 reentrant procedure romfs_write_search_entry(dta: near ^u8, name: near ^u8, size: u16, attr: u8)
@@ -1994,7 +1925,7 @@ reentrant function dos_file_size(driver: u8, code: u8): u16
     if driver == FS_DRIVER_ROMFS
         return romfs_file_size(code)
     elsif driver == FS_DRIVER_FAT
-        return fat_handle_size()
+        return fat_file_size(u16(dos_current_read_slot))
     else
         return 0
     end
@@ -2004,41 +1935,9 @@ reentrant function dos_file_byte(driver: u8, code: u8, offset: u16): u8
     if driver == FS_DRIVER_ROMFS
         return romfs_file_byte(code, offset)
     elsif driver == FS_DRIVER_FAT
-        return fat_handle_byte(offset)
+        return fat_file_byte(u16(dos_current_read_slot), offset)
     else
         return 0
-    end
-end
-
-reentrant function fat_handle_size(): u16
-    return dos_handle_size[u16(dos_current_read_slot)]
-end
-
-reentrant function fat_handle_byte(offset: u16): u8
-    var slot: u16
-    var byte_offset: u16
-    var sector_lba: u16
-    var drive: u16
-    slot = u16(dos_current_read_slot)
-    drive = u16(dos_handle_drive[slot])
-    byte_offset = offset
-    sector_lba = dos_handle_lba[slot]
-    if byte_offset >= $0200
-        byte_offset = byte_offset - $0200
-        if fat_read_sector(drive, 1, addr(block_sector_buffer)) != DOS_BLOCK_OK
-            return 0
-        end
-        if byte_offset >= $0200
-            byte_offset = byte_offset - $0200
-            sector_lba = sector_lba + fat_boot_u16(8) - 2
-        else
-            sector_lba = sector_lba + fat_boot_u16(4) - 2
-        end
-    end
-    if fat_read_sector(drive, sector_lba, addr(block_sector_buffer)) != DOS_BLOCK_OK
-        return 0
-    else
-        return block_sector_buffer[byte_offset]
     end
 end
 
@@ -2319,6 +2218,10 @@ end
 
 procedure type_file()
     var code: u8
+    if dos_current_fs_driver() == FS_DRIVER_FAT
+        fat_type_file(argument_start("T", "TYPE"))
+        return
+    end
     code = type_file_code()
     if dos_current_fs_driver() == FS_DRIVER_ROMFS
         romfs_type_file_code_value(code)
