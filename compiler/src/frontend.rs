@@ -1258,6 +1258,11 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr, FrontendError> {
+        if self.take(TokenKind::LParen) {
+            let expr = self.parse_expr()?;
+            self.expect(TokenKind::RParen)?;
+            return Ok(expr);
+        }
         if let Some(value) = self.take_number() {
             return Ok(Expr::Number(value));
         }
@@ -2130,6 +2135,16 @@ impl<'a> RoutineLowerer<'a> {
                 Ok(())
             }
             Expr::Call { name, args } => {
+                if name == "addr" {
+                    let symbol = self.addr_builtin_symbol(args)?;
+                    ensure_assignable(expected, &addr_builtin_type())?;
+                    self.body.push(IrInst::LoadAddress {
+                        dst,
+                        symbol,
+                        width: Width::Word,
+                    });
+                    return Ok(());
+                }
                 if let Some(target) = integer_cast_builtin(name) {
                     self.lower_integer_cast(name, args, &target, expected, dst)?;
                     return Ok(());
@@ -2477,6 +2492,10 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Number(_) => Ok(Type::U24),
             Expr::String(_) => Ok(string_literal_type()),
             Expr::Name(name) => Ok(self.binding(name)?.ty.clone()),
+            Expr::Call { name, args } if name == "addr" => {
+                self.addr_builtin_symbol(args)?;
+                Ok(addr_builtin_type())
+            }
             Expr::Call { name, args } if integer_cast_builtin(name).is_some() => {
                 self.check_integer_cast(name, args)?;
                 Ok(integer_cast_builtin(name).expect("checked above"))
@@ -2809,6 +2828,21 @@ impl<'a> RoutineLowerer<'a> {
             .ok_or_else(|| FrontendError::Type(format!("unknown variable {name}")))
     }
 
+    /// `addr(name)`: the address of a global variable, as a near byte pointer.
+    fn addr_builtin_symbol(&self, args: &[Expr]) -> Result<String, FrontendError> {
+        let [Expr::Name(name)] = args else {
+            return Err(FrontendError::Type(
+                "addr expects one global variable name".to_owned(),
+            ));
+        };
+        match &self.binding(name)?.value {
+            Value::Global(symbol) => Ok(symbol.clone()),
+            _ => Err(FrontendError::Type(format!(
+                "addr({name}) needs a global variable"
+            ))),
+        }
+    }
+
     /// Shift counts must be constants smaller than the shifted value's width.
     fn shift_count(&self, lhs_ty: &Type, rhs: &Expr) -> Result<u8, FrontendError> {
         let Some(bytes) = integer_width(lhs_ty) else {
@@ -2921,6 +2955,10 @@ fn record_field<'a>(ty: &'a Type, name: &str) -> Result<&'a Field, FrontendError
         .iter()
         .find(|field| field.name == name)
         .ok_or_else(|| FrontendError::Type(format!("record has no field {name}")))
+}
+
+fn addr_builtin_type() -> Type {
+    Type::near_ptr(Type::U8)
 }
 
 /// `trap(family, call, arg0, arg1)` makes a numbered system call; `cop_call`

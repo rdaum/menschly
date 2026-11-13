@@ -1,0 +1,76 @@
+module X65Machine
+
+# Machine driver for the x65-alike: the BIOS block device and machine control.
+# The console lives in serial-ring.mensch. A machine driver exports:
+#   blockdev_status(): u16           raw device status (bit 0 present, bit 1 ready)
+#   blockdev_sector_count(): u16     size in 512-byte sectors
+#   blockdev_set_lba(lba: u16)
+#   blockdev_read(buffer): u16       0, or a device error code
+#   blockdev_write(buffer): u16      0, or a device error code
+#   machine_reboot()
+
+const BLOCK_COMMAND_READ = $01
+const BLOCK_COMMAND_WRITE = $02
+
+fixed($009f60) volatile var block_lba0: u8
+fixed($009f61) volatile var block_lba1: u8
+fixed($009f62) volatile var block_lba2: u8
+fixed($009f63) volatile var block_lba3: u8
+fixed($009f64) volatile var block_index_lo: u8
+fixed($009f65) volatile var block_index_hi: u8
+fixed($009f66) volatile var block_data: u8
+fixed($009f67) volatile var block_command: u8
+fixed($009f68) volatile var block_status: u8
+fixed($009f69) volatile var block_error: u8
+fixed($009f6a) volatile var block_sector_count0: u8
+fixed($009f6b) volatile var block_sector_count1: u8
+
+export reentrant function blockdev_status(): u16
+    return u16(block_status)
+end
+
+export reentrant function blockdev_sector_count(): u16
+    return u16(block_sector_count1) << 8 | u16(block_sector_count0)
+end
+
+export reentrant procedure blockdev_set_lba(lba: u16)
+    block_lba0 = u8(lba)
+    block_lba1 = u8(lba >> 8)
+    block_lba2 = 0
+    block_lba3 = 0
+    return
+end
+
+export reentrant function blockdev_read(buffer: near ^u8): u16
+    var index: u16
+    block_command = BLOCK_COMMAND_READ
+    if block_error != 0
+        return u16(block_error)
+    end
+    index = 0
+    while index != $0200
+        buffer^ = block_data
+        buffer = buffer + 1
+        index = index + 1
+    end
+    return 0
+end
+
+export reentrant function blockdev_write(buffer: near ^u8): u16
+    var index: u16
+    block_index_lo = 0
+    block_index_hi = 0
+    index = 0
+    while index != $0200
+        block_data = buffer^
+        buffer = buffer + 1
+        index = index + 1
+    end
+    block_command = BLOCK_COMMAND_WRITE
+    return u16(block_error)
+end
+
+# The x65-alike has no reset control yet; REBOOT does nothing here.
+export procedure machine_reboot()
+    return
+end

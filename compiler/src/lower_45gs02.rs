@@ -106,6 +106,9 @@ fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
     if lowerer.pending_result.is_some() {
         return Err(lowerer.unsupported("a call result that is never stored"));
     }
+    if lowerer.is_interrupt() {
+        lowerer.save_runtime_registers();
+    }
     if lowerer.shared_epilogue_used {
         let label = lowerer.shared_epilogue_label();
         lowerer.out.push(Inst::Label(label));
@@ -129,7 +132,16 @@ struct RoutineLowerer<'a> {
     pending_result: Option<Width>,
     /// Whether some return jumped to the routine's single shared epilogue.
     shared_epilogue_used: bool,
+    /// Interrupt handlers: where the prologue saves runtime registers, and
+    /// which ones (decided once the body is lowered).
+    runtime_save_at: usize,
+    saved_runtime: Vec<(&'static str, u16)>,
 }
+
+/// Base-page runtime registers an interrupt handler may need to preserve,
+/// with their sizes. `__m65_fp` is handled by frame setup itself.
+const INTERRUPT_SAVED_RUNTIME: [(&str, u16); 3] =
+    [(ACC_SYMBOL, 4), (PTR_SYMBOL, 2), (FARP_SYMBOL, 4)];
 
 /// Where one byte of a value lives.
 enum ByteSource {
@@ -162,6 +174,8 @@ impl<'a> RoutineLowerer<'a> {
             param_bytes,
             pending_result: None,
             shared_epilogue_used: false,
+            runtime_save_at: 0,
+            saved_runtime: Vec::new(),
         }
     }
 
@@ -199,6 +213,7 @@ impl<'a> RoutineLowerer<'a> {
                 self.implied(op);
             }
             self.emit(Op::Ldz, Operand::imm_byte(0));
+            self.runtime_save_at = self.out.len();
         }
         if let Some(frame) = self.frame {
             self.emit(Op::Lda, Operand::Base(offset(FP_SYMBOL, 1)));
@@ -220,10 +235,41 @@ impl<'a> RoutineLowerer<'a> {
         format!("__m65_return_{}", self.routine.name)
     }
 
-    /// Returns from the routine. Routines with a frame share one epilogue,
-    /// since releasing a frame takes far more code than a 3-byte branch.
+    /// Makes the handler preserve the base-page runtime registers it can
+    /// disturb: those its own code names, or all of them if it calls out.
+    /// Inserts the saves into the prologue; the shared epilogue restores them.
+    fn save_runtime_registers(&mut self) {
+        let calls_out = self
+            .out
+            .iter()
+            .any(|inst| matches!(inst, Inst::Op(Op::Jsr, _)));
+        let used = |symbol: &str, out: &[Inst]| {
+            out.iter().any(|inst| match inst {
+                Inst::Op(_, operand) => operand_mentions(operand, symbol),
+                Inst::Raw(line) => line.contains(symbol),
+                Inst::Label(_) => false,
+            })
+        };
+        self.saved_runtime = INTERRUPT_SAVED_RUNTIME
+            .into_iter()
+            .filter(|(symbol, _)| calls_out || used(symbol, &self.out))
+            .collect();
+        let mut saves = Vec::new();
+        for (symbol, bytes) in &self.saved_runtime {
+            for i in 0..*bytes {
+                saves.push(Inst::op(Op::Lda, Operand::Base(offset(symbol, i))));
+                saves.push(Inst::implied(Op::Pha));
+            }
+        }
+        self.out
+            .splice(self.runtime_save_at..self.runtime_save_at, saves);
+    }
+
+    /// Returns from the routine. Routines with a frame, and interrupt
+    /// handlers, share one epilogue: releasing a frame or restoring saved
+    /// state takes far more code than a 3-byte branch.
     fn emit_return(&mut self) {
-        if self.frame.is_some() {
+        if self.frame.is_some() || self.is_interrupt() {
             self.shared_epilogue_used = true;
             let label = self.shared_epilogue_label();
             self.emit(Op::Lbra, Operand::Label(label));
@@ -245,6 +291,12 @@ impl<'a> RoutineLowerer<'a> {
             self.emit(Op::Ldz, Operand::imm_byte(0));
         }
         if self.is_interrupt() {
+            for (symbol, bytes) in self.saved_runtime.clone().into_iter().rev() {
+                for i in (0..bytes).rev() {
+                    self.implied(Op::Pla);
+                    self.emit(Op::Sta, Operand::Base(offset(symbol, i)));
+                }
+            }
             for op in [Op::Plz, Op::Ply, Op::Plx, Op::Pla] {
                 self.implied(op);
             }
@@ -882,6 +934,21 @@ impl WidthExt for Width {
         } else {
             other
         }
+    }
+}
+
+fn operand_mentions(operand: &Operand, symbol: &str) -> bool {
+    match operand {
+        Operand::Implied => false,
+        Operand::Immediate(text)
+        | Operand::Absolute(text)
+        | Operand::AbsoluteX(text)
+        | Operand::Base(text)
+        | Operand::IndirectZ(text)
+        | Operand::IndirectY(text)
+        | Operand::FlatZ(text)
+        | Operand::Label(text)
+        | Operand::Indirect(text) => text == symbol || text.starts_with(&format!("{symbol}+")),
     }
 }
 

@@ -3,6 +3,11 @@ module HellordBios
 external procedure serial_write(value: u16)
 external function serial_has_data(): u8
 external function serial_read(): u8
+external reentrant function blockdev_status(): u16
+external reentrant function blockdev_sector_count(): u16
+external reentrant procedure blockdev_set_lba(lba: u16)
+external reentrant function blockdev_read(buffer: near ^u8): u16
+external reentrant function blockdev_write(buffer: near ^u8): u16
 
 const BIOS_BCONSTAT = $0001
 const BIOS_BCONIN = $0002
@@ -30,21 +35,6 @@ const DEVICE_FLAG_WRITE = $0002
 const DEVICE_DRIVER_NONE = $0000
 const DEVICE_DRIVER_SERIAL = $0001
 const DEVICE_DRIVER_X65_BLOCK = $0002
-const USB_UART_DATA = $009f57
-const BLOCK_LBA0 = $009f60
-const BLOCK_LBA1 = $009f61
-const BLOCK_LBA2 = $009f62
-const BLOCK_LBA3 = $009f63
-const BLOCK_INDEX_LO = $009f64
-const BLOCK_INDEX_HI = $009f65
-const BLOCK_DATA = $009f66
-const BLOCK_COMMAND = $009f67
-const BLOCK_STATUS = $009f68
-const BLOCK_ERROR = $009f69
-const BLOCK_SECTOR_COUNT0 = $009f6a
-const BLOCK_SECTOR_COUNT1 = $009f6b
-const BLOCK_COMMAND_READ = $01
-const BLOCK_COMMAND_WRITE = $02
 
 type BiosDevice = record
     id: u16
@@ -56,19 +46,6 @@ type BiosDevice = record
     next_sibling: u16
 end
 
-fixed($009f57) volatile var usb_uart_data: u8
-fixed($009f60) volatile var block_lba0: u8
-fixed($009f61) volatile var block_lba1: u8
-fixed($009f62) volatile var block_lba2: u8
-fixed($009f63) volatile var block_lba3: u8
-fixed($009f64) volatile var block_index_lo: u8
-fixed($009f65) volatile var block_index_hi: u8
-fixed($009f66) volatile var block_data: u8
-fixed($009f67) volatile var block_command: u8
-fixed($009f68) volatile var block_status: u8
-fixed($009f69) volatile var block_error: u8
-fixed($009f6a) volatile var block_sector_count0: u8
-fixed($009f6b) volatile var block_sector_count1: u8
 var registry_initialized: u8
 var bios_first_device: u16
 var serial_device: BiosDevice
@@ -359,7 +336,7 @@ end
 reentrant function bios_dispatch_block_status(): u16
     if bios_find_device() != 0
         if bios_device == block_device.id
-            return u16(block_status)
+            return blockdev_status()
         else
             return 0
         end
@@ -371,7 +348,7 @@ end
 reentrant function bios_dispatch_block_sector_count(): u16
     if bios_find_device() != 0
         if bios_device == block_device.id
-            return u16(block_sector_count1) << 8 | u16(block_sector_count0)
+            return blockdev_sector_count()
         else
             return 0
         end
@@ -383,10 +360,7 @@ end
 reentrant function bios_dispatch_block_set_lba(): u16
     if bios_find_device() != 0
         if bios_device == block_device.id
-            block_lba0 = u8(bios_arg)
-            block_lba1 = u8(bios_arg >> 8)
-            block_lba2 = 0
-            block_lba3 = 0
+            blockdev_set_lba(bios_arg)
             return 0
         else
             return $ffff
@@ -397,23 +371,9 @@ reentrant function bios_dispatch_block_set_lba(): u16
 end
 
 reentrant function bios_dispatch_block_read(): u16
-    var buffer: near ^u8
-    var index: u16
     if bios_find_device() != 0
         if bios_device == block_device.id
-            buffer = bios_arg
-            block_command = BLOCK_COMMAND_READ
-            if block_error != 0
-                return u16(block_error)
-            else
-                index = 0
-                while index != $0200
-                    buffer^ = block_data
-                    buffer = buffer + 1
-                    index = index + 1
-                end
-                return 0
-            end
+            return blockdev_read(bios_arg)
         else
             return $ffff
         end
@@ -423,25 +383,9 @@ reentrant function bios_dispatch_block_read(): u16
 end
 
 reentrant function bios_dispatch_block_write(): u16
-    var buffer: near ^u8
-    var index: u16
     if bios_find_device() != 0
         if bios_device == block_device.id
-            buffer = bios_arg
-            block_index_lo = 0
-            block_index_hi = 0
-            index = 0
-            while index != $0200
-                block_data = buffer^
-                buffer = buffer + 1
-                index = index + 1
-            end
-            block_command = BLOCK_COMMAND_WRITE
-            if block_error != 0
-                return u16(block_error)
-            else
-                return 0
-            end
+            return blockdev_write(bios_arg)
         else
             return $ffff
         end

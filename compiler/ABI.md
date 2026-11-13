@@ -487,5 +487,44 @@ assignment with the 65816 backend but lowers everything byte by byte:
   Reentrant callees pop their own arguments with `rtn #n`.
 - Array indexing forms the full 16-bit address `base + index` in
   `__m65_ptr`, so indexes are not limited to the 8-bit X register.
-- Interrupt routines save A/X/Y/Z and re-establish Z = 0. They do not yet
-  save the base-page runtime registers.
+- Interrupt routines save A/X/Y/Z, re-establish Z = 0, and save the
+  base-page runtime registers they can disturb (all of them if the handler
+  calls other routines). On both targets the storage pass gives interrupt
+  routines private direct-page argument and scratch slots, so a handler never
+  shares a slot with the code it interrupted. Routines called from a handler
+  should be `reentrant`.
+
+### MEGA65 kernel image
+
+The kernel ROM (`mega65.rs`) replaces `MEGA65.ROM`. The hypervisor loads the
+file at linear `$20000`; a two-stage loader in the `$E000` ROM window copies
+the kernel to the same addresses in bank 0 and maps the ROMs out:
+
+```text
+$0002-$00ff   base page
+$0200-$1fff   free (the console screen is at $0400)
+$2000-$cfff   kernel code, data and BSS; the 16-bit stack grows down from $cfff
+$d000-$dfff   I/O
+$ff00-$ff1f   trap vector table
+$fffa-$ffff   NMI / RESET / IRQ vectors
+```
+
+### Machine drivers
+
+Hellord's BIOS is machine-independent. Each machine supplies a driver module
+with the console entry points (`serial_init`, `serial_write`,
+`serial_has_data`, `serial_read`, `serial_irq`), the block device
+(`blockdev_status`, `blockdev_sector_count`, `blockdev_set_lba`,
+`blockdev_read`, `blockdev_write`) and `machine_reboot`:
+
+- x65-alike: `serial-ring.mensch` plus `x65-machine.mensch`
+- MEGA65: `mega65-machine.mensch`. The console is the 40x25 VIC-IV text
+  screen and the `$D610` keyboard queue. The block device is the SD card,
+  driven through the SD controller at `$D680` with the sector buffer mapped
+  at `$DE00`; it presents the card's first FAT partition (or the whole card
+  without a partition table). Block numbers are 16-bit, so only the first
+  32 MiB of the partition is reachable through the current BIOS calls.
+
+Mensch's `addr(global)` builtin gives a near byte pointer to a global
+variable, so buffers such as the DOS sector buffer live in BSS instead of at
+machine-specific fixed addresses.

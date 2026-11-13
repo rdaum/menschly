@@ -1,0 +1,352 @@
+module Mega65Machine
+
+# Machine driver for the MEGA65 (see x65-machine.mensch for the interface).
+#
+# The console is the VIC-IV text screen left by the hypervisor (40x25 at
+# $0400, colour RAM at $D800, mixed-case C64 character set) and the hardware
+# keyboard queue at $D610. It exports the same serial_* entry points as the
+# x65-alike's serial-ring.mensch, so the BIOS console driver is unchanged.
+#
+# The block device is the SD card, through the MEGA65's SD controller at
+# $D680 with its 512-byte sector buffer mapped at $DE00 (the same protocol the
+# hypervisor uses). The BIOS sees the card's first FAT partition, or the
+# whole card when it has no partition table.
+
+const COLUMNS = 40
+const SCREEN_CELLS = 1000
+const LAST_ROW = 960
+const TEXT_COLOUR = 1
+const BORDER_COLOUR = 6
+const BACKGROUND_COLOUR = 6
+const ESC = $1b
+const BACKSPACE = $08
+const DELETE = $7f
+const MEGA65_DEL = $14
+const BLOCK_STATUS_ABSENT = $0000
+const BLOCK_STATUS_READY = $0003
+const BLOCK_ERROR_NO_MEDIA = $0001
+const BLOCK_ERROR_TIMEOUT = $0002
+const SD_RESET = $00
+const SD_END_RESET = $01
+const SD_READ = $02
+const SD_WRITE = $03
+const SD_SDHC = $41
+const SD_WRITE_GATE = $57
+const SD_MAP_BUFFER = $81
+const SD_BUSY = $03
+const SD_UNKNOWN = 0
+const SD_READY = 1
+const SD_FAILED = 2
+
+fixed($0400) var screen: [1000]u8
+fixed($d800) volatile var colour: [1000]u8
+fixed($d018) volatile var vic_memory: u8
+fixed($d019) volatile var vic_irq_status: u8
+fixed($d01a) volatile var vic_irq_mask: u8
+fixed($d020) volatile var border: u8
+fixed($d021) volatile var background: u8
+fixed($dc0d) volatile var cia1_icr: u8
+fixed($dd0d) volatile var cia2_icr: u8
+fixed($d610) volatile var kbd_ascii: u8
+fixed($d6cf) volatile var fpga_reconfigure: u8
+fixed($d030) volatile var vic3_control: u8
+fixed($d680) volatile var sd_control: u8
+fixed($d681) volatile var sd_sector: [4]u8
+fixed($de00) volatile var sd_buffer: [512]u8
+
+var row_start: u16
+var column: u16
+var in_escape: u8
+var sd_state: u8
+var partition_lo: u16
+var partition_hi: u16
+var partition_sectors: u16
+var block_lba: u16
+
+export procedure serial_init()
+    vic_irq_mask = 0
+    vic_irq_status = $ff
+    cia1_icr = $7f
+    cia2_icr = $7f
+    vic_memory = $16
+    border = BORDER_COLOUR
+    background = BACKGROUND_COLOUR
+    in_escape = 0
+    clear_screen()
+    return
+end
+
+procedure clear_screen()
+    var cell: u16
+    cell = 0
+    while cell != SCREEN_CELLS
+        screen[cell] = ' '
+        colour[cell] = TEXT_COLOUR
+        cell = cell + 1
+    end
+    row_start = 0
+    column = 0
+    return
+end
+
+procedure scroll_up()
+    var cell: u16
+    cell = 0
+    while cell != LAST_ROW
+        screen[cell] = screen[cell + COLUMNS]
+        cell = cell + 1
+    end
+    while cell != SCREEN_CELLS
+        screen[cell] = ' '
+        cell = cell + 1
+    end
+    return
+end
+
+procedure line_feed()
+    if row_start == LAST_ROW
+        scroll_up()
+    else
+        row_start = row_start + COLUMNS
+    end
+    return
+end
+
+# ASCII to a screen code in the mixed-case character set.
+function screen_code(ch: u8): u8
+    if ch >= 'a' and ch <= 'z'
+        return ch - 96
+    elsif ch >= 'A' and ch <= 'Z'
+        return ch
+    elsif ch >= ' ' and ch <= '?'
+        return ch
+    elsif ch == '_'
+        return 100
+    elsif ch >= '@' and ch <= '^'
+        return ch - 64
+    else
+        return '?'
+    end
+end
+
+export procedure serial_write(value: u16)
+    var ch: u8
+    ch = u8(value)
+    if in_escape != 0
+        # Minimal ANSI: ESC [ ... J clears the screen, ESC [ ... H homes.
+        if ch >= '@' and ch <= '~' and ch != '['
+            in_escape = 0
+            if ch == 'J'
+                clear_screen()
+            elsif ch == 'H'
+                row_start = 0
+                column = 0
+            end
+        end
+    elsif ch == ESC
+        in_escape = 1
+    elsif ch == '\r'
+        column = 0
+    elsif ch == '\n'
+        line_feed()
+    elsif ch == BACKSPACE
+        if column != 0
+            column = column - 1
+        end
+    elsif ch >= ' '
+        screen[row_start + column] = screen_code(ch)
+        column = column + 1
+        if column == COLUMNS
+            column = 0
+            line_feed()
+        end
+    end
+    return
+end
+
+export function serial_has_data(): u8
+    if kbd_ascii != 0
+        return 1
+    else
+        return 0
+    end
+end
+
+export function serial_read(): u8
+    var ch: u8
+    ch = kbd_ascii
+    kbd_ascii = 0
+    if ch == MEGA65_DEL
+        return DELETE
+    end
+    return ch
+end
+
+export function serial_rx_overflow(): u8
+    return 0
+end
+
+export function serial_tx_overflow(): u8
+    return 0
+end
+
+# Console I/O is polled; acknowledge any interrupt source that fires anyway.
+export interrupt procedure serial_irq()
+    var ack: u8
+    ack = cia1_icr
+    vic_irq_status = $ff
+    return
+end
+
+# Waits for the SD controller to go idle; returns 0 on timeout (~1 s).
+function sd_wait(): u8
+    var spins: u16
+    var rounds: u8
+    rounds = 0
+    while rounds != 64
+        spins = 0
+        while spins != $ffff
+            if sd_control & SD_BUSY == 0
+                return 1
+            end
+            spins = spins + 1
+        end
+        rounds = rounds + 1
+    end
+    return 0
+end
+
+# Reads card sector (hi:lo) into the controller's buffer at $DE00.
+function sd_read_sector(lo: u16, hi: u16): u8
+    sd_sector[0] = u8(lo)
+    sd_sector[1] = u8(lo >> 8)
+    sd_sector[2] = u8(hi)
+    sd_sector[3] = u8(hi >> 8)
+    sd_control = SD_READ
+    return sd_wait()
+end
+
+function partition_type_is_fat(kind: u8): u8
+    if kind == $01 or kind == $04 or kind == $06 or kind == $0b or kind == $0c or kind == $0e
+        return 1
+    end
+    return 0
+end
+
+# Resets the card, maps the sector buffer and locates the first FAT partition.
+procedure sd_ensure_ready()
+    if sd_state != SD_UNKNOWN
+        return
+    end
+    sd_state = SD_FAILED
+    sd_control = SD_RESET
+    sd_control = SD_END_RESET
+    if sd_wait() == 0
+        return
+    end
+    sd_control = SD_SDHC
+    vic3_control = vic3_control & $fe
+    sd_control = SD_MAP_BUFFER
+    partition_lo = 0
+    partition_hi = 0
+    partition_sectors = $ffff
+    if sd_read_sector(0, 0) == 0
+        return
+    end
+    if sd_buffer[510] == $55 and sd_buffer[511] == $aa and partition_type_is_fat(sd_buffer[$1c2]) != 0
+        partition_lo = u16(sd_buffer[$1c6]) | u16(sd_buffer[$1c7]) << 8
+        partition_hi = u16(sd_buffer[$1c8]) | u16(sd_buffer[$1c9]) << 8
+        if sd_buffer[$1cc] == 0 and sd_buffer[$1cd] == 0
+            partition_sectors = u16(sd_buffer[$1ca]) | u16(sd_buffer[$1cb]) << 8
+        end
+    end
+    sd_state = SD_READY
+    return
+end
+
+# Selects the partition-relative sector for the next transfer (32-bit add).
+procedure sd_select_block()
+    var lo: u16
+    var hi: u16
+    lo = partition_lo + block_lba
+    hi = partition_hi
+    if lo < block_lba
+        hi = hi + 1
+    end
+    sd_sector[0] = u8(lo)
+    sd_sector[1] = u8(lo >> 8)
+    sd_sector[2] = u8(hi)
+    sd_sector[3] = u8(hi >> 8)
+    return
+end
+
+export reentrant function blockdev_status(): u16
+    sd_ensure_ready()
+    if sd_state == SD_READY
+        return BLOCK_STATUS_READY
+    end
+    return BLOCK_STATUS_ABSENT
+end
+
+export reentrant function blockdev_sector_count(): u16
+    sd_ensure_ready()
+    if sd_state == SD_READY
+        return partition_sectors
+    end
+    return 0
+end
+
+export reentrant procedure blockdev_set_lba(lba: u16)
+    block_lba = lba
+    return
+end
+
+export reentrant function blockdev_read(buffer: near ^u8): u16
+    var index: u16
+    sd_ensure_ready()
+    if sd_state != SD_READY
+        return BLOCK_ERROR_NO_MEDIA
+    end
+    sd_select_block()
+    sd_control = SD_READ
+    if sd_wait() == 0
+        return BLOCK_ERROR_TIMEOUT
+    end
+    index = 0
+    while index != 512
+        buffer^ = sd_buffer[index]
+        buffer = buffer + 1
+        index = index + 1
+    end
+    return 0
+end
+
+export reentrant function blockdev_write(buffer: near ^u8): u16
+    var index: u16
+    sd_ensure_ready()
+    if sd_state != SD_READY
+        return BLOCK_ERROR_NO_MEDIA
+    end
+    index = 0
+    while index != 512
+        sd_buffer[index] = buffer^
+        buffer = buffer + 1
+        index = index + 1
+    end
+    sd_select_block()
+    sd_control = SD_WRITE_GATE
+    sd_control = SD_WRITE
+    if sd_wait() == 0
+        return BLOCK_ERROR_TIMEOUT
+    end
+    return 0
+end
+
+# Writing $42 to $D6CF reconfigures the FPGA: a full reboot on hardware, and
+# a clean exit in Xemu's -testing mode (with the previous $D6CF write as the
+# exit status).
+export procedure machine_reboot()
+    fpga_reconfigure = 0
+    fpga_reconfigure = $42
+    return
+end

@@ -492,7 +492,7 @@ fn indexing_beyond_255_bytes() {
         "wide-index",
         "
         module WideIndex
-        fixed($2000) var sector: [512]u8
+        fixed($1000) var sector: [512]u8
 
         export function main(): u8
             var i: u16
@@ -509,10 +509,10 @@ fn indexing_beyond_255_bytes() {
         return;
     };
     assert_eq!(run.exit_code, 150);
-    assert_eq!(run.memory[0x2000 + 2], 1);
-    assert_eq!(run.memory[0x2000 + 300], 150);
-    assert_eq!(run.memory[0x2000 + 510], 255);
-    assert_eq!(run.memory[0x2000 + 511], 0x5a);
+    assert_eq!(run.memory[0x1000 + 2], 1);
+    assert_eq!(run.memory[0x1000 + 300], 150);
+    assert_eq!(run.memory[0x1000 + 510], 255);
+    assert_eq!(run.memory[0x1000 + 511], 0x5a);
 }
 
 #[test]
@@ -552,4 +552,295 @@ fn traps_dispatch_through_the_vector_table() {
     };
     assert_eq!(run.exit_code, 0x23);
     assert_eq!(&run.memory[0x0880..0x0884], &[0x23, 0x01, 44, 0xff]);
+}
+
+#[test]
+fn large_kernel_runs_from_ram_above_the_rom_window() {
+    // ~41 KiB of code: the last routines land above $A000 (BASIC ROM space
+    // at reset) and must have been copied there by the loader.
+    let mut source = String::from(
+        "
+        module LargeKernel
+        fixed($0890) volatile var out: u16
+        fixed($e100) volatile var high_ram: u8
+
+        export function main(): u8
+            out = 0
+            high_ram = $a5
+            r0()
+            r49()
+            return high_ram
+        end
+        ",
+    );
+    for n in 0..50 {
+        source.push_str(&format!("\nprocedure r{n}()\n"));
+        for _ in 0..48 {
+            source.push_str("    out = out + 1\n");
+        }
+        source.push_str("    return\nend\n");
+    }
+    let (dir, rom) = compile_rom("large-kernel", &source);
+    assert!(
+        rom[0xa000..0xd000].iter().any(|byte| *byte != 0),
+        "test program should extend into $A000-$CFFF"
+    );
+    let Some(xemu) = mega65::find_xemu() else {
+        return;
+    };
+    let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
+    assert_eq!(run.exit_code, 0xa5);
+    assert_eq!(&run.memory[0x0890..0x0892], &[96, 0]);
+}
+
+#[test]
+fn interrupts_preserve_runtime_registers_and_scratch() {
+    let Some(run) = run_source(
+        "irq-stress",
+        "
+        module IrqStress
+        vector irq = tick
+        fixed($dc04) volatile var cia1_ta_lo: u8
+        fixed($dc05) volatile var cia1_ta_hi: u8
+        fixed($dc0d) volatile var cia1_icr: u8
+        fixed($dc0e) volatile var cia1_cra: u8
+        fixed($d01a) volatile var vic_irq_mask: u8
+        fixed($0900) volatile var ticks: u16
+        fixed($0902) volatile var result: u16
+        fixed($0904) volatile var isr_scratch: u16
+
+        export function main(): u8
+            var i: u16
+            var sum: u16
+            vic_irq_mask = 0
+            cia1_icr = $7f
+            ticks = 0
+            cia1_ta_lo = $f4
+            cia1_ta_hi = $01
+            cia1_icr = $81
+            cia1_cra = $11
+            asm \"cli\"
+            i = 0
+            sum = 0
+            while i != 4000
+                sum = sum + (i << 3 | i >> 5)
+                i = i + 1
+            end
+            asm \"sei\"
+            result = sum
+            return 0
+        end
+
+        interrupt procedure tick()
+            var ack: u8
+            ack = cia1_icr
+            ticks = ticks + 1
+            isr_scratch = ticks << 4 | ticks >> 3
+            return
+        end
+        ",
+    ) else {
+        return;
+    };
+    let expected = (0u16..4000).fold(0u16, |sum, i| sum.wrapping_add((i << 3) | (i >> 5)));
+    let ticks = u16::from_le_bytes([run.memory[0x0900], run.memory[0x0901]]);
+    assert_eq!(run.exit_code, 0);
+    assert!(ticks > 20, "expected many timer interrupts, got {ticks}");
+    assert_eq!(
+        u16::from_le_bytes([run.memory[0x0902], run.memory[0x0903]]),
+        expected
+    );
+}
+
+const HELLORD_MEGA65_MODULES: [&str; 8] = [
+    "hellord-os",
+    "hellord-dos",
+    "hellord-console",
+    "hellord-files",
+    "mega65-machine",
+    "hellord-bios",
+    "hellord-gemdos",
+    "hellord-traps-mega65",
+];
+
+fn hellord_rom(name: &str) -> (PathBuf, Vec<u8>) {
+    let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let sources = HELLORD_MEGA65_MODULES
+        .iter()
+        .enumerate()
+        .map(|(index, module)| {
+            let source = std::fs::read_to_string(examples.join(format!("{module}.mensch")))
+                .expect("Hellord source should be readable");
+            (format!("{index}-{module}"), source)
+        })
+        .collect::<Vec<_>>();
+    let modules = mega65::compile_modules(&sources).expect("Hellord should compile for the MEGA65");
+    let refs = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect::<Vec<_>>();
+    let dir = temp_dir(name);
+    let rom = mega65::build_rom(&dir, &refs).expect("Hellord ROM should link");
+    (dir, rom)
+}
+
+#[test]
+fn hellord_boots_to_the_dos_prompt() {
+    let (dir, rom) = hellord_rom("hellord-boot");
+    let Some(xemu) = mega65::find_xemu() else {
+        return;
+    };
+    let run = mega65::run_rom_with(
+        &xemu,
+        &dir,
+        &rom,
+        &mega65::XemuOptions {
+            timeout: Duration::from_secs(3),
+            stop_at_timeout: true,
+            ..mega65::XemuOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(run.timed_out);
+    assert!(
+        run.screen
+            .starts_with("Hellord DOS 0.1\nType H for help.\nA>"),
+        "screen:\n{}",
+        run.screen
+    );
+}
+
+#[test]
+fn hellord_runs_typed_commands_and_reboots() {
+    let (dir, rom) = hellord_rom("hellord-commands");
+    let Some(xemu) = mega65::find_xemu() else {
+        return;
+    };
+    if !mega65::xemu_supports_type_in(&xemu) {
+        eprintln!("skipping: this Xemu build has no -typein option");
+        return;
+    }
+    let run = mega65::run_rom_with(
+        &xemu,
+        &dir,
+        &rom,
+        &mega65::XemuOptions {
+            type_in: Some("VER\\rCLS\\rHELP\\rREBOOT\\r".to_owned()),
+            ..mega65::XemuOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(!run.timed_out, "REBOOT should end the run");
+    assert!(
+        run.screen.starts_with("Commands:"),
+        "screen:\n{}",
+        run.screen
+    );
+    assert!(
+        run.screen.contains("FILL addr len byte"),
+        "screen:\n{}",
+        run.screen
+    );
+    assert!(run.screen.contains("A> REBOOT"), "screen:\n{}", run.screen);
+}
+
+#[test]
+fn sd_card_block_device_reads_and_writes_the_fat_partition() {
+    let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let machine = std::fs::read_to_string(examples.join("mega65-machine.mensch")).unwrap();
+    let caller = "
+        module SdTest
+        external reentrant function blockdev_status(): u16
+        external reentrant function blockdev_sector_count(): u16
+        external reentrant procedure blockdev_set_lba(lba: u16)
+        external reentrant function blockdev_read(buffer: near ^u8): u16
+        external reentrant function blockdev_write(buffer: near ^u8): u16
+        fixed($0900) volatile var status: u16
+        fixed($0902) volatile var sectors: u16
+        fixed($0904) volatile var read_error: u16
+        fixed($0906) volatile var write_error: u16
+        fixed($0908) volatile var reread_error: u16
+        fixed($1000) var boot: [512]u8
+        fixed($1200) var pattern: [512]u8
+        fixed($1400) var check: [512]u8
+
+        export function main(): u8
+            var i: u16
+            status = blockdev_status()
+            sectors = blockdev_sector_count()
+            blockdev_set_lba(0)
+            read_error = blockdev_read($1000)
+            i = 0
+            while i != 512
+                pattern[i] = u8(i) + u8(i >> 8)
+                i = i + 1
+            end
+            blockdev_set_lba(4000)
+            write_error = blockdev_write($1200)
+            reread_error = blockdev_read($1400)
+            return 0
+        end
+    ";
+    let modules = mega65::compile_modules(&[
+        ("0-sd-test".to_owned(), caller.to_owned()),
+        ("1-mega65-machine".to_owned(), machine),
+    ])
+    .expect("SD test should compile");
+    let refs = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect::<Vec<_>>();
+    let dir = temp_dir("sd-card");
+    let rom = mega65::build_rom(&dir, &refs).expect("SD test ROM should link");
+    let Some(xemu) = mega65::find_xemu() else {
+        return;
+    };
+    let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
+    let word = |addr: usize| u16::from_le_bytes([run.memory[addr], run.memory[addr + 1]]);
+    assert_eq!(run.exit_code, 0);
+    assert_eq!(word(0x0900), 3, "status: present and ready");
+    assert_ne!(word(0x0902), 0, "partition size");
+    assert_eq!(word(0x0904), 0, "read error");
+    let boot = &run.memory[0x1000..0x1200];
+    assert_eq!(&boot[510..512], &[0x55, 0xaa], "boot sector signature");
+    assert_eq!(&boot[0x52..0x5a], b"FAT32   ", "FAT32 boot sector");
+    assert_eq!(word(0x0906), 0, "write error");
+    assert_eq!(word(0x0908), 0, "reread error");
+    assert_eq!(&run.memory[0x1400..0x1600], &run.memory[0x1200..0x1400]);
+}
+
+#[test]
+fn hellord_blkinfo_reads_the_sd_card_partition() {
+    let (dir, rom) = hellord_rom("hellord-blkinfo");
+    let Some(xemu) = mega65::find_xemu() else {
+        return;
+    };
+    if !mega65::xemu_supports_type_in(&xemu) {
+        eprintln!("skipping: this Xemu build has no -typein option");
+        return;
+    }
+    let run = mega65::run_rom_with(
+        &xemu,
+        &dir,
+        &rom,
+        &mega65::XemuOptions {
+            type_in: Some("BLKINFO\\rREBOOT\\r".to_owned()),
+            ..mega65::XemuOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(!run.timed_out, "REBOOT should end the run");
+    assert!(
+        run.screen
+            .contains("A> BLKINFO\nDrive A block:\nStatus $03\n"),
+        "screen:\n{}",
+        run.screen
+    );
+    // Xemu's virtual card: a FAT32 partition whose boot sector starts with a
+    // jump and the OEM name "MEGA65r1".
+    assert!(
+        run.screen.contains("Sector0: EB 58 90 4D 45 47 41 36 35"),
+        "screen:\n{}",
+        run.screen
+    );
 }

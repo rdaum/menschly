@@ -13,6 +13,7 @@ console_src="$repo_root/examples/hellord-console.mensch"
 files_src="$repo_root/examples/hellord-files.mensch"
 serial_src="$repo_root/examples/serial-ring.mensch"
 bios_src="$repo_root/examples/hellord-bios.mensch"
+machine_src="$repo_root/examples/x65-machine.mensch"
 gemdos_src="$repo_root/examples/hellord-gemdos.mensch"
 traps_src="$repo_root/examples/hellord-traps.mensch"
 cfg="$repo_root/examples/hellord-os-x65.cfg"
@@ -40,5 +41,6 @@ cargo run --quiet --manifest-path "$repo_root/Cargo.toml" --bin mensch-run-x65 -
   "$files_src" \
   "$serial_src" \
   "$bios_src" \
+  "$machine_src" \
   "$gemdos_src" \
   "$traps_src"

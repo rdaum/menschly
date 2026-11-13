@@ -43,11 +43,65 @@ fn optimize_routine(routine: &AsmRoutine, direct_symbols: &BTreeSet<String>) -> 
     let insts = remove_redundant_index_loads(&insts);
     let insts = remove_redundant_index_transfers(&insts);
     let insts = remove_redundant_modes(&insts);
+    let insts = remove_redundant_zero_compares(&insts);
 
     AsmRoutine {
         name: routine.name.clone(),
         export: routine.export,
         insts,
+    }
+}
+
+/// Drops `cmp #0` when the previous instruction already set N and Z from A at
+/// the same width, and only an equality branch consumes the flags (the
+/// compare's carry result is never read).
+fn remove_redundant_zero_compares(insts: &[AsmInst]) -> Vec<AsmInst> {
+    let mut out = Vec::with_capacity(insts.len());
+    for (idx, inst) in insts.iter().enumerate() {
+        let redundant = matches!(
+            inst,
+            AsmInst::Cmp(Operand::Immediate(Immediate::Byte(0) | Immediate::Word(0)))
+        ) && idx > 0
+            && sets_zero_flag_from_a(&insts[idx - 1])
+            && insts.get(idx + 1).is_some_and(is_equality_branch)
+            && !insts.get(idx + 2).is_some_and(reads_carry);
+        if !redundant {
+            out.push(inst.clone());
+        }
+    }
+    out
+}
+
+fn sets_zero_flag_from_a(inst: &AsmInst) -> bool {
+    matches!(
+        inst,
+        AsmInst::Lda(_)
+            | AsmInst::And(_)
+            | AsmInst::Ora(_)
+            | AsmInst::Adc(_)
+            | AsmInst::Sbc(_)
+            | AsmInst::Txa
+            | AsmInst::Tya
+            | AsmInst::Pla
+            | AsmInst::AslA
+            | AsmInst::LsrA
+    )
+}
+
+fn is_equality_branch(inst: &AsmInst) -> bool {
+    match inst {
+        AsmInst::Beq(_) | AsmInst::Bne(_) => true,
+        // Long equality branches are emitted as `bne :+ / brl target / :`.
+        AsmInst::Raw(text) => text.starts_with("bne :+\n") || text.starts_with("beq :+\n"),
+        _ => false,
+    }
+}
+
+fn reads_carry(inst: &AsmInst) -> bool {
+    match inst {
+        AsmInst::Bcc(_) | AsmInst::Bcs(_) | AsmInst::Adc(_) | AsmInst::Sbc(_) => true,
+        AsmInst::Raw(text) => text.starts_with("bcc") || text.starts_with("bcs"),
+        _ => false,
     }
 }
 

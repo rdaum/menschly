@@ -23,6 +23,7 @@ external far procedure files_write_program_not_found()
 external far procedure files_write_path_not_found()
 external far procedure files_run_hello()
 external far procedure files_run_demo()
+external procedure machine_reboot()
 external function serial_rx_overflow(): u8
 external function serial_tx_overflow(): u8
 external reentrant function bios_block_status(dev: u16): u16
@@ -54,6 +55,7 @@ const COMMAND_POKE = 19
 const COMMAND_DUMP = 20
 const COMMAND_FILL = 21
 const COMMAND_BLKINFO = 22
+const COMMAND_REBOOT = 23
 const COMMAND_EMPTY = 255
 const FILE_UNKNOWN = 0
 const FILE_README = 1
@@ -74,7 +76,6 @@ const RECALL = $10
 const DELETE = $7f
 const LOWERCASE_DELTA = 32
 const BIOS_BLOCK0 = $0008
-const BLOCK_SECTOR_BUFFER = $9c00
 const DRIVE_COUNT = 26
 const DRIVE_BACKEND_NONE = 0
 const DRIVE_BACKEND_ROMFS = 1
@@ -127,7 +128,7 @@ var dos_handle_size: [4]u16
 var current_path: [16]u8
 var command_buffer: [32]u8
 var history_buffer: [32]u8
-fixed($009c00) var block_sector_buffer: [512]u8
+var block_sector_buffer: [512]u8
 
 export procedure dos_boot()
     current_drive = 'A'
@@ -358,6 +359,8 @@ function command_code(): u8
         return COMMAND_FILL
     elsif is_blkinfo() != 0
         return COMMAND_BLKINFO
+    elsif command_word_matches("REBOOT") != 0
+        return COMMAND_REBOOT
     elsif is_set() != 0
         return COMMAND_SET
     elsif is_run() != 0
@@ -615,7 +618,7 @@ function dos_volume_read_blocks(drive: u8, lba: u16, count: u16, buffer: near ^u
                 copy_block_cache_to(buffer)
             else
                 bios_block_set_lba(dev, sector_lba)
-                status = bios_block_read(dev, BLOCK_SECTOR_BUFFER)
+                status = bios_block_read(dev, addr(block_sector_buffer))
                 if status != DOS_BLOCK_OK
                     return status
                 end
@@ -646,7 +649,7 @@ function dos_volume_write_blocks(drive: u8, lba: u16, count: u16, buffer: near ^
         while remaining != 0
             copy_block_to_cache(buffer)
             bios_block_set_lba(dev, sector_lba)
-            status = bios_block_write(dev, BLOCK_SECTOR_BUFFER)
+            status = bios_block_write(dev, addr(block_sector_buffer))
             if status != DOS_BLOCK_OK
                 return status
             end
@@ -1115,6 +1118,8 @@ procedure dispatch_line()
         dump_memory()
     elsif code == COMMAND_FILL
         fill_memory()
+    elsif code == COMMAND_REBOOT
+        machine_reboot()
     elsif code == COMMAND_BLKINFO
         write_block_info()
     elsif code == COMMAND_SET
@@ -1507,11 +1512,11 @@ reentrant function fat_search_next(dta: near ^u8): u16
     if dos_search_dir != DIR_ROOT
         return DOS_ERR_NO_MORE_FILES
     end
-    if fat_read_sector(dos_drive_index(current_drive), 0, BLOCK_SECTOR_BUFFER) != DOS_BLOCK_OK
+    if fat_read_sector(dos_drive_index(current_drive), 0, addr(block_sector_buffer)) != DOS_BLOCK_OK
         return DOS_ERR_NO_MORE_FILES
     end
     root_lba = fat_root_dir_lba()
-    if fat_read_sector(dos_drive_index(current_drive), root_lba, BLOCK_SECTOR_BUFFER) != DOS_BLOCK_OK
+    if fat_read_sector(dos_drive_index(current_drive), root_lba, addr(block_sector_buffer)) != DOS_BLOCK_OK
         return DOS_ERR_NO_MORE_FILES
     end
     while dos_search_next != 16
@@ -1543,11 +1548,11 @@ reentrant function fat_fopen(path: near ^u8): u16
     if current_dir != DIR_ROOT
         return DOS_ERR_FILE_NOT_FOUND
     end
-    if fat_read_sector(dos_drive_index(current_drive), 0, BLOCK_SECTOR_BUFFER) != DOS_BLOCK_OK
+    if fat_read_sector(dos_drive_index(current_drive), 0, addr(block_sector_buffer)) != DOS_BLOCK_OK
         return DOS_ERR_FILE_NOT_FOUND
     end
     root_lba = fat_root_dir_lba()
-    if fat_read_sector(dos_drive_index(current_drive), root_lba, BLOCK_SECTOR_BUFFER) != DOS_BLOCK_OK
+    if fat_read_sector(dos_drive_index(current_drive), root_lba, addr(block_sector_buffer)) != DOS_BLOCK_OK
         return DOS_ERR_FILE_NOT_FOUND
     end
     index = 0
@@ -1755,7 +1760,7 @@ procedure write_block_info()
     console_write_text("\r\nSectors $")
     console_write_hex16(sectors)
     console_newline()
-    read_status = dos_drive_read_blocks(current_drive, 0, 1, BLOCK_SECTOR_BUFFER)
+    read_status = dos_drive_read_blocks(current_drive, 0, 1, addr(block_sector_buffer))
     if read_status == DOS_BLOCK_OK
         console_write_text("Sector0:")
         index = 0
@@ -2020,7 +2025,7 @@ reentrant function fat_handle_byte(offset: u16): u8
     sector_lba = dos_handle_lba[slot]
     if byte_offset >= $0200
         byte_offset = byte_offset - $0200
-        if fat_read_sector(drive, 1, BLOCK_SECTOR_BUFFER) != DOS_BLOCK_OK
+        if fat_read_sector(drive, 1, addr(block_sector_buffer)) != DOS_BLOCK_OK
             return 0
         end
         if byte_offset >= $0200
@@ -2030,7 +2035,7 @@ reentrant function fat_handle_byte(offset: u16): u8
             sector_lba = sector_lba + fat_boot_u16(4) - 2
         end
     end
-    if fat_read_sector(drive, sector_lba, BLOCK_SECTOR_BUFFER) != DOS_BLOCK_OK
+    if fat_read_sector(drive, sector_lba, addr(block_sector_buffer)) != DOS_BLOCK_OK
         return 0
     else
         return block_sector_buffer[byte_offset]

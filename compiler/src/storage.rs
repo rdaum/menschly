@@ -256,7 +256,23 @@ fn assign_storage_with_direct_page_budget(
     let routines = module
         .routines
         .iter()
-        .map(|routine| assign_routine(routine, &mut allocator, &mut args, &mut scratch))
+        .map(|routine| {
+            if matches!(routine.abi, Abi::Interrupt) {
+                // An interrupt can arrive while any other routine is using a
+                // shared slot, so handlers get pools of their own.
+                let mut private_args = DirectSlotPool::new(format!("__dp_{}_arg", routine.name));
+                let mut private_scratch =
+                    DirectSlotPool::new(format!("__dp_{}_scratch", routine.name));
+                assign_routine(
+                    routine,
+                    &mut allocator,
+                    &mut private_args,
+                    &mut private_scratch,
+                )
+            } else {
+                assign_routine(routine, &mut allocator, &mut args, &mut scratch)
+            }
+        })
         .collect();
 
     StorageAssignment {
@@ -1666,14 +1682,14 @@ impl DirectAllocator {
 }
 
 struct DirectSlotPool {
-    prefix: &'static str,
+    prefix: String,
     slots: Vec<AllocatedSlot>,
 }
 
 impl DirectSlotPool {
-    fn new(prefix: &'static str) -> Self {
+    fn new(prefix: impl Into<String>) -> Self {
         Self {
-            prefix,
+            prefix: prefix.into(),
             slots: Vec::new(),
         }
     }

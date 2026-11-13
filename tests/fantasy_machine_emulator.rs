@@ -477,6 +477,7 @@ fn language_bios_bconout_runs_through_cop_syscall() {
         &[
             caller_path,
             repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/x65-machine.mensch"),
             traps_path,
             repo_root.join("examples/serial-ring.mensch"),
         ],
@@ -560,6 +561,7 @@ fn language_bios_block_write_updates_attached_disk_image() {
         &[
             caller_path,
             repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/x65-machine.mensch"),
             traps_path,
             repo_root.join("examples/serial-ring.mensch"),
         ],
@@ -647,6 +649,7 @@ fn language_fat_sector_helpers_use_dos_drive_mapping() {
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
             repo_root.join("examples/hellord-traps.mensch"),
             repo_root.join("examples/hellord-console.mensch"),
@@ -741,6 +744,7 @@ fn language_gemdos_fsfirst_enumerates_fat_root_directory() {
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
             repo_root.join("examples/hellord-traps.mensch"),
             repo_root.join("examples/hellord-console.mensch"),
@@ -841,8 +845,8 @@ fn language_gemdos_fread_reads_fat_root_file() {
         module GemdosFatFileCaller
         application main
         vector irq = serial_irq
-        const READ_BUFFER = $9400
-        fixed($009400) var read_buffer: [1028]u8
+        const READ_BUFFER = $9a00
+        fixed($009a00) var read_buffer: [1028]u8
 
         external interrupt procedure serial_irq()
         external procedure serial_init()
@@ -873,6 +877,7 @@ fn language_gemdos_fread_reads_fat_root_file() {
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
             repo_root.join("examples/hellord-traps.mensch"),
             repo_root.join("examples/hellord-console.mensch"),
@@ -922,18 +927,18 @@ fn language_gemdos_fread_reads_fat_root_file() {
     .expect("GEMDOS FAT file image should run");
 
     assert_eq!(run.output, b"!");
-    assert_eq!(run.machine.byte(0x009600), b'O');
-    assert_eq!(run.machine.byte(0x009601), b'K');
-    assert_eq!(run.machine.byte(0x009800), b'3');
-    assert_eq!(run.machine.byte(0x009801), b'!');
+    assert_eq!(run.machine.byte(0x009c00), b'O');
+    assert_eq!(run.machine.byte(0x009c01), b'K');
+    assert_eq!(run.machine.byte(0x009e00), b'3');
+    assert_eq!(run.machine.byte(0x009e01), b'!');
     assert_eq!(
         &[
-            run.machine.byte(0x009400),
-            run.machine.byte(0x009401),
-            run.machine.byte(0x009402),
-            run.machine.byte(0x009403),
-            run.machine.byte(0x009404),
-            run.machine.byte(0x009405),
+            run.machine.byte(0x009a00),
+            run.machine.byte(0x009a01),
+            run.machine.byte(0x009a02),
+            run.machine.byte(0x009a03),
+            run.machine.byte(0x009a04),
+            run.machine.byte(0x009a05),
         ],
         b"HELLO!"
     );
@@ -955,9 +960,9 @@ fn language_gemdos_fwrite_updates_fat_root_file_sector() {
         module GemdosFatFileWriteCaller
         application main
         vector irq = serial_irq
-        const WRITE_BUFFER = $9400
+        const WRITE_BUFFER = $9a00
         fixed($000304) volatile var written: u16
-        fixed($009400) var write_buffer: [512]u8
+        fixed($009a00) var write_buffer: [512]u8
 
         external interrupt procedure serial_irq()
         external procedure serial_init()
@@ -994,6 +999,7 @@ fn language_gemdos_fwrite_updates_fat_root_file_sector() {
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
             repo_root.join("examples/hellord-traps.mensch"),
             repo_root.join("examples/hellord-console.mensch"),
@@ -1094,6 +1100,7 @@ fn language_gemdos_console_discovers_bios_device() {
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
             repo_root.join("examples/hellord-traps.mensch"),
             repo_root.join("examples/hellord-console.mensch"),
@@ -1174,6 +1181,7 @@ fn language_gemdos_drive_syscalls_update_dos_current_drive() {
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
             repo_root.join("examples/hellord-traps.mensch"),
             repo_root.join("examples/hellord-console.mensch"),
@@ -1270,6 +1278,7 @@ fn language_gemdos_file_syscalls_read_romfs_file() {
             caller_path,
             repo_root.join("examples/hellord-dos.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
             repo_root.join("examples/hellord-traps.mensch"),
             repo_root.join("examples/hellord-console.mensch"),
@@ -1966,6 +1975,7 @@ fn build_hellord_example() -> x65_runner::BuildOutput {
             repo_root.join("examples/hellord-files.mensch"),
             repo_root.join("examples/serial-ring.mensch"),
             repo_root.join("examples/hellord-bios.mensch"),
+            repo_root.join("examples/x65-machine.mensch"),
             repo_root.join("examples/hellord-gemdos.mensch"),
             repo_root.join("examples/hellord-traps.mensch"),
         ],
