@@ -501,10 +501,18 @@ assignment with the 65816 backend but lowers everything byte by byte:
 - Z is zero between instructions; `(bp),z` and `[bp],z` sequences restore it.
 - The IR's virtual accumulator lives in base page (`__m65_acc`, 4 bytes).
   Scratch pointers `__m65_ptr` and `__m65_farp` (a 32-bit flat address), the
-  frame pointer `__m65_fp` and the math operand `__m65_arg` (4 bytes) are also
-  runtime base-page registers.
+  frame pointer `__m65_fp`, the math operand `__m65_arg` (4 bytes) and the
+  temp block `__m65_tmp` (8 bytes) are also runtime base-page registers.
+- Reentrant routines keep expression temporaries that do not live across a
+  call, and scalar locals that do not (a loop that uses a local keeps it
+  live for the whole loop), in `__m65_tmp` instead of their stack frame.
+  Such locals are zeroed on entry, like frame locals; interrupt handlers
+  that call out save `__m65_tmp` with the other runtime registers.
 - Function results come back in `A` (byte 0), `X` (byte 1), `Y` (byte 2) and
-  `__m65_acc+3` (byte 3), which the frame release leaves alone.
+  `__m65_acc+3` (byte 3), which the frame release leaves alone. Functions
+  with 1- or 2-byte results return with N/Z describing `A`, so a caller in
+  the same module tests the result without a `cmp #0` (other callers, such
+  as those going through a window stub, cannot rely on it).
 - Far pointers are 32-bit flat addresses, dereferenced through `[__m65_farp],z`.
 - `*`, `/` and `%` load the operands into `__m65_acc` and `__m65_arg` and call
   `__m65_mul`, `__m65_divu` or `__m65_divs` (`X` = the operand width in bytes
@@ -538,8 +546,8 @@ assignment with the 65816 backend but lowers everything byte by byte:
   `fixed` hardware registers, are kept exactly as written. Callees never take
   inputs in the base-page scratch registers, except the math routines
   (`__m65_acc`, `__m65_arg`) and indirect calls (the vector in `__m65_ptr`).
-- Array indexing forms the full 16-bit address `base + index` in
-  `__m65_ptr`, so indexes are not limited to the 8-bit X register.
+- Indexing an array of at most 256 bytes uses `base,x`. Larger arrays form
+  the full 16-bit address `base + index` in `__m65_ptr`.
 - Interrupt routines save A/X/Y/Z, re-establish Z = 0, and save the
   base-page runtime registers they can disturb (all of them if the handler
   calls other routines; the accumulator and pointer if it has a frame). On both targets the storage pass gives interrupt

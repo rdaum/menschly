@@ -1113,7 +1113,9 @@ fn load_operand_for_address(
     outgoing_stack_bytes: u16,
 ) -> Result<Operand, LowerError> {
     match addr {
-        Address::Indexed { base, index } => indexed_operand(out, base, index, outgoing_stack_bytes),
+        Address::Indexed { base, index, .. } => {
+            indexed_operand(out, base, index, outgoing_stack_bytes)
+        }
         Address::NearPtr(Value::Direct(name)) => {
             Ok(Operand::IndirectDirect(Symbol::Named(name.clone())))
         }
@@ -1135,7 +1137,9 @@ fn store_operand_for_address(
     outgoing_stack_bytes: u16,
 ) -> Result<Operand, LowerError> {
     match addr {
-        Address::Indexed { base, index } => indexed_operand(out, base, index, outgoing_stack_bytes),
+        Address::Indexed { base, index, .. } => {
+            indexed_operand(out, base, index, outgoing_stack_bytes)
+        }
         Address::NearPtr(Value::Direct(name)) => {
             Ok(Operand::IndirectDirect(Symbol::Named(name.clone())))
         }

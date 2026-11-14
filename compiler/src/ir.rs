@@ -630,6 +630,9 @@ pub enum Address {
     Indexed {
         base: String,
         index: Value,
+        /// The array spans at most 256 bytes, so (for any in-bounds index)
+        /// the byte offset fits in its low byte.
+        small: bool,
     },
     ValueOffset {
         base: Value,

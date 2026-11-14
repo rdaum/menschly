@@ -39,12 +39,13 @@
 //! Not yet supported (lowering returns an error naming the construct):
 //! COP trap frames and absolute addresses above `$FFFF`.
 
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::ir::{
     Abi, Address, BinaryOp, Const, IrInst, Label, Module, Routine, RoutineKind, Type, Value, Width,
 };
-use crate::optimize_45gs02::optimize_routine;
+use crate::optimize_45gs02::optimize_routine_with;
 use crate::storage::{
     apply_storage, assign_storage_with_options, StorageAssignment, StorageOptions,
 };
@@ -60,9 +61,18 @@ pub const FARP_SYMBOL: &str = "__m65_farp";
 pub const FP_SYMBOL: &str = "__m65_fp";
 /// Base-page second operand of the math routines (4 bytes).
 pub const ARG_SYMBOL: &str = "__m65_arg";
+/// Base-page temporaries of reentrant routines (see `StorageOptions`).
+pub const TMP_SYMBOL: &str = "__m65_tmp";
+pub const TMP_BYTES: u16 = 8;
 
-pub const RUNTIME_DIRECT_SYMBOLS: [&str; 5] =
-    [ACC_SYMBOL, PTR_SYMBOL, FARP_SYMBOL, FP_SYMBOL, ARG_SYMBOL];
+pub const RUNTIME_DIRECT_SYMBOLS: [&str; 6] = [
+    ACC_SYMBOL,
+    PTR_SYMBOL,
+    FARP_SYMBOL,
+    FP_SYMBOL,
+    ARG_SYMBOL,
+    TMP_SYMBOL,
+];
 
 /// Runtime routine that builds a stack frame (Z = local bytes).
 pub const ENTER_ROUTINE: &str = "__m65_enter";
@@ -96,8 +106,11 @@ const SAVED_FP_BYTES: u16 = 2;
 
 /// Wide values never need base page here: far pointers are copied into
 /// the runtime's flat pointer before use.
+/// Reentrant routines keep short-lived temporaries in `__m65_tmp`, which
+/// interrupt handlers preserve.
 const STORAGE_OPTIONS: StorageOptions = StorageOptions {
     wide_scratch_direct: false,
+    temp_registers: Some((TMP_SYMBOL, TMP_BYTES)),
 };
 
 pub fn lower_module_with_storage(
@@ -134,8 +147,19 @@ fn lower_with_assignment(
             out.external_direct_symbols.push(symbol.to_owned());
         }
     }
+    // Functions with 1- or 2-byte results return with N/Z describing A
+    // (`load_result` loads A last; so does `__m65_leave`).
+    let flag_routines: HashSet<String> = assigned
+        .routines
+        .iter()
+        .filter(|routine| {
+            matches!(&routine.kind, RoutineKind::Function { result } if result.size_bytes() <= 2)
+                && !matches!(routine.abi, Abi::Interrupt)
+        })
+        .map(|routine| routine.name.clone())
+        .collect();
     for routine in &assigned.routines {
-        out.routines.push(lower_routine(routine)?);
+        out.routines.push(lower_routine(routine, &flag_routines)?);
     }
     for helper in RUNTIME_ROUTINES {
         let called = out.routines.iter().any(|routine| {
@@ -252,7 +276,10 @@ pub fn place_in_window(module: &mut AsmModule, bank: u8) -> Result<(), String> {
     Ok(())
 }
 
-fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
+fn lower_routine(
+    routine: &Routine,
+    flag_routines: &HashSet<String>,
+) -> Result<AsmRoutine, LowerError> {
     let mut lowerer = RoutineLowerer::new(routine);
     if lowerer.frame.is_some_and(|frame| frame > 0xff) {
         return Err(lowerer.unsupported(format!(
@@ -279,7 +306,7 @@ fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
     out.export = routine.export;
     // Only interrupt handlers can start with Z non-zero.
     let z_zero_on_entry = !matches!(routine.abi, Abi::Interrupt);
-    out.insts = optimize_routine(lowerer.out, z_zero_on_entry);
+    out.insts = optimize_routine_with(lowerer.out, z_zero_on_entry, flag_routines);
     Ok(out)
 }
 
@@ -303,11 +330,12 @@ struct RoutineLowerer<'a> {
 
 /// Base-page runtime registers an interrupt handler may need to preserve,
 /// with their sizes. `__m65_fp` is handled by frame setup itself.
-const INTERRUPT_SAVED_RUNTIME: [(&str, u16); 4] = [
+const INTERRUPT_SAVED_RUNTIME: [(&str, u16); 5] = [
     (ACC_SYMBOL, 4),
     (PTR_SYMBOL, 2),
     (FARP_SYMBOL, 4),
     (ARG_SYMBOL, 4),
+    (TMP_SYMBOL, TMP_BYTES),
 ];
 
 /// Where one byte of a value lives.
@@ -1096,16 +1124,32 @@ impl<'a> RoutineLowerer<'a> {
     // ---- memory addressing -------------------------------------------------
 
     /// Prepares any scratch pointer needed for `addr` and returns its form,
-    /// plus whether the form indexes by Z.
-    fn address_form(&mut self, addr: &Address) -> Result<(AddressForm, bool), LowerError> {
+    /// plus whether the form indexes by Z. `x_free` says the access does not
+    /// otherwise involve X.
+    fn address_form(
+        &mut self,
+        addr: &Address,
+        x_free: bool,
+    ) -> Result<(AddressForm, bool), LowerError> {
         Ok(match addr {
             Address::Symbol(name) => (AddressForm::Absolute(name.clone()), false),
             Address::Direct(name) => (AddressForm::Base(name.clone()), false),
             Address::SymbolIndexedX(name) => (AddressForm::AbsoluteX(name.clone()), false),
-            Address::Indexed { base, index } => {
+            Address::Indexed { base, index, small } => {
                 if let Value::Const(value) = index {
                     let offset_bytes = value.bits() as u16;
                     (AddressForm::Absolute(offset(base, offset_bytes)), false)
+                } else if *small && x_free {
+                    // The byte offset fits in X.
+                    match self.value_byte(index, 0)? {
+                        ByteSource::X => {}
+                        ByteSource::Operand(operand) => self.emit(Op::Ldx, operand),
+                        _ => {
+                            self.load_byte_to_a(index, 0)?;
+                            self.implied(Op::Tax);
+                        }
+                    }
+                    (AddressForm::AbsoluteX(base.clone()), false)
                 } else {
                     // X is only 8 bits, so form the full 16-bit address.
                     self.implied(Op::Clc);
@@ -1203,7 +1247,7 @@ impl<'a> RoutineLowerer<'a> {
     }
 
     fn load(&mut self, width: Width, dst: &Value, addr: &Address) -> Result<(), LowerError> {
-        let (form, uses_z) = self.address_form(addr)?;
+        let (form, uses_z) = self.address_form(addr, !matches!(dst, Value::IndexX))?;
         let bytes = width.size_bytes();
         for i in 0..bytes {
             self.address_op(Op::Lda, &form, i)?;
@@ -1216,7 +1260,7 @@ impl<'a> RoutineLowerer<'a> {
     }
 
     fn store(&mut self, width: Width, addr: &Address, src: &Value) -> Result<(), LowerError> {
-        let (form, uses_z) = self.address_form(addr)?;
+        let (form, uses_z) = self.address_form(addr, !matches!(src, Value::IndexX))?;
         let bytes = width.size_bytes();
         for i in 0..bytes {
             self.load_byte_to_a(src, i)?;
@@ -1292,12 +1336,18 @@ fn div_routine(signed: bool) -> &'static str {
     }
 }
 
+/// `name + i`, folding into an existing numeric offset (`sym+3` + 1 is
+/// `sym+4`), so the optimizer can recognize the byte.
 fn offset(name: &str, i: u16) -> String {
     if i == 0 {
-        name.to_owned()
-    } else {
-        format!("{name}+{i}")
+        return name.to_owned();
     }
+    if let Some((base, existing)) = name.rsplit_once('+') {
+        if let Ok(existing) = existing.parse::<u16>() {
+            return format!("{base}+{}", existing + i);
+        }
+    }
+    format!("{name}+{i}")
 }
 
 fn width_for_type(ty: &Type) -> Result<Width, ()> {

@@ -2625,6 +2625,7 @@ impl<'a> RoutineLowerer<'a> {
             ));
         };
         let binding = self.binding(name)?.clone();
+        let small = binding.ty.size_bytes() <= 0x100;
         let Type::Array { element, .. } = binding.ty else {
             return Err(FrontendError::Type(
                 "indexed access needs an array".to_owned(),
@@ -2656,6 +2657,7 @@ impl<'a> RoutineLowerer<'a> {
                 Address::Indexed {
                     base: symbol,
                     index,
+                    small,
                 },
                 *element,
             )),
@@ -2666,7 +2668,7 @@ impl<'a> RoutineLowerer<'a> {
     }
 
     /// Turns an element index into a byte offset: `index * element_size`,
-    /// as shifts and adds (Mensch has no multiply).
+    /// as shifts and adds.
     fn scale_index(&mut self, index: Value, element_size: u16) -> Result<Value, FrontendError> {
         if element_size == 1 {
             return Ok(index);

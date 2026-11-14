@@ -29,7 +29,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::lower_45gs02::{
-    ACC_SYMBOL, ARG_SYMBOL, FARP_SYMBOL, FP_SYMBOL, MATH_ROUTINES, PTR_SYMBOL,
+    ACC_SYMBOL, ARG_SYMBOL, FARP_SYMBOL, FP_SYMBOL, MATH_ROUTINES, PTR_SYMBOL, TMP_SYMBOL,
 };
 use crate::target_45gs02::{Inst, Op, Operand};
 
@@ -48,22 +48,35 @@ const PTR: Locs = 0x3 << 10;
 const FARP: Locs = 0xf << 12;
 const FP: Locs = 0x3 << 16;
 const ARG: Locs = 0xf << 18;
+const TMP: Locs = 0xff << 22;
 /// The top byte of the accumulator, which carries a 32-bit result's byte 3.
 const ACC3: Locs = 1 << 9;
-const ALL: Locs = (1 << 22) - 1;
+const ALL: Locs = (1 << 30) - 1;
 
 /// Runtime base-page registers: (symbol, first bit, bytes).
-const RUNTIME: [(&str, u32, u32); 5] = [
+const RUNTIME: [(&str, u32, u32); 6] = [
     (ACC_SYMBOL, 6, 4),
     (PTR_SYMBOL, 10, 2),
     (FARP_SYMBOL, 12, 4),
     (FP_SYMBOL, 16, 2),
     (ARG_SYMBOL, 18, 4),
+    (TMP_SYMBOL, 22, 8),
 ];
 
 /// Optimizes one routine. `z_zero_on_entry` is false for interrupt handlers,
 /// which may interrupt a `(bp),z` sequence with Z non-zero.
 pub fn optimize_routine(insts: Vec<Inst>, z_zero_on_entry: bool) -> Vec<Inst> {
+    optimize_routine_with(insts, z_zero_on_entry, &HashSet::new())
+}
+
+/// Like [`optimize_routine`]; `flag_routines` are routines known to return
+/// with N/Z describing A (see `lower_45gs02`), so a `CMP #0` of their
+/// result can go.
+pub fn optimize_routine_with(
+    insts: Vec<Inst>,
+    z_zero_on_entry: bool,
+    flag_routines: &HashSet<String>,
+) -> Vec<Inst> {
     if insts.iter().any(|inst| matches!(inst, Inst::Raw(_))) {
         return insts;
     }
@@ -72,7 +85,7 @@ pub fn optimize_routine(insts: Vec<Inst>, z_zero_on_entry: bool) -> Vec<Inst> {
         let before = insts.len();
         let mut changed = clean_jumps(&mut insts);
         changed |= eliminate_dead_code(&mut insts);
-        changed |= eliminate_redundant(&mut insts, z_zero_on_entry);
+        changed |= eliminate_redundant(&mut insts, z_zero_on_entry, flag_routines);
         if !changed && insts.len() == before {
             break;
         }
@@ -245,12 +258,13 @@ fn effect(inst: &Inst) -> Effect {
             };
             (
                 A | X | Y | Z | FP | arguments,
-                A | X | Y | NZ | C | ACC | PTR | FARP | ARG,
+                A | X | Y | NZ | C | ACC | PTR | FARP | ARG | TMP,
                 false,
             )
         }
-        // Results are in A/X/Y, and a 32-bit result's top byte in ACC+3.
-        Op::Rts | Op::Rtn => (A | X | Y | Z | FP | ACC3, 0, false),
+        // Results are in A/X/Y, and a 32-bit result's top byte in ACC+3;
+        // N/Z describe A for 1- and 2-byte results.
+        Op::Rts | Op::Rtn => (A | X | Y | Z | FP | ACC3 | NZ, 0, false),
         Op::Rti => (ALL, 0, false),
     };
     Effect {
@@ -328,13 +342,16 @@ fn eliminate_dead_code(insts: &mut Vec<Inst>) -> bool {
 
 // ---- known register values --------------------------------------------------
 
-/// What each register is known to equal: immediates (`#…`) and memory the
-/// compiler owns (`z:…`, `a:…`, `fp:…` for frame bytes).
+/// What each register is known to equal: immediates (`#…`), memory the
+/// compiler owns (`z:…`, `a:…`, `fp:…` for frame bytes), and otherwise
+/// unknown values numbered as they appear (`v:…`), so that copies between
+/// registers can be recognized.
 #[derive(Default, Clone)]
 struct Known {
     regs: [Vec<String>; 4],
     /// Whether N/Z currently describe the value in A.
     nz_from_a: bool,
+    next_value: usize,
 }
 
 const REG_A: usize = 0;
@@ -365,11 +382,21 @@ impl Known {
     }
 
     fn set(&mut self, reg: usize, key: Option<String>) {
-        self.regs[reg] = key.into_iter().collect();
+        match key {
+            Some(key) => self.regs[reg] = vec![key],
+            None => self.forget(reg),
+        }
     }
 
+    /// The register now holds a new, unknown value.
     fn forget(&mut self, reg: usize) {
-        self.regs[reg].clear();
+        self.next_value += 1;
+        self.regs[reg] = vec![format!("v:{}", self.next_value)];
+    }
+
+    /// Whether two registers are known to hold the same value.
+    fn same(&self, a: usize, b: usize) -> bool {
+        self.regs[a].iter().any(|key| self.holds(b, key))
     }
 
     fn retain_keys(&mut self, keep: impl Fn(&str) -> bool) {
@@ -438,12 +465,18 @@ impl Known {
     /// pointer can address.
     fn clobber_all_memory(&mut self) {
         self.retain_keys(|key| {
-            key.starts_with('#') || key.strip_prefix("z:").is_some_and(is_runtime_symbol)
+            key.starts_with('#')
+                || key.starts_with("v:")
+                || key.strip_prefix("z:").is_some_and(is_runtime_symbol)
         });
     }
 }
 
-fn eliminate_redundant(insts: &mut Vec<Inst>, z_zero_on_entry: bool) -> bool {
+fn eliminate_redundant(
+    insts: &mut Vec<Inst>,
+    z_zero_on_entry: bool,
+    flag_routines: &HashSet<String>,
+) -> bool {
     let live = live_after(insts);
     let referenced: HashSet<String> = insts
         .iter()
@@ -474,7 +507,9 @@ fn eliminate_redundant(insts: &mut Vec<Inst>, z_zero_on_entry: bool) -> bool {
             Op::Lda | Op::Ldx | Op::Ldy | Op::Ldz => {
                 let reg = reg_index(op).expect("load register");
                 let key = known.key(operand);
-                if flags_dead && key.as_ref().is_some_and(|key| known.holds(reg, key)) {
+                // Reloading A also leaves N/Z alone when they describe A.
+                let flags_kept = flags_dead || (op == Op::Lda && known.nz_from_a);
+                if flags_kept && key.as_ref().is_some_and(|key| known.holds(reg, key)) {
                     // The register and the flags are exactly as before.
                     delete[i] = true;
                     continue;
@@ -511,14 +546,24 @@ fn eliminate_redundant(insts: &mut Vec<Inst>, z_zero_on_entry: bool) -> bool {
                     known.regs[reg].push(key);
                 }
             }
-            Op::Tax | Op::Tay => {
-                let reg = if op == Op::Tax { REG_X } else { REG_Y };
-                known.regs[reg] = known.regs[REG_A].clone();
-                known.nz_from_a = true;
-            }
-            Op::Txa | Op::Tya => {
-                let reg = if op == Op::Txa { REG_X } else { REG_Y };
-                known.regs[REG_A] = known.regs[reg].clone();
+            Op::Tax | Op::Tay | Op::Txa | Op::Tya => {
+                let index = if matches!(op, Op::Tax | Op::Txa) {
+                    REG_X
+                } else {
+                    REG_Y
+                };
+                let (from, to) = if matches!(op, Op::Tax | Op::Tay) {
+                    (REG_A, index)
+                } else {
+                    (index, REG_A)
+                };
+                // Copying a register into one that already holds its value
+                // changes nothing (N/Z too, when they describe A).
+                if known.same(from, to) && (flags_dead || known.nz_from_a) {
+                    delete[i] = true;
+                    continue;
+                }
+                known.regs[to] = known.regs[from].clone();
                 known.nz_from_a = true;
             }
             Op::Cmp if operand.is_zero_immediate() && known.nz_from_a && carry_dead => {
@@ -565,7 +610,14 @@ fn eliminate_redundant(insts: &mut Vec<Inst>, z_zero_on_entry: bool) -> bool {
             }
             Op::Cmp | Op::Cpx => known.nz_from_a = false,
             Op::Jsr => {
+                let next_value = known.next_value;
                 known = Known::entry();
+                known.next_value = next_value;
+                for reg in [REG_A, REG_X, REG_Y] {
+                    known.forget(reg);
+                }
+                known.nz_from_a =
+                    matches!(operand, Operand::Label(name) if flag_routines.contains(name));
             }
             Op::Clc | Op::Sec | Op::Pha | Op::Phx | Op::Phy | Op::Phz => {}
             Op::Bne | Op::Beq | Op::Bcc | Op::Bcs | Op::Lbne | Op::Lbeq | Op::Lbcc | Op::Lbcs => {}
@@ -835,6 +887,27 @@ mod tests {
     }
 
     #[test]
+    fn calls_to_flag_routines_drop_the_zero_compare() {
+        let insts = vec![
+            op(Op::Jsr, label("f")),
+            op(Op::Cmp, imm("$00")),
+            op(Op::Lbeq, label("out")),
+            op(Op::Jsr, label("g")),
+            op(Op::Cmp, imm("$00")),
+            op(Op::Lbeq, label("out")),
+            Inst::Label("out".to_owned()),
+            Inst::implied(Op::Rts),
+        ];
+        let flag_routines = HashSet::from(["f".to_owned()]);
+        let out = optimize_routine_with(insts, true, &flag_routines);
+        let compares = out
+            .iter()
+            .filter(|inst| matches!(inst, Inst::Op(Op::Cmp, _)))
+            .count();
+        assert_eq!(compares, 1, "only g's result needs a compare: {out:?}");
+    }
+
+    #[test]
     fn repeated_frame_offsets_reuse_y() {
         let frame = Operand::IndirectY(FP_SYMBOL.to_owned());
         let insts = vec![
@@ -843,6 +916,7 @@ mod tests {
             op(Op::Ldy, imm("$03")),
             op(Op::Lda, frame.clone()),
             Inst::implied(Op::Pha),
+            op(Op::Jsr, label("f")),
             Inst::implied(Op::Rts),
         ];
         let out = optimize_routine(insts, true);
@@ -852,6 +926,7 @@ mod tests {
                 op(Op::Ldy, imm("$03")),
                 op(Op::Sta, frame),
                 Inst::implied(Op::Pha),
+                op(Op::Jsr, label("f")),
                 Inst::implied(Op::Rts),
             ]
         );

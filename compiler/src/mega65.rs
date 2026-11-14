@@ -62,7 +62,7 @@ pub const ROM_LOAD_ADDRESS: u32 = 0x20000;
 /// `lower_45gs02`). Each program links its own copy, so a program and the
 /// kernel never share scratch state.
 pub const RUNTIME: &str = r#".setcpu "45GS02"
-.exportzp __m65_acc, __m65_ptr, __m65_farp, __m65_fp, __m65_arg
+.exportzp __m65_acc, __m65_ptr, __m65_farp, __m65_fp, __m65_arg, __m65_tmp
 .export __m65_enter, __m65_leave
 
 .segment "ZEROPAGE"
@@ -71,6 +71,7 @@ __m65_ptr: .res 2
 __m65_farp: .res 4
 __m65_fp: .res 2
 __m65_arg: .res 4
+__m65_tmp: .res 8
 
 .segment "CODE"
 ; Stack frames (see lower_45gs02). A routine with a frame starts with
@@ -127,10 +128,10 @@ __m65_leave:
 	pla
 	sta __m65_fp+1
 	inw __m65_ptr
-	lda __m65_acc
+	ldz #$00
 	ldx __m65_acc+1
 	ldy __m65_acc+2
-	ldz #$00
+	lda __m65_acc       ; last, so N/Z describe A (see lower_45gs02)
 	jmp (__m65_ptr)
 
 "#;
@@ -923,7 +924,7 @@ SEGMENTS {
 "#;
 
 /// Base-page bytes the runtime registers in [`RUNTIME`] take.
-pub const RUNTIME_BASE_PAGE_BYTES: u16 = 16;
+pub const RUNTIME_BASE_PAGE_BYTES: u16 = 24;
 
 /// Base-page bytes available to kernel Mensch code: `$02-$FF` minus the
 /// runtime registers.

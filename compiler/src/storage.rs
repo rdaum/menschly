@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use crate::ir::{
-    param_symbol, Abi, Address, Const, IrInst, Local, Module, Param, Routine, Storage, Value,
+    param_symbol, Abi, Address, Const, IrInst, Label, Local, Module, Param, Routine, Storage, Value,
 };
 
 pub const DEFAULT_DIRECT_PAGE_BUDGET: u16 = 0x80;
@@ -155,6 +155,9 @@ pub struct RoutineStorage {
     pub static_locals: Vec<StaticLocal>,
     pub stack_slots: Vec<StackSlot>,
     pub stack_frame_bytes: u16,
+    /// Locals kept in temp registers: (symbol, bytes). They start at zero,
+    /// like the stack locals they replace.
+    pub zeroed_registers: Vec<(String, u16)>,
     bindings: BTreeMap<BindingKey, Location>,
 }
 
@@ -253,12 +256,17 @@ pub struct StorageOptions {
     /// (the 65816 reaches 24-bit values through `[dp]`). Targets that copy
     /// wide values into their own registers can keep them in ordinary RAM.
     pub wide_scratch_direct: bool,
+    /// A block of base-page registers that interrupt handlers preserve
+    /// (symbol, bytes). Reentrant routines keep expression temporaries that
+    /// do not live across a call there instead of in their stack frame.
+    pub temp_registers: Option<(&'static str, u16)>,
 }
 
 impl Default for StorageOptions {
     fn default() -> Self {
         Self {
             wide_scratch_direct: true,
+            temp_registers: None,
         }
     }
 }
@@ -278,6 +286,7 @@ fn assign_storage_with_direct_page_budget(
 ) -> StorageAssignment {
     let mut allocator = DirectAllocator::new(budget);
     allocator.wide_scratch_direct = options.wide_scratch_direct;
+    allocator.temp_registers = options.temp_registers;
     let mut args = DirectSlotPool::new("__dp_arg");
     let mut scratch = DirectSlotPool::new("__dp_scratch");
     let routines = module
@@ -357,10 +366,25 @@ pub fn apply_storage(module: &Module, assignment: &StorageAssignment) -> Module 
             };
 
             let mut routine = routine.clone();
-            routine.body = routine
-                .body
+            let zeroing = layout
+                .zeroed_registers
                 .iter()
-                .map(|inst| rewrite_inst(inst, layout, &direct_aliases))
+                .map(|(symbol, bytes)| IrInst::LoadConst {
+                    dst: Value::Direct(symbol.clone()),
+                    value: match bytes {
+                        1 => Const::U8(0),
+                        2 => Const::U16(0),
+                        3 => Const::U24(0),
+                        _ => Const::U32(0),
+                    },
+                });
+            routine.body = zeroing
+                .chain(
+                    routine
+                        .body
+                        .iter()
+                        .map(|inst| rewrite_inst(inst, layout, &direct_aliases)),
+                )
                 .collect();
             routine.stack_frame_bytes = layout.stack_frame_bytes;
             routine
@@ -414,17 +438,21 @@ fn assign_routine(
         static_locals: Vec::new(),
         stack_slots: Vec::new(),
         stack_frame_bytes: 0,
+        zeroed_registers: Vec::new(),
         bindings: BTreeMap::new(),
     };
 
     if matches!(routine.abi, Abi::Reentrant) {
-        assign_locals(routine, allocator, &mut out);
-        assign_scratch_bindings(routine, allocator, scratch, &mut out);
+        let mut registers = allocator
+            .temp_registers
+            .map(|(symbol, bytes)| TempRegisters::new(symbol, bytes));
+        assign_locals(routine, allocator, registers.as_mut(), &mut out);
+        assign_scratch_bindings(routine, allocator, scratch, registers.as_mut(), &mut out);
         assign_stack_params(routine, &mut out);
     } else {
         assign_params(routine, allocator, args, &mut out);
-        assign_locals(routine, allocator, &mut out);
-        assign_scratch_bindings(routine, allocator, scratch, &mut out);
+        assign_locals(routine, allocator, None, &mut out);
+        assign_scratch_bindings(routine, allocator, scratch, None, &mut out);
     }
 
     out
@@ -472,10 +500,37 @@ fn assign_stack_params(routine: &Routine, out: &mut RoutineStorage) {
     }
 }
 
-fn assign_locals(routine: &Routine, allocator: &mut DirectAllocator, out: &mut RoutineStorage) {
+fn assign_locals(
+    routine: &Routine,
+    allocator: &mut DirectAllocator,
+    mut registers: Option<&mut TempRegisters>,
+    out: &mut RoutineStorage,
+) {
     let mut stack_offset = 1;
 
     for local in &routine.locals {
+        // A reentrant routine's scalar local that never lives across a call
+        // can use the temp registers instead of the frame.
+        if let (Some(registers), Storage::Default) = (registers.as_deref_mut(), local.storage) {
+            let size = local.ty.size_bytes();
+            let lifetime = (size <= 4)
+                .then(|| local_lifetime(routine, &local.name))
+                .flatten();
+            if let Some((first_use, last_use, false)) = lifetime {
+                if let Some(symbol) = registers.place(first_use, last_use, size) {
+                    out.bindings.insert(
+                        BindingKey::Local(local.name.clone()),
+                        Location::Direct {
+                            symbol: symbol.clone(),
+                            offset: 0,
+                            size,
+                        },
+                    );
+                    out.zeroed_registers.push((symbol, size));
+                    continue;
+                }
+            }
+        }
         match local.storage {
             Storage::Direct => allocate_direct_local(routine, local, allocator, out),
             Storage::Static => {
@@ -536,6 +591,7 @@ fn assign_scratch_bindings(
     routine: &Routine,
     allocator: &mut DirectAllocator,
     scratch: &mut DirectSlotPool,
+    mut registers: Option<&mut TempRegisters>,
     out: &mut RoutineStorage,
 ) {
     let mut lifetimes = scratch_lifetimes(routine);
@@ -555,6 +611,24 @@ fn assign_scratch_bindings(
 
     if matches!(routine.abi, Abi::Reentrant) {
         for binding in lifetimes {
+            // Temporaries live within one statement, so their linear
+            // lifetime is exact (unlike variables, which loops can keep
+            // alive around a back edge).
+            if matches!(binding.key, BindingKey::Temp(_)) && !binding.crosses_call {
+                if let Some(symbol) = registers.as_deref_mut().and_then(|registers| {
+                    registers.place(binding.first_use, binding.last_use, binding.size)
+                }) {
+                    out.bindings.insert(
+                        binding.key,
+                        Location::Direct {
+                            symbol,
+                            offset: 0,
+                            size: binding.size,
+                        },
+                    );
+                    continue;
+                }
+            }
             let offset = out.stack_frame_bytes + 1;
             out.bindings.insert(
                 binding.key,
@@ -585,6 +659,111 @@ fn assign_scratch_bindings(
 
     assign_volatile_scratch_bindings(volatile_lifetimes, allocator, scratch, out);
     assign_private_scratch_bindings(private_lifetimes, allocator, out);
+}
+
+/// Byte ranges of the temp-register block, handed out by lifetime.
+struct TempRegisters {
+    symbol: &'static str,
+    bytes: u16,
+    /// (offset, size, first use, last use) of the values placed so far.
+    placed: Vec<(u16, u16, usize, usize)>,
+}
+
+impl TempRegisters {
+    fn new(symbol: &'static str, bytes: u16) -> Self {
+        Self {
+            symbol,
+            bytes,
+            placed: Vec::new(),
+        }
+    }
+
+    /// Places a value live from `first_use` to `last_use` (instruction
+    /// indexes); returns its symbol, or `None` when the block is full then.
+    fn place(&mut self, first_use: usize, last_use: usize, size: u16) -> Option<String> {
+        let mut offset = 0;
+        while offset + size <= self.bytes {
+            let clash = self.placed.iter().find(|(start, bytes, first, last)| {
+                offset < start + bytes
+                    && *start < offset + size
+                    && *first <= last_use
+                    && first_use <= *last
+            });
+            match clash {
+                Some((start, bytes, _, _)) => offset = start + bytes,
+                None => {
+                    self.placed.push((offset, size, first_use, last_use));
+                    return Some(if offset == 0 {
+                        self.symbol.to_owned()
+                    } else {
+                        format!("{}+{offset}", self.symbol)
+                    });
+                }
+            }
+        }
+        None
+    }
+}
+
+/// The span of instructions over which local `name` may be live, and
+/// whether a call happens inside it. A loop that touches the local anywhere
+/// keeps it live for the whole loop (a value can flow around the back
+/// edge). Returns `None` for an unused local.
+fn local_lifetime(routine: &Routine, name: &str) -> Option<(usize, usize, bool)> {
+    let uses: Vec<usize> = routine
+        .body
+        .iter()
+        .enumerate()
+        .filter(|(_, inst)| local_uses(inst).iter().any(|used| used == name))
+        .map(|(index, _)| index)
+        .collect();
+    let (mut first, mut last) = (*uses.first()?, *uses.last()?);
+    let labels: HashMap<&Label, usize> = routine
+        .body
+        .iter()
+        .enumerate()
+        .filter_map(|(index, inst)| match inst {
+            IrInst::Label(label) => Some((label, index)),
+            _ => None,
+        })
+        .collect();
+    let loops: Vec<(usize, usize)> = routine
+        .body
+        .iter()
+        .enumerate()
+        .filter_map(|(index, inst)| {
+            let target = branch_target(inst)?;
+            let head = *labels.get(target)?;
+            (head <= index).then_some((head, index))
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for &(head, tail) in &loops {
+            if head <= last && first <= tail && (head < first || last < tail) {
+                first = first.min(head);
+                last = last.max(tail);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let crosses_call = routine.body[first..=last].iter().any(is_call_barrier);
+    Some((first, last, crosses_call))
+}
+
+fn branch_target(inst: &IrInst) -> Option<&Label> {
+    match inst {
+        IrInst::Branch { target }
+        | IrInst::BranchIfZero { target, .. }
+        | IrInst::BranchIfEqual { target }
+        | IrInst::BranchIfNotEqual { target }
+        | IrInst::BranchIfCarrySet { target }
+        | IrInst::BranchIfCarryClear { target } => Some(target),
+        _ => None,
+    }
 }
 
 fn assign_volatile_scratch_bindings(
@@ -1078,9 +1257,10 @@ fn rewrite_address(
         },
         Address::NearPtr(value) => Address::NearPtr(rewrite_value(value, layout, direct_aliases)),
         Address::FarPtr(value) => Address::FarPtr(rewrite_value(value, layout, direct_aliases)),
-        Address::Indexed { base, index } => Address::Indexed {
+        Address::Indexed { base, index, small } => Address::Indexed {
             base: base.clone(),
             index: rewrite_value(index, layout, direct_aliases),
+            small: *small,
         },
         other => other.clone(),
     }
@@ -1769,6 +1949,7 @@ struct DirectAllocator {
     next_offset: u16,
     budget: Option<u16>,
     wide_scratch_direct: bool,
+    temp_registers: Option<(&'static str, u16)>,
 }
 
 impl DirectAllocator {
@@ -1777,6 +1958,7 @@ impl DirectAllocator {
             next_offset: 0,
             budget,
             wide_scratch_direct: true,
+            temp_registers: None,
         }
     }
 
@@ -1867,8 +2049,9 @@ mod tests {
     };
 
     use super::{
-        apply_storage, assign_storage, assign_storage_with_budget, validate_direct_page_budget,
-        validate_storage_assignment, BindingKey, Location, RoutineStorage, StorageAssignment,
+        apply_storage, assign_storage, assign_storage_with_budget, assign_storage_with_options,
+        validate_direct_page_budget, validate_storage_assignment, BindingKey, Location,
+        RoutineStorage, StorageAssignment, StorageOptions,
     };
 
     #[test]
@@ -2455,6 +2638,7 @@ mod tests {
                 static_locals: Vec::new(),
                 stack_slots: Vec::new(),
                 stack_frame_bytes: 0,
+                zeroed_registers: Vec::new(),
                 bindings: BTreeMap::new(),
             }],
             direct_page_bytes: 0,
@@ -2820,5 +3004,82 @@ mod tests {
         assert!(error
             .to_string()
             .contains("direct page usage: 4 / 3 bytes (1 over)"));
+    }
+
+    fn register_options() -> StorageOptions {
+        StorageOptions {
+            wide_scratch_direct: false,
+            temp_registers: Some(("__tmp_regs", 8)),
+        }
+    }
+
+    #[test]
+    fn reentrant_locals_live_across_a_loop_call_stay_in_the_frame() {
+        let module = crate::frontend::compile_source(
+            "
+            module Loops
+            procedure tick()
+                return
+            end
+            export reentrant function count(limit: u16): u16
+                var total: u16
+                var i: u16
+                total = 0
+                i = 0
+                while i != limit
+                    tick()
+                    i = i + 1
+                end
+                return total
+            end
+            ",
+        )
+        .unwrap();
+        let assignment = assign_storage_with_options(&module, None, register_options());
+        let layout = assignment.routine("count").unwrap();
+        // `i` is live around the loop, which calls `tick`.
+        assert!(matches!(
+            layout.location(BindingKey::Local("i".to_owned())),
+            Some(Location::Stack { .. })
+        ));
+    }
+
+    #[test]
+    fn reentrant_loop_locals_without_calls_use_temp_registers_and_start_at_zero() {
+        let module = crate::frontend::compile_source(
+            "
+            module Loops
+            procedure tick()
+                return
+            end
+            export reentrant function count(limit: u16): u16
+                var i: u16
+                i = 0
+                while i != limit
+                    i = i + 1
+                end
+                tick()
+                return limit
+            end
+            ",
+        )
+        .unwrap();
+        let assignment = assign_storage_with_options(&module, None, register_options());
+        let layout = assignment.routine("count").unwrap();
+        assert!(matches!(
+            layout.location(BindingKey::Local("i".to_owned())),
+            Some(Location::Direct { symbol, .. }) if symbol.starts_with("__tmp_regs")
+        ));
+        let applied = apply_storage(&module, &assignment);
+        let count = applied
+            .routines
+            .iter()
+            .find(|routine| routine.name == "count")
+            .unwrap();
+        assert!(matches!(
+            &count.body[0],
+            IrInst::LoadConst { dst: Value::Direct(symbol), value: Const::U16(0) }
+                if symbol.starts_with("__tmp_regs")
+        ));
     }
 }
