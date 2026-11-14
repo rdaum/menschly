@@ -7,6 +7,7 @@ pub mod ir;
 pub mod lower_45gs02;
 pub mod lower_65816;
 pub mod mega65;
+pub mod optimize_45gs02;
 pub mod optimize_65816;
 pub mod storage;
 pub mod target_45gs02;

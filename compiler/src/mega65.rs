@@ -43,6 +43,7 @@ pub const ROM_LOAD_ADDRESS: u32 = 0x20000;
 /// as the status.
 pub const CRT0: &str = r#".setcpu "45GS02"
 .exportzp __m65_acc, __m65_ptr, __m65_farp, __m65_fp
+.export __m65_enter, __m65_leave
 .import main
 .import __BSS_RUN__, __BSS_SIZE__
 
@@ -151,6 +152,67 @@ __m65_stage2:
 	sta $d6cf           ; request exit
 @hang:
 	bra @hang
+
+.segment "CODE"
+; Stack frames (see lower_45gs02). A routine with a frame starts with
+; `ldz #F / jsr __m65_enter` (A, X and Y are free there): this pushes the
+; caller's fp and F zeroed local bytes beneath the routine's return address,
+; points fp at the new frame and returns with Z = 0.
+__m65_enter:
+	pla                 ; our return address (the JSR's last byte)
+	sta __m65_ptr
+	pla
+	sta __m65_ptr+1
+	lda __m65_fp+1
+	pha
+	lda __m65_fp
+	pha
+	tza
+	tax
+	beq @framed
+	lda #$00
+@zero:
+	pha
+	dex
+	bne @zero
+@framed:
+	tsx
+	stx __m65_fp
+	tsy
+	sty __m65_fp+1
+	ldz #$00
+	inw __m65_ptr
+	jmp (__m65_ptr)
+
+; The matching epilogue: `ldz #F / jsr __m65_leave`, with the routine's result
+; in A/X/Y. Drops the locals and restores the caller's fp, returning with
+; A/X/Y intact and Z = 0; the routine then returns with RTS, RTN or RTI.
+__m65_leave:
+	sta __m65_acc
+	stx __m65_acc+1
+	sty __m65_acc+2
+	pla
+	sta __m65_ptr
+	pla
+	sta __m65_ptr+1
+	tza
+	tax
+	beq @dropped
+@drop:
+	pla
+	dex
+	bne @drop
+@dropped:
+	pla
+	sta __m65_fp
+	pla
+	sta __m65_fp+1
+	inw __m65_ptr
+	lda __m65_acc
+	ldx __m65_acc+1
+	ldy __m65_acc+2
+	ldz #$00
+	jmp (__m65_ptr)
 
 .segment "VECTOR_RESET"
 	.addr __m65_reset

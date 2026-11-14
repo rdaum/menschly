@@ -22,6 +22,10 @@
 //! fp+F+5 ..           stack arguments, first parameter lowest
 //! ```
 //!
+//! The frame is built and released by the runtime routines [`ENTER_ROUTINE`]
+//! and [`LEAVE_ROUTINE`] (Z = `F`). After lowering, each routine is cleaned up
+//! by [`crate::optimize_45gs02`].
+//!
 //! The storage pass numbers stack slots for the 65816's `offset,s` view,
 //! where parameters start at `F+3`; offsets above `F` are shifted by the two
 //! saved-fp bytes. Reentrant callees pop their own arguments with the
@@ -36,6 +40,7 @@ use std::fmt;
 use crate::ir::{
     Abi, Address, Const, IrInst, Label, Module, Routine, RoutineKind, Type, Value, Width,
 };
+use crate::optimize_45gs02::optimize_routine;
 use crate::storage::{
     apply_storage, assign_storage, assign_storage_with_budget, StorageAssignment,
 };
@@ -51,6 +56,13 @@ pub const FARP_SYMBOL: &str = "__m65_farp";
 pub const FP_SYMBOL: &str = "__m65_fp";
 
 pub const RUNTIME_DIRECT_SYMBOLS: [&str; 4] = [ACC_SYMBOL, PTR_SYMBOL, FARP_SYMBOL, FP_SYMBOL];
+
+/// Runtime routine that builds a stack frame (Z = local bytes).
+pub const ENTER_ROUTINE: &str = "__m65_enter";
+/// Runtime routine that releases a stack frame (Z = local bytes).
+pub const LEAVE_ROUTINE: &str = "__m65_leave";
+/// Runtime routines generated code may call.
+pub const RUNTIME_ROUTINES: [&str; 2] = [ENTER_ROUTINE, LEAVE_ROUTINE];
 
 /// Fixed address of the trap vector table: family `n`'s dispatcher address
 /// is the word at `TRAP_TABLE + 2n`. Part of the MEGA65 kernel ABI.
@@ -93,12 +105,28 @@ fn lower_with_assignment(
     for routine in &assigned.routines {
         out.routines.push(lower_routine(routine)?);
     }
+    for helper in RUNTIME_ROUTINES {
+        let called = out.routines.iter().any(|routine| {
+            routine.insts.iter().any(
+                |inst| matches!(inst, Inst::Op(Op::Jsr, Operand::Label(name)) if name == helper),
+            )
+        });
+        if called && !out.external_routines.iter().any(|name| name == helper) {
+            out.external_routines.push(helper.to_owned());
+        }
+    }
     out.add_storage_symbols(&assigned, &assignment);
     Ok((out, assignment))
 }
 
 fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
     let mut lowerer = RoutineLowerer::new(routine);
+    if lowerer.frame.is_some_and(|frame| frame > 0xff) {
+        return Err(lowerer.unsupported(format!(
+            "a {}-byte stack frame (at most 255)",
+            routine.stack_frame_bytes
+        )));
+    }
     lowerer.prologue();
     for inst in &routine.body {
         lowerer.lower_inst(inst)?;
@@ -116,7 +144,9 @@ fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
     }
     let mut out = AsmRoutine::new(routine.name.clone());
     out.export = routine.export;
-    out.insts = lowerer.out;
+    // Only interrupt handlers can start with Z non-zero.
+    let z_zero_on_entry = !matches!(routine.abi, Abi::Interrupt);
+    out.insts = optimize_routine(lowerer.out, z_zero_on_entry);
     Ok(out)
 }
 
@@ -216,18 +246,7 @@ impl<'a> RoutineLowerer<'a> {
             self.runtime_save_at = self.out.len();
         }
         if let Some(frame) = self.frame {
-            self.emit(Op::Lda, Operand::Base(offset(FP_SYMBOL, 1)));
-            self.implied(Op::Pha);
-            self.emit(Op::Lda, Operand::Base(FP_SYMBOL.to_owned()));
-            self.implied(Op::Pha);
-            // Z is zero, so each PHZ allocates one zeroed local byte.
-            for _ in 0..frame {
-                self.implied(Op::Phz);
-            }
-            self.implied(Op::Tsx);
-            self.emit(Op::Stx, Operand::Base(FP_SYMBOL.to_owned()));
-            self.implied(Op::Tsy);
-            self.emit(Op::Sty, Operand::Base(offset(FP_SYMBOL, 1)));
+            self.frame_helper(ENTER_ROUTINE, frame);
         }
     }
 
@@ -239,10 +258,12 @@ impl<'a> RoutineLowerer<'a> {
     /// disturb: those its own code names, or all of them if it calls out.
     /// Inserts the saves into the prologue; the shared epilogue restores them.
     fn save_runtime_registers(&mut self) {
-        let calls_out = self
-            .out
-            .iter()
-            .any(|inst| matches!(inst, Inst::Op(Op::Jsr, _)));
+        // The frame routines only touch the accumulator and pointer.
+        let calls_out = self.out.iter().any(|inst| {
+            matches!(inst, Inst::Op(Op::Jsr, operand)
+                if !RUNTIME_ROUTINES.iter().any(|helper| operand_mentions(operand, helper)))
+        });
+        let framed = self.frame.is_some();
         let used = |symbol: &str, out: &[Inst]| {
             out.iter().any(|inst| match inst {
                 Inst::Op(_, operand) => operand_mentions(operand, symbol),
@@ -252,7 +273,11 @@ impl<'a> RoutineLowerer<'a> {
         };
         self.saved_runtime = INTERRUPT_SAVED_RUNTIME
             .into_iter()
-            .filter(|(symbol, _)| calls_out || used(symbol, &self.out))
+            .filter(|(symbol, _)| {
+                calls_out
+                    || used(symbol, &self.out)
+                    || (framed && (*symbol == ACC_SYMBOL || *symbol == PTR_SYMBOL))
+            })
             .collect();
         let mut saves = Vec::new();
         for (symbol, bytes) in &self.saved_runtime {
@@ -278,17 +303,20 @@ impl<'a> RoutineLowerer<'a> {
         }
     }
 
+    /// Calls a runtime frame routine with Z = the frame's local bytes (Z is
+    /// already zero at both call sites). The frame setup is the same in every
+    /// routine, so sharing it saves ~20 bytes per framed routine.
+    fn frame_helper(&mut self, helper: &str, frame: u16) {
+        if frame != 0 {
+            self.emit(Op::Ldz, Operand::imm_byte(frame as u8));
+        }
+        self.emit(Op::Jsr, Operand::Label(helper.to_owned()));
+    }
+
     /// Releases the frame and returns. Preserves A, X and Y (the result).
     fn epilogue(&mut self) {
         if let Some(frame) = self.frame {
-            for _ in 0..frame {
-                self.implied(Op::Plz);
-            }
-            self.implied(Op::Plz);
-            self.emit(Op::Stz, Operand::Base(FP_SYMBOL.to_owned()));
-            self.implied(Op::Plz);
-            self.emit(Op::Stz, Operand::Base(offset(FP_SYMBOL, 1)));
-            self.emit(Op::Ldz, Operand::imm_byte(0));
+            self.frame_helper(LEAVE_ROUTINE, frame);
         }
         if self.is_interrupt() {
             for (symbol, bytes) in self.saved_runtime.clone().into_iter().rev() {
@@ -381,6 +409,11 @@ impl<'a> RoutineLowerer<'a> {
                 lhs,
                 rhs,
             } => {
+                // The IR never reads the carry of an Add, so `x = x + 1` can
+                // use the memory increment forms.
+                if is_step_in_place(dst, lhs, rhs) {
+                    return self.inc(*width, dst);
+                }
                 self.implied(Op::Clc);
                 self.byte_op(*width, Op::Adc, dst, lhs, rhs)?;
             }
@@ -390,6 +423,9 @@ impl<'a> RoutineLowerer<'a> {
                 lhs,
                 rhs,
             } => {
+                if is_step_in_place(dst, lhs, rhs) {
+                    return self.dec(*width, dst);
+                }
                 self.implied(Op::Sec);
                 self.byte_op(*width, Op::Sbc, dst, lhs, rhs)?;
             }
@@ -950,6 +986,25 @@ fn operand_mentions(operand: &Operand, symbol: &str) -> bool {
         | Operand::Label(text)
         | Operand::Indirect(text) => text == symbol || text.starts_with(&format!("{symbol}+")),
     }
+}
+
+/// `dst = dst ± 1` on a memory value (not an index register).
+fn is_step_in_place(dst: &Value, lhs: &Value, rhs: &Value) -> bool {
+    let one = matches!(
+        rhs,
+        Value::Const(Const::U8(1)) | Value::Const(Const::U16(1)) | Value::Const(Const::U24(1))
+    );
+    one && dst == lhs
+        && matches!(
+            dst,
+            Value::Accumulator
+                | Value::Direct(_)
+                | Value::Temp(_)
+                | Value::Local(_)
+                | Value::Param(_)
+                | Value::Global(_)
+                | Value::Stack { .. }
+        )
 }
 
 fn offset(name: &str, i: u16) -> String {

@@ -575,8 +575,9 @@ fn large_kernel_runs_from_ram_above_the_rom_window() {
     );
     for n in 0..50 {
         source.push_str(&format!("\nprocedure r{n}()\n"));
+        // `+ 3` keeps the full add (an increment would be much smaller).
         for _ in 0..48 {
-            source.push_str("    out = out + 1\n");
+            source.push_str("    out = out + 3\n");
         }
         source.push_str("    return\nend\n");
     }
@@ -590,7 +591,7 @@ fn large_kernel_runs_from_ram_above_the_rom_window() {
     };
     let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
     assert_eq!(run.exit_code, 0xa5);
-    assert_eq!(&run.memory[0x0890..0x0892], &[96, 0]);
+    assert_eq!(&run.memory[0x0890..0x0892], &[0x20, 0x01]);
 }
 
 #[test]

@@ -50,6 +50,11 @@ pub enum Op {
     Tsx,
     Tsy,
     Inx,
+    Dex,
+    Iny,
+    Dey,
+    Inz,
+    Dez,
     Clc,
     Sec,
     Adc,
@@ -78,6 +83,9 @@ pub enum Op {
     Plz,
     Bne,
     Beq,
+    Bcc,
+    Bcs,
+    Bra,
     Lbra,
     Lbeq,
     Lbne,
@@ -108,6 +116,11 @@ impl Op {
             Self::Tsx => "tsx",
             Self::Tsy => "tsy",
             Self::Inx => "inx",
+            Self::Dex => "dex",
+            Self::Iny => "iny",
+            Self::Dey => "dey",
+            Self::Inz => "inz",
+            Self::Dez => "dez",
             Self::Clc => "clc",
             Self::Sec => "sec",
             Self::Adc => "adc",
@@ -134,6 +147,9 @@ impl Op {
             Self::Plz => "plz",
             Self::Bne => "bne",
             Self::Beq => "beq",
+            Self::Bcc => "bcc",
+            Self::Bcs => "bcs",
+            Self::Bra => "bra",
             Self::Lbra => "lbra",
             Self::Lbeq => "lbeq",
             Self::Lbne => "lbne",
@@ -144,6 +160,54 @@ impl Op {
             Self::Rtn => "rtn",
             Self::Rti => "rti",
         }
+    }
+
+    /// Branches with a relative target: (short form, long form, inverse condition).
+    pub fn branch_forms(self) -> Option<(Op, Op, Option<Op>)> {
+        Some(match self {
+            Self::Bne | Self::Lbne => (Self::Bne, Self::Lbne, Some(Self::Lbeq)),
+            Self::Beq | Self::Lbeq => (Self::Beq, Self::Lbeq, Some(Self::Lbne)),
+            Self::Bcc | Self::Lbcc => (Self::Bcc, Self::Lbcc, Some(Self::Lbcs)),
+            Self::Bcs | Self::Lbcs => (Self::Bcs, Self::Lbcs, Some(Self::Lbcc)),
+            Self::Bra | Self::Lbra => (Self::Bra, Self::Lbra, None),
+            _ => return None,
+        })
+    }
+
+    pub fn is_unconditional_branch(self) -> bool {
+        matches!(self, Self::Bra | Self::Lbra)
+    }
+
+    /// Instructions after which execution never falls through.
+    pub fn ends_flow(self) -> bool {
+        matches!(
+            self,
+            Self::Bra | Self::Lbra | Self::Rts | Self::Rtn | Self::Rti
+        )
+    }
+}
+
+impl Inst {
+    /// Encoded size in bytes, or `None` for raw assembly text.
+    pub fn size(&self) -> Option<u16> {
+        let Inst::Op(op, operand) = self else {
+            return match self {
+                Inst::Label(_) => Some(0),
+                _ => None,
+            };
+        };
+        Some(match operand {
+            Operand::Implied => 1,
+            Operand::Immediate(_) | Operand::Base(_) => 2,
+            Operand::IndirectZ(_) | Operand::IndirectY(_) => 2,
+            Operand::Absolute(_) | Operand::AbsoluteX(_) | Operand::Indirect(_) => 3,
+            // `[bp],z` is `(bp),z` behind a NOP prefix.
+            Operand::FlatZ(_) => 3,
+            Operand::Label(_) => match op {
+                Op::Bne | Op::Beq | Op::Bcc | Op::Bcs | Op::Bra => 2,
+                _ => 3,
+            },
+        })
     }
 }
 

@@ -484,12 +484,23 @@ assignment with the 65816 backend but lowers everything byte by byte:
   fp+F+5 ..           stack arguments, first parameter lowest
   ```
 
-  Reentrant callees pop their own arguments with `rtn #n`.
+  Reentrant callees pop their own arguments with `rtn #n`. Frames are built
+  and released by two runtime routines in the kernel's `CRT0`, called with
+  `Z` = the local byte count `F` (omitted when it is zero):
+  `ldz #F / jsr __m65_enter` first thing in the routine, and
+  `ldz #F / jsr __m65_leave` just before its `rts`/`rtn`/`rti`. Both use
+  `__m65_acc` and `__m65_ptr` as scratch, and `__m65_leave` keeps the
+  A/X/Y result intact.
+- Generated code is cleaned up by `optimize_45gs02` (dead-code elimination,
+  redundant load/store removal, branch shortening). It treats only
+  compiler-owned storage as plain RAM: accesses to user globals, including
+  `fixed` hardware registers, are kept exactly as written. Callees never take
+  inputs in the base-page scratch registers.
 - Array indexing forms the full 16-bit address `base + index` in
   `__m65_ptr`, so indexes are not limited to the 8-bit X register.
 - Interrupt routines save A/X/Y/Z, re-establish Z = 0, and save the
   base-page runtime registers they can disturb (all of them if the handler
-  calls other routines). On both targets the storage pass gives interrupt
+  calls other routines; the accumulator and pointer if it has a frame). On both targets the storage pass gives interrupt
   routines private direct-page argument and scratch slots, so a handler never
   shares a slot with the code it interrupted. Routines called from a handler
   should be `reentrant`.
