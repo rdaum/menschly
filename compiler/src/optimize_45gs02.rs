@@ -86,6 +86,7 @@ pub fn optimize_routine_with(
         let mut changed = clean_jumps(&mut insts);
         changed |= eliminate_dead_code(&mut insts);
         changed |= eliminate_redundant(&mut insts, z_zero_on_entry, flag_routines);
+        changed |= carry_increments(&mut insts);
         if !changed && insts.len() == before {
             break;
         }
@@ -256,11 +257,15 @@ fn effect(inst: &Inst) -> Effect {
                 Operand::Indirect(vector) => runtime_bytes(vector, 2),
                 _ => 0,
             };
-            (
-                A | X | Y | Z | FP | arguments,
-                A | X | Y | NZ | C | ACC | PTR | FARP | ARG | TMP,
-                false,
-            )
+            // The math routines only touch their own operands and the flat
+            // pointer, so temp registers survive them.
+            let clobbers = match operand {
+                Operand::Label(name) if MATH_ROUTINES.contains(&name.as_str()) => {
+                    A | X | Y | NZ | C | ACC | FARP | ARG
+                }
+                _ => A | X | Y | NZ | C | ACC | PTR | FARP | ARG | TMP,
+            };
+            (A | X | Y | Z | FP | arguments, clobbers, false)
         }
         // Results are in A/X/Y, and a 32-bit result's top byte in ACC+3;
         // N/Z describe A for 1- and 2-byte results.
@@ -394,6 +399,21 @@ impl Known {
         self.regs[reg] = vec![format!("v:{}", self.next_value)];
     }
 
+    /// The register holding the value at `key`, other than `except`.
+    fn holder(&self, key: &str, except: usize) -> Option<usize> {
+        (0..4).find(|&reg| reg != except && self.holds(reg, key))
+    }
+
+    /// The immediate a key is known to equal (a register holds both).
+    fn constant(&self, key: &str) -> Option<String> {
+        self.regs.iter().find_map(|keys| {
+            keys.iter().any(|held| held == key).then(|| {
+                keys.iter()
+                    .find_map(|held| held.strip_prefix('#').map(str::to_owned))
+            })?
+        })
+    }
+
     /// Whether two registers are known to hold the same value.
     fn same(&self, a: usize, b: usize) -> bool {
         self.regs[a].iter().any(|key| self.holds(b, key))
@@ -490,11 +510,20 @@ fn eliminate_redundant(
     };
     let mut delete = vec![false; insts.len()];
     let mut rewrite = Vec::new();
+    // Z is zero at every branch target (the codegen invariant), once an
+    // interrupt handler's prologue has established it.
+    let mut z_established = z_zero_on_entry;
     for (i, inst) in insts.iter().enumerate() {
         let (op, operand) = match inst {
             Inst::Label(label) => {
                 if referenced.contains(label) {
-                    known = Known::default();
+                    let next_value = known.next_value;
+                    known = if z_established {
+                        Known::entry()
+                    } else {
+                        Known::default()
+                    };
+                    known.next_value = next_value;
                 }
                 continue;
             }
@@ -503,6 +532,9 @@ fn eliminate_redundant(
         };
         let flags_dead = live[i] & NZ == 0;
         let carry_dead = live[i] & C == 0;
+        if op == Op::Ldz && operand.is_zero_immediate() {
+            z_established = true;
+        }
         match op {
             Op::Lda | Op::Ldx | Op::Ldy | Op::Ldz => {
                 let reg = reg_index(op).expect("load register");
@@ -513,6 +545,36 @@ fn eliminate_redundant(
                     // The register and the flags are exactly as before.
                     delete[i] = true;
                     continue;
+                }
+                // Another register holds the value: transfer it (1 byte, the
+                // same N/Z).
+                if let Some(key) = key.as_ref().filter(|key| !key.starts_with('#')) {
+                    let transfer = match (reg, known.holder(key, reg)) {
+                        (REG_X, Some(REG_A)) => Some(Op::Tax),
+                        (REG_Y, Some(REG_A)) => Some(Op::Tay),
+                        (REG_A, Some(REG_X)) => Some(Op::Txa),
+                        (REG_A, Some(REG_Y)) => Some(Op::Tya),
+                        _ => None,
+                    };
+                    if let Some(transfer) = transfer {
+                        let from = if matches!(transfer, Op::Tax | Op::Tay) {
+                            REG_A
+                        } else {
+                            known.holder(key, reg).expect("holder")
+                        };
+                        rewrite.push((i, Inst::implied(transfer)));
+                        known.regs[reg] = known.regs[from].clone();
+                        known.nz_from_a = true;
+                        continue;
+                    }
+                    // Memory known to hold a constant reads as the constant.
+                    if let Some(constant) = known.constant(key) {
+                        rewrite.push((i, Inst::op(op, Operand::Immediate(constant.clone()))));
+                        known.set(reg, Some(format!("#{constant}")));
+                        known.regs[reg].push(key.clone());
+                        known.nz_from_a = op == Op::Lda;
+                        continue;
+                    }
                 }
                 // A known neighbouring immediate is one step away; INY & co.
                 // set N/Z exactly as the load would.
@@ -577,6 +639,15 @@ fn eliminate_redundant(
                 delete[i] = true;
             }
             Op::Adc | Op::Sbc | Op::And | Op::Ora | Op::Eor | Op::Pla => {
+                if op != Op::Pla {
+                    if let Some(constant) = known
+                        .key(operand)
+                        .filter(|key| !key.starts_with('#'))
+                        .and_then(|key| known.constant(&key))
+                    {
+                        rewrite.push((i, Inst::op(op, Operand::Immediate(constant))));
+                    }
+                }
                 known.forget(REG_A);
                 known.nz_from_a = true;
             }
@@ -636,6 +707,102 @@ fn eliminate_redundant(
         !delete[i - 1]
     });
     rewritten || delete.contains(&true)
+}
+
+static NEXT_CARRY_LABEL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `lda m / adc #0 / sta m` (the top of a multi-byte add) is `bcc + / inc m`,
+/// and `lda m / sbc #0 / sta m` is `bcs + / dec m`, when A and the flags are
+/// not needed afterwards. Only for compiler-owned memory: an I/O register
+/// would see a different access pattern.
+fn carry_increments(insts: &mut Vec<Inst>) -> bool {
+    let live = live_after(insts);
+    let mut i = 0;
+    let mut changed = false;
+    while i + 2 < insts.len() {
+        let replacement = match (&insts[i], &insts[i + 1], &insts[i + 2]) {
+            (
+                Inst::Op(Op::Lda, load),
+                Inst::Op(op @ (Op::Adc | Op::Sbc), Operand::Immediate(zero)),
+                Inst::Op(Op::Sta, store),
+            ) if zero == "$00"
+                && load == store
+                && matches!(load, Operand::Base(symbol) | Operand::Absolute(symbol) if is_compiler_symbol(symbol))
+                && live[i + 2] & (A | NZ | C) == 0 =>
+            {
+                let (skip, step) = if *op == Op::Adc {
+                    (Op::Bcc, Op::Inc)
+                } else {
+                    (Op::Bcs, Op::Dec)
+                };
+                let label = format!(
+                    "@m65_carry_{}",
+                    NEXT_CARRY_LABEL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                );
+                Some([
+                    Inst::op(skip, Operand::Label(label.clone())),
+                    Inst::op(step, load.clone()),
+                    Inst::Label(label),
+                ])
+            }
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            insts.splice(i..i + 3, replacement);
+            changed = true;
+            i += 1;
+            continue;
+        }
+        // `sta t / clc / lda m / adc t` (t dead after) is `clc / adc m`: A
+        // already holds t, and adding commutes. Likewise and/ora/eor.
+        if i + 3 < insts.len() {
+            let commuted = match (&insts[i], &insts[i + 1], &insts[i + 2], &insts[i + 3]) {
+                (
+                    Inst::Op(Op::Sta, Operand::Base(t)),
+                    clc @ Inst::Op(Op::Clc, _),
+                    Inst::Op(Op::Lda, m),
+                    Inst::Op(Op::Adc, Operand::Base(t2)),
+                ) if t == t2
+                    && runtime_byte(t).is_some_and(|bit| live[i + 3] & bit == 0)
+                    && !matches!(m, Operand::Base(other) if other == t) =>
+                {
+                    Some(vec![clc.clone(), Inst::op(Op::Adc, m.clone())])
+                }
+                _ => None,
+            };
+            if let Some(commuted) = commuted {
+                insts.splice(i..i + 4, commuted);
+                changed = true;
+                i += 1;
+                continue;
+            }
+        }
+        if i + 2 < insts.len() {
+            let commuted = match (&insts[i], &insts[i + 1], &insts[i + 2]) {
+                (
+                    Inst::Op(Op::Sta, Operand::Base(t)),
+                    Inst::Op(Op::Lda, m),
+                    Inst::Op(op @ (Op::And | Op::Ora | Op::Eor), Operand::Base(t2)),
+                ) if t == t2
+                    && runtime_byte(t).is_some_and(|bit| live[i + 2] & bit == 0)
+                    && !matches!(m, Operand::Base(other) if other == t)
+                    && !matches!(
+                        m,
+                        Operand::IndirectZ(_) | Operand::FlatZ(_) | Operand::IndirectY(_)
+                    ) =>
+                {
+                    Some(vec![Inst::op(*op, m.clone())])
+                }
+                _ => None,
+            };
+            if let Some(commuted) = commuted {
+                insts.splice(i..i + 3, commuted);
+                changed = true;
+            }
+        }
+        i += 1;
+    }
+    changed
 }
 
 /// (increment, decrement) for an index-register load.

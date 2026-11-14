@@ -294,7 +294,7 @@ procedure sd_select_block()
     return
 end
 
-export reentrant function blockdev_status(): u16
+export stack function blockdev_status(): u16
     sd_ensure_ready()
     if sd_state == SD_READY
         return BLOCK_STATUS_READY
@@ -302,7 +302,7 @@ export reentrant function blockdev_status(): u16
     return BLOCK_STATUS_ABSENT
 end
 
-export reentrant function blockdev_sector_count(): u16
+export stack function blockdev_sector_count(): u16
     sd_ensure_ready()
     if sd_state == SD_READY
         return partition_sectors
@@ -310,18 +310,18 @@ export reentrant function blockdev_sector_count(): u16
     return 0
 end
 
-export reentrant procedure blockdev_set_lba(lba: u16)
+export stack procedure blockdev_set_lba(lba: u16)
     block_lba = lba
     block_lba_high = 0
     return
 end
 
-export reentrant procedure blockdev_set_lba_high(high: u16)
+export stack procedure blockdev_set_lba_high(high: u16)
     block_lba_high = high
     return
 end
 
-export reentrant function blockdev_read(buffer: near ^u8): u16
+export stack function blockdev_read(buffer: near ^u8): u16
     var index: u16
     sd_ensure_ready()
     if sd_state != SD_READY
@@ -339,7 +339,7 @@ export reentrant function blockdev_read(buffer: near ^u8): u16
     return 0
 end
 
-export reentrant function blockdev_write(buffer: near ^u8): u16
+export stack function blockdev_write(buffer: near ^u8): u16
     var index: u16
     sd_ensure_ready()
     if sd_state != SD_READY
@@ -376,20 +376,20 @@ const PROGRAM_LINEAR = $40000
 const PROGRAM_TOP = $c000
 
 # The flat address of `address` as seen from `bank`.
-export reentrant function machine_far_address(bank: u16, address: u16): u32
+export stack function machine_far_address(bank: u16, address: u16): u32
     if not bank or address >= PROGRAM_TOP
         return u32(address)
     end
     return PROGRAM_LINEAR + u32(address)
 end
 
-export reentrant function machine_peek(bank: u16, address: u16): u8
+export stack function machine_peek(bank: u16, address: u16): u8
     var p: far ^u8
     p = machine_far_address(bank, address)
     return p^
 end
 
-export reentrant procedure machine_poke(bank: u16, address: u16, value: u8)
+export stack procedure machine_poke(bank: u16, address: u16, value: u8)
     var p: far ^u8
     p = machine_far_address(bank, address)
     p^ = value
@@ -397,7 +397,7 @@ export reentrant procedure machine_poke(bank: u16, address: u16, value: u8)
 end
 
 # Copies `count` bytes from `src` in `bank` to kernel memory at `dst`.
-export reentrant procedure machine_copy_in(bank: u16, dst: near ^u8, src: u16, count: u16)
+export stack procedure machine_copy_in(bank: u16, dst: near ^u8, src: u16, count: u16)
     var from: far ^u8
     from = machine_far_address(bank, src)
     while count
@@ -410,7 +410,7 @@ export reentrant procedure machine_copy_in(bank: u16, dst: near ^u8, src: u16, c
 end
 
 # Copies `count` bytes from kernel memory at `src` to `dst` in `bank`.
-export reentrant procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, count: u16)
+export stack procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, count: u16)
     var to: far ^u8
     to = machine_far_address(bank, dst)
     while count
@@ -423,7 +423,7 @@ export reentrant procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, 
 end
 
 # Sets `count` bytes at `dst` in `bank` to `value`.
-export reentrant procedure machine_fill(bank: u16, dst: u16, value: u8, count: u16)
+export stack procedure machine_fill(bank: u16, dst: u16, value: u8, count: u16)
     var to: far ^u8
     to = machine_far_address(bank, dst)
     while count

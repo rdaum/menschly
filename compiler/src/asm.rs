@@ -138,7 +138,14 @@ impl<I> AsmModule<I> {
         let routine_exports = assigned
             .routines
             .iter()
-            .map(|routine| (routine.name.as_str(), routine.export))
+            // Callers store the parameters of exported routines, except
+            // `stack` routines, which copy their own in from the stack.
+            .map(|routine| {
+                (
+                    routine.name.as_str(),
+                    routine.export && !routine.abi.stack_arguments(),
+                )
+            })
             .collect::<BTreeMap<_, _>>();
         let mut direct = BTreeMap::<String, (u16, bool)>::new();
         for routine in &assignment.routines {

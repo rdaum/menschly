@@ -32,16 +32,26 @@ object can pass arguments. For external declarations, the caller emits matching
 `.importzp` declarations.
 
 This direct-page parameter convention is simple and efficient, but it is not
-reentrant. A future stack-based convention is still needed for reentrant
-procedures and for code that can be interrupted by another caller of the same
-routine.
+reentrant, and callers must know the callee's parameter symbols.
 
-`reentrant` routines pass parameters on the stack instead of through
-direct-page symbols. The caller pushes argument values in reverse parameter
-order before `jsr`, the callee reads them with stack-relative addressing, and
-the caller removes the argument bytes after the routine returns.
+`stack` and `reentrant` routines take their arguments on the stack instead.
+The caller pushes argument values in reverse parameter order before `jsr`;
+the callee reads them in place (stack-relative on the 65816, through the frame
+pointer on the MEGA65), and the arguments are removed after the routine
+returns. Callers cannot tell the two kinds apart, so routine pointers and trap
+vectors accept either. They differ in their locals:
 
-Reentrant routines also allocate stack storage for default/`stack` locals. On
+- `stack` routines keep locals and spilled values in static (or direct-page)
+  storage, like plain routines. They must not recurse or be re-entered by an
+  interrupt.
+- `reentrant` routines keep them in a stack frame, so they can recurse and be
+  called from interrupt handlers (the only parameterized routines an
+  interrupt handler may call).
+
+Locals start undefined, except in `reentrant` routines, where the frame is
+zeroed.
+
+Reentrant routines allocate stack storage for default/`stack` locals. On
 entry, the callee subtracts the local frame size from `S`; before every return,
 it adds the same byte count back. Locals are addressed from the adjusted stack
 pointer starting at `$01,s`. Parameters remain above the return address and are
@@ -64,7 +74,7 @@ called through one, because the caller cannot know a particular routine's
 parameter storage:
 
 - routines without parameters (any ABI except `far` and `interrupt`), and
-- `reentrant` routines, whose arguments go on the stack.
+- `stack` and `reentrant` routines, whose arguments go on the stack.
 
 An indirect call pushes the arguments exactly as a direct call would and then
 calls the address. On the 65816 the address goes in `A` and the caller
@@ -503,11 +513,17 @@ assignment with the 65816 backend but lowers everything byte by byte:
   Scratch pointers `__m65_ptr` and `__m65_farp` (a 32-bit flat address), the
   frame pointer `__m65_fp`, the math operand `__m65_arg` (4 bytes) and the
   temp block `__m65_tmp` (8 bytes) are also runtime base-page registers.
-- Reentrant routines keep expression temporaries that do not live across a
-  call, and scalar locals that do not (a loop that uses a local keeps it
-  live for the whole loop), in `__m65_tmp` instead of their stack frame.
-  Such locals are zeroed on entry, like frame locals; interrupt handlers
-  that call out save `__m65_tmp` with the other runtime registers.
+- Routines (other than interrupt handlers) keep expression temporaries that
+  do not live across a call, and scalar locals that do not (a loop that uses
+  a local keeps it live for the whole loop), in `__m65_tmp` instead of their
+  stack frame or static storage. A `reentrant` routine's such locals are
+  zeroed on entry, like frame locals. The math routines leave `__m65_tmp`
+  alone; interrupt handlers that call out save it with the other runtime
+  registers.
+- `stack` routines with parameters have a frame for the frame pointer (and
+  any spilled values), but no frame locals.
+- Indexing an array of at most 256 bytes computes a one-byte offset (from
+  the index's low byte) in 8-bit arithmetic and uses `base,x`.
 - Function results come back in `A` (byte 0), `X` (byte 1), `Y` (byte 2) and
   `__m65_acc+3` (byte 3), which the frame release leaves alone. Functions
   with 1- or 2-byte results return with N/Z describing `A`, so a caller in

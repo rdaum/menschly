@@ -3,12 +3,12 @@ module HellordBios
 external procedure serial_write(value: u16)
 external function serial_has_data(): u8
 external function serial_read(): u8
-external reentrant function blockdev_status(): u16
-external reentrant function blockdev_sector_count(): u16
-external reentrant procedure blockdev_set_lba(lba: u16)
-external reentrant procedure blockdev_set_lba_high(high: u16)
-external reentrant function blockdev_read(buffer: near ^u8): u16
-external reentrant function blockdev_write(buffer: near ^u8): u16
+external stack function blockdev_status(): u16
+external stack function blockdev_sector_count(): u16
+external stack procedure blockdev_set_lba(lba: u16)
+external stack procedure blockdev_set_lba_high(high: u16)
+external stack function blockdev_read(buffer: near ^u8): u16
+external stack function blockdev_write(buffer: near ^u8): u16
 
 const BIOS_BCONSTAT = $0001
 const BIOS_BCONIN = $0002
@@ -56,11 +56,11 @@ var bios_call: u16
 var bios_device: u16
 var bios_arg: u16
 
-export reentrant function bios_bconstat(dev: u16): u16
+export stack function bios_bconstat(dev: u16): u16
     return trap(BIOS_FAMILY, BIOS_BCONSTAT, dev, 0)
 end
 
-export reentrant function bios_bconin(dev: u16): u8
+export stack function bios_bconin(dev: u16): u8
     return u8(trap(BIOS_FAMILY, BIOS_BCONIN, dev, 0))
 end
 
@@ -70,65 +70,65 @@ export procedure bios_bconout(dev: u16, ch: u16)
     return
 end
 
-export reentrant function bios_bcostat(dev: u16): u16
+export stack function bios_bcostat(dev: u16): u16
     return trap(BIOS_FAMILY, BIOS_BCOSTAT, dev, 0)
 end
 
-export reentrant function bios_device_first(): u16
+export stack function bios_device_first(): u16
     return trap(BIOS_FAMILY, BIOS_DEV_FIRST, 0, 0)
 end
 
-export reentrant function bios_device_next(dev: u16): u16
+export stack function bios_device_next(dev: u16): u16
     return trap(BIOS_FAMILY, BIOS_DEV_NEXT, dev, 0)
 end
 
-export reentrant function bios_device_parent(dev: u16): u16
+export stack function bios_device_parent(dev: u16): u16
     return trap(BIOS_FAMILY, BIOS_DEV_PARENT, dev, 0)
 end
 
-export reentrant function bios_device_child(dev: u16): u16
+export stack function bios_device_child(dev: u16): u16
     return trap(BIOS_FAMILY, BIOS_DEV_CHILD, dev, 0)
 end
 
-export reentrant function bios_device_kind(dev: u16): u16
+export stack function bios_device_kind(dev: u16): u16
     return trap(BIOS_FAMILY, BIOS_DEV_KIND, dev, 0)
 end
 
-export reentrant function bios_device_flags(dev: u16): u16
+export stack function bios_device_flags(dev: u16): u16
     return trap(BIOS_FAMILY, BIOS_DEV_FLAGS, dev, 0)
 end
 
-export reentrant function bios_device_driver(dev: u16): u16
+export stack function bios_device_driver(dev: u16): u16
     return trap(BIOS_FAMILY, BIOS_DEV_DRIVER, dev, 0)
 end
 
-export reentrant function bios_block_status(dev: u16): u16
+export stack function bios_block_status(dev: u16): u16
     return trap(BIOS_FAMILY, BIOS_BBLKSTAT, dev, 0)
 end
 
-export reentrant function bios_block_sector_count(dev: u16): u16
+export stack function bios_block_sector_count(dev: u16): u16
     return trap(BIOS_FAMILY, BIOS_BBLKCOUNT, dev, 0)
 end
 
 # Selects block `lba` (and clears the high word set by bios_block_set_lba_high).
-export reentrant procedure bios_block_set_lba(dev: u16, lba: u16)
+export stack procedure bios_block_set_lba(dev: u16, lba: u16)
     var status: u16
     status = trap(BIOS_FAMILY, BIOS_BSETLBA, dev, lba)
     return
 end
 
 # Sets bits 16-31 of the selected block; call after bios_block_set_lba.
-export reentrant procedure bios_block_set_lba_high(dev: u16, high: u16)
+export stack procedure bios_block_set_lba_high(dev: u16, high: u16)
     var status: u16
     status = trap(BIOS_FAMILY, BIOS_BSETLBAHI, dev, high)
     return
 end
 
-export reentrant function bios_block_read(dev: u16, buffer: near ^u8): u16
+export stack function bios_block_read(dev: u16, buffer: near ^u8): u16
     return trap(BIOS_FAMILY, BIOS_BREAD, dev, u16(buffer))
 end
 
-export reentrant function bios_block_write(dev: u16, buffer: near ^u8): u16
+export stack function bios_block_write(dev: u16, buffer: near ^u8): u16
     return trap(BIOS_FAMILY, BIOS_BWRITE, dev, u16(buffer))
 end
 
@@ -152,7 +152,7 @@ export procedure bios_init_registry()
     return
 end
 
-reentrant procedure bios_ensure_registry()
+stack procedure bios_ensure_registry()
     if registry_initialized
         return
     end
@@ -160,7 +160,7 @@ reentrant procedure bios_ensure_registry()
     return
 end
 
-reentrant function bios_find_device(): u16
+stack function bios_find_device(): u16
     bios_ensure_registry()
     if bios_first_device == bios_device
         if serial_device.id == bios_device
@@ -174,7 +174,7 @@ reentrant function bios_find_device(): u16
     return 0
 end
 
-reentrant function bios_dispatch_bconstat(): u16
+stack function bios_dispatch_bconstat(): u16
     var driver: u16
     if not bios_find_device()
         return 0
@@ -195,7 +195,7 @@ reentrant function bios_dispatch_bconstat(): u16
     return 0
 end
 
-reentrant function bios_dispatch_bconin(): u16
+stack function bios_dispatch_bconin(): u16
     var driver: u16
     if not bios_find_device()
         return 0
@@ -216,7 +216,7 @@ reentrant function bios_dispatch_bconin(): u16
     return 0
 end
 
-reentrant function bios_dispatch_bconout(): u16
+stack function bios_dispatch_bconout(): u16
     var driver: u16
     if not bios_find_device()
         return $ffff
@@ -235,7 +235,7 @@ reentrant function bios_dispatch_bconout(): u16
     return 0
 end
 
-reentrant function bios_dispatch_bcostat(): u16
+stack function bios_dispatch_bcostat(): u16
     var driver: u16
     if not bios_find_device()
         return 0
@@ -253,7 +253,7 @@ reentrant function bios_dispatch_bcostat(): u16
     return 0
 end
 
-reentrant function bios_dispatch_device_next(): u16
+stack function bios_dispatch_device_next(): u16
     if not bios_find_device()
         return 0
     end
@@ -263,7 +263,7 @@ reentrant function bios_dispatch_device_next(): u16
     return block_device.next_sibling
 end
 
-reentrant function bios_dispatch_device_parent(): u16
+stack function bios_dispatch_device_parent(): u16
     if not bios_find_device()
         return 0
     end
@@ -273,7 +273,7 @@ reentrant function bios_dispatch_device_parent(): u16
     return block_device.parent
 end
 
-reentrant function bios_dispatch_device_child(): u16
+stack function bios_dispatch_device_child(): u16
     if not bios_find_device()
         return 0
     end
@@ -283,7 +283,7 @@ reentrant function bios_dispatch_device_child(): u16
     return block_device.first_child
 end
 
-reentrant function bios_dispatch_device_kind(): u16
+stack function bios_dispatch_device_kind(): u16
     if not bios_find_device()
         return 0
     end
@@ -293,7 +293,7 @@ reentrant function bios_dispatch_device_kind(): u16
     return block_device.kind
 end
 
-reentrant function bios_dispatch_device_flags(): u16
+stack function bios_dispatch_device_flags(): u16
     if not bios_find_device()
         return 0
     end
@@ -303,7 +303,7 @@ reentrant function bios_dispatch_device_flags(): u16
     return block_device.flags
 end
 
-reentrant function bios_dispatch_device_driver(): u16
+stack function bios_dispatch_device_driver(): u16
     if not bios_find_device()
         return 0
     end
@@ -313,7 +313,7 @@ reentrant function bios_dispatch_device_driver(): u16
     return block_device.driver
 end
 
-reentrant function bios_dispatch_block_status(): u16
+stack function bios_dispatch_block_status(): u16
     if not bios_find_device()
         return 0
     end
@@ -323,7 +323,7 @@ reentrant function bios_dispatch_block_status(): u16
     return 0
 end
 
-reentrant function bios_dispatch_block_sector_count(): u16
+stack function bios_dispatch_block_sector_count(): u16
     if not bios_find_device()
         return 0
     end
@@ -333,7 +333,7 @@ reentrant function bios_dispatch_block_sector_count(): u16
     return 0
 end
 
-reentrant function bios_dispatch_block_set_lba_high(): u16
+stack function bios_dispatch_block_set_lba_high(): u16
     if not bios_find_device()
         return $ffff
     end
@@ -344,7 +344,7 @@ reentrant function bios_dispatch_block_set_lba_high(): u16
     return 0
 end
 
-reentrant function bios_dispatch_block_set_lba(): u16
+stack function bios_dispatch_block_set_lba(): u16
     if not bios_find_device()
         return $ffff
     end
@@ -355,7 +355,7 @@ reentrant function bios_dispatch_block_set_lba(): u16
     return 0
 end
 
-reentrant function bios_dispatch_block_read(): u16
+stack function bios_dispatch_block_read(): u16
     if not bios_find_device()
         return $ffff
     end
@@ -365,7 +365,7 @@ reentrant function bios_dispatch_block_read(): u16
     return $ffff
 end
 
-reentrant function bios_dispatch_block_write(): u16
+stack function bios_dispatch_block_write(): u16
     if not bios_find_device()
         return $ffff
     end

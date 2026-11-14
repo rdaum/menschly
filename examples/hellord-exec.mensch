@@ -14,18 +14,18 @@ module HellordExec
 # Supported: "small" o65 files (16-bit sizes) with byte-wise relocation, as
 # ld65 writes them (see mega65.rs `build_program`).
 
-external reentrant function dos_fopen(path: near ^u8): u16
-external reentrant function dos_fread(handle: u16, count: u16, buffer: near ^u8): u16
-external reentrant function dos_fclose(handle: u16): u16
+external stack function dos_fopen(path: near ^u8): u16
+external stack function dos_fread(handle: u16, count: u16, buffer: near ^u8): u16
+external stack function dos_fclose(handle: u16): u16
 external function machine_program_start(): u16
 external function machine_program_end(): u16
 external function machine_base_page_start(): u16
 external function machine_program_bank(): u16
-external reentrant function machine_call(entry: u16): u16
-external reentrant function machine_peek(bank: u16, address: u16): u8
-external reentrant procedure machine_poke(bank: u16, address: u16, value: u8)
-external reentrant procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, count: u16)
-external reentrant procedure machine_fill(bank: u16, dst: u16, value: u8, count: u16)
+external stack function machine_call(entry: u16): u16
+external stack function machine_peek(bank: u16, address: u16): u8
+external stack procedure machine_poke(bank: u16, address: u16, value: u8)
+external stack procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, count: u16)
+external stack procedure machine_fill(bank: u16, dst: u16, value: u8, count: u16)
 
 const DOS_HANDLE_BASE = 6
 const DOS_HANDLE_LIMIT = 10
@@ -61,36 +61,36 @@ var zero_delta: u16
 var bank: u16
 var chunk: [256]u8
 
-reentrant function peek(address: u16): u8
+stack function peek(address: u16): u8
     return machine_peek(bank, address)
 end
 
-reentrant procedure poke(address: u16, value: u8)
+stack procedure poke(address: u16, value: u8)
     machine_poke(bank, address, value)
     return
 end
 
-reentrant function header_word(offset: u16): u16
+stack function header_word(offset: u16): u16
     var low: u16
     low = u16(peek(image + offset))
     return low | u16(peek(image + offset + 1)) << 8
 end
 
-reentrant function next_byte(): u8
+stack function next_byte(): u8
     var value: u8
     value = peek(cursor)
     cursor = cursor + 1
     return value
 end
 
-reentrant function next_word(): u16
+stack function next_word(): u16
     var low: u16
     low = u16(next_byte())
     return low | u16(next_byte()) << 8
 end
 
 # Consumes a NUL-terminated name and reports whether it equals `expected`.
-reentrant function next_name_is(expected: near ^u8): u8
+stack function next_name_is(expected: near ^u8): u8
     var matched: u8
     var ch: u8
     matched = 1
@@ -109,7 +109,7 @@ reentrant function next_name_is(expected: near ^u8): u8
     return matched
 end
 
-reentrant function segment_delta(segment: u8): u16
+stack function segment_delta(segment: u8): u16
     if segment == SEGMENT_TEXT
         return text_delta
     end
@@ -127,7 +127,7 @@ end
 
 # Applies the relocation table at the cursor to the segment loaded at
 # `start`. Returns 0 for an entry this loader cannot apply.
-reentrant function relocate(start: u16): u8
+stack function relocate(start: u16): u8
     var position: u16
     var step: u8
     var kind: u8
@@ -173,14 +173,14 @@ reentrant function relocate(start: u16): u8
     end
 end
 
-reentrant procedure clear(start: u16, count: u16)
+stack procedure clear(start: u16, count: u16)
     machine_fill(bank, start, 0, count)
     return
 end
 
 # Reads the open file into the program area from `image`. Returns its
 # length, or EXEC_ERR_TOO_LARGE when it does not fit before `area_end`.
-reentrant function load_file(handle: u16, area_end: u16): u16
+stack function load_file(handle: u16, area_end: u16): u16
     var length: u16
     var got: u16
     length = 0
@@ -201,7 +201,7 @@ end
 
 # Loads and runs the program in file `path` on the current drive. Returns its
 # exit status (0-255), or one of the EXEC_ERR_* codes.
-export reentrant function exec_program(path: near ^u8): u16
+export stack function exec_program(path: near ^u8): u16
     var handle: u16
     var area_end: u16
     var length: u16

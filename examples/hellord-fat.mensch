@@ -10,10 +10,10 @@ module HellordFat
 # Mensch has no 32-bit integer type, so 32-bit sector and cluster numbers are
 # kept as (lo, hi) word pairs. The helpers below work on the pair t_lo:t_hi.
 
-external reentrant procedure bios_block_set_lba(dev: u16, lba: u16)
-external reentrant procedure bios_block_set_lba_high(dev: u16, high: u16)
-external reentrant function bios_block_read(dev: u16, buffer: near ^u8): u16
-external reentrant function bios_block_write(dev: u16, buffer: near ^u8): u16
+external stack procedure bios_block_set_lba(dev: u16, lba: u16)
+external stack procedure bios_block_set_lba_high(dev: u16, high: u16)
+external stack function bios_block_read(dev: u16, buffer: near ^u8): u16
+external stack function bios_block_write(dev: u16, buffer: near ^u8): u16
 
 const FAT_OK = 0
 const FAT_ERR_NO_MORE_FILES = $fffe
@@ -63,17 +63,13 @@ var dir_entry: u16
 var dir_done: u8
 
 # Open files, by DOS handle slot
-var file_first_lo: [4]u16
-var file_first_hi: [4]u16
-var file_size_lo: [4]u16
-var file_size_hi: [4]u16
-var file_cluster_lo: [4]u16
-var file_cluster_hi: [4]u16
-var file_cluster_index: [4]u16
+# Open files, by slot: first cluster, size, and the cluster reached so far.
+type OpenFile = record(first_lo: u16, first_hi: u16, size_lo: u16, size_hi: u16, cluster_lo: u16, cluster_hi: u16, cluster_index: u16)
+var open_files: parallel [4]OpenFile
 
 # ---- 32-bit helpers -------------------------------------------------------
 
-reentrant procedure add32(lo: u16, hi: u16)
+stack procedure add32(lo: u16, hi: u16)
     var sum: u16
     sum = t_lo + lo
     if sum < lo
@@ -84,7 +80,7 @@ reentrant procedure add32(lo: u16, hi: u16)
     return
 end
 
-reentrant procedure sub32(lo: u16, hi: u16)
+stack procedure sub32(lo: u16, hi: u16)
     if t_lo < lo
         t_hi = t_hi - 1
     end
@@ -93,7 +89,7 @@ reentrant procedure sub32(lo: u16, hi: u16)
     return
 end
 
-reentrant procedure shl32_cluster()
+stack procedure shl32_cluster()
     var n: u8
     n = 0
     while n != vol_cluster_shift
@@ -107,7 +103,7 @@ end
 # ---- sector I/O -------------------------------------------------------------
 
 # Reads volume sector t_hi:t_lo into fat_sector (cached).
-reentrant function read_sector(): u16
+stack function read_sector(): u16
     var status: u16
     if cache_valid and cache_lo == t_lo and cache_hi == t_hi
         return FAT_OK
@@ -125,7 +121,7 @@ reentrant function read_sector(): u16
 end
 
 # Writes fat_sector back to volume sector t_hi:t_lo.
-reentrant function write_sector(): u16
+stack function write_sector(): u16
     select_sector()
     if bios_block_write(vol_dev, addr(fat_sector))
         cache_valid = 0
@@ -137,7 +133,7 @@ reentrant function write_sector(): u16
     return FAT_OK
 end
 
-reentrant procedure select_sector()
+stack procedure select_sector()
     var lo: u16
     var hi: u16
     lo = t_lo + vol_base
@@ -150,14 +146,14 @@ reentrant procedure select_sector()
     return
 end
 
-reentrant function sector_word(offset: u16): u16
+stack function sector_word(offset: u16): u16
     return u16(fat_sector[offset]) | u16(fat_sector[offset + 1]) << 8
 end
 
 # ---- mounting ---------------------------------------------------------------
 
 # Mounts the FAT volume on BIOS device `dev`, starting at block `base`.
-export reentrant function fat_mount(dev: u16, base: u16): u16
+export stack function fat_mount(dev: u16, base: u16): u16
     var reserved: u16
     var fats: u8
     var root_entries: u16
@@ -242,20 +238,20 @@ export reentrant function fat_mount(dev: u16, base: u16): u16
 end
 
 # Forgets the mounted volume (e.g. after the medium may have changed).
-export reentrant procedure fat_unmount()
+export stack procedure fat_unmount()
     vol_dev = NO_DEVICE
     cache_valid = 0
     return
 end
 
-export reentrant function fat_is_fat32(): u16
+export stack function fat_is_fat32(): u16
     return u16(vol_fat32)
 end
 
 # ---- clusters ---------------------------------------------------------------
 
 # Sets t to the first sector of cluster c.
-reentrant procedure cluster_to_sector()
+stack procedure cluster_to_sector()
     t_lo = c_lo
     t_hi = c_hi
     sub32(2, 0)
@@ -265,7 +261,7 @@ reentrant procedure cluster_to_sector()
 end
 
 # Advances c to the next cluster in its chain; sets c_end at end of chain.
-reentrant procedure next_cluster()
+stack procedure next_cluster()
     var index: u16
     c_end = 0
     if vol_fat32
@@ -303,7 +299,7 @@ end
 
 # ---- root directory ---------------------------------------------------------
 
-export reentrant procedure fat_dir_rewind()
+export stack procedure fat_dir_rewind()
     dir_cluster_lo = vol_root_cluster_lo
     dir_cluster_hi = vol_root_cluster_hi
     dir_sector = 0
@@ -314,7 +310,7 @@ end
 
 # Returns the offset in fat_sector of the next directory entry, or $ffff at
 # the end of the directory.
-reentrant function next_dir_entry(): u16
+stack function next_dir_entry(): u16
     var entry: u16
     if dir_done
         return $ffff
@@ -363,7 +359,7 @@ end
 
 # Next visible entry (skips deleted entries, long-name parts and the volume
 # label), or $ffff.
-reentrant function next_visible_entry(): u16
+stack function next_visible_entry(): u16
     var entry: u16
     var attr: u8
     while 1
@@ -384,7 +380,7 @@ end
 # Writes the next root directory entry to `dta`:
 #   +0 attribute (GEMDOS_ATTR_DIR or 0), +1 size (low word, little-endian),
 #   +3 NUL-terminated 8.3 name.
-export reentrant function fat_dir_next(dta: near ^u8): u16
+export stack function fat_dir_next(dta: near ^u8): u16
     var entry: u16
     var index: u16
     entry = next_visible_entry()
@@ -421,7 +417,7 @@ export reentrant function fat_dir_next(dta: near ^u8): u16
     return FAT_OK
 end
 
-reentrant function upper(ch: u8): u8
+stack function upper(ch: u8): u8
     if ch >= 'a' and ch <= 'z'
         return ch - 32
     end
@@ -429,7 +425,7 @@ reentrant function upper(ch: u8): u8
 end
 
 # Whether the 8.3 name at `entry` matches `path` (case-insensitive).
-reentrant function entry_matches(path: near ^u8, entry: u16): u8
+stack function entry_matches(path: near ^u8, entry: u16): u8
     var index: u16
     for index = 0 to 10
         if index == 8 and path^ == '.'
@@ -455,7 +451,7 @@ end
 # ---- files ------------------------------------------------------------------
 
 # Opens root-directory file `path` into handle slot `slot`.
-export reentrant function fat_open(path: near ^u8, slot: u16): u16
+export stack function fat_open(path: near ^u8, slot: u16): u16
     var entry: u16
     fat_dir_rewind()
     while 1
@@ -464,33 +460,33 @@ export reentrant function fat_open(path: near ^u8, slot: u16): u16
             return FAT_ERR_FILE_NOT_FOUND
         end
         if not (fat_sector[entry + 11] & FAT_ATTR_DIRECTORY) and entry_matches(path, entry)
-            file_first_lo[slot] = sector_word(entry + 26)
+            open_files[slot].first_lo = sector_word(entry + 26)
             if vol_fat32
-                file_first_hi[slot] = sector_word(entry + 20)
+                open_files[slot].first_hi = sector_word(entry + 20)
             else
-                file_first_hi[slot] = 0
+                open_files[slot].first_hi = 0
             end
-            file_size_lo[slot] = sector_word(entry + 28)
-            file_size_hi[slot] = sector_word(entry + 30)
-            file_cluster_lo[slot] = file_first_lo[slot]
-            file_cluster_hi[slot] = file_first_hi[slot]
-            file_cluster_index[slot] = 0
+            open_files[slot].size_lo = sector_word(entry + 28)
+            open_files[slot].size_hi = sector_word(entry + 30)
+            open_files[slot].cluster_lo = open_files[slot].first_lo
+            open_files[slot].cluster_hi = open_files[slot].first_hi
+            open_files[slot].cluster_index = 0
             return FAT_OK
         end
     end
 end
 
 # File size, clamped to 16 bits (the DOS file offset is 16-bit for now).
-export reentrant function fat_file_size(slot: u16): u16
-    if file_size_hi[slot]
+export stack function fat_file_size(slot: u16): u16
+    if open_files[slot].size_hi
         return $ffff
     end
-    return file_size_lo[slot]
+    return open_files[slot].size_lo
 end
 
 # Sets t to the volume sector holding byte `offset` of the file in `slot`.
 # Returns 0 when the offset is past the end of the cluster chain.
-reentrant function locate(slot: u16, offset: u16): u8
+stack function locate(slot: u16, offset: u16): u8
     var wanted: u16
     var n: u8
     wanted = offset >> 9
@@ -499,21 +495,21 @@ reentrant function locate(slot: u16, offset: u16): u8
         wanted = wanted >> 1
         n = n + 1
     end
-    if wanted < file_cluster_index[slot]
-        file_cluster_lo[slot] = file_first_lo[slot]
-        file_cluster_hi[slot] = file_first_hi[slot]
-        file_cluster_index[slot] = 0
+    if wanted < open_files[slot].cluster_index
+        open_files[slot].cluster_lo = open_files[slot].first_lo
+        open_files[slot].cluster_hi = open_files[slot].first_hi
+        open_files[slot].cluster_index = 0
     end
-    c_lo = file_cluster_lo[slot]
-    c_hi = file_cluster_hi[slot]
-    while file_cluster_index[slot] != wanted
+    c_lo = open_files[slot].cluster_lo
+    c_hi = open_files[slot].cluster_hi
+    while open_files[slot].cluster_index != wanted
         next_cluster()
         if c_end
             return 0
         end
-        file_cluster_lo[slot] = c_lo
-        file_cluster_hi[slot] = c_hi
-        file_cluster_index[slot] = file_cluster_index[slot] + 1
+        open_files[slot].cluster_lo = c_lo
+        open_files[slot].cluster_hi = c_hi
+        open_files[slot].cluster_index = open_files[slot].cluster_index + 1
     end
     if not c_hi and c_lo < 2
         return 0
@@ -523,7 +519,7 @@ reentrant function locate(slot: u16, offset: u16): u8
     return 1
 end
 
-export reentrant function fat_file_byte(slot: u16, offset: u16): u8
+export stack function fat_file_byte(slot: u16, offset: u16): u8
     if not locate(slot, offset)
         return 0
     end
@@ -535,7 +531,7 @@ end
 
 # Copies up to `count` bytes of the file in `slot` starting at `offset` into
 # `buffer`, a sector at a time. Returns the number of bytes read.
-export reentrant function fat_read(slot: u16, offset: u16, count: u16, buffer: near ^u8): u16
+export stack function fat_read(slot: u16, offset: u16, count: u16, buffer: near ^u8): u16
     var done: u16
     var size: u16
     var position: u16
@@ -562,7 +558,7 @@ end
 
 # Overwrites up to `count` bytes of the file in `slot` starting at `offset`,
 # stopping at the end of the file. Returns the number of bytes written.
-export reentrant function fat_write(slot: u16, offset: u16, count: u16, buffer: near ^u8): u16
+export stack function fat_write(slot: u16, offset: u16, count: u16, buffer: near ^u8): u16
     var written: u16
     var size: u16
     var position: u16

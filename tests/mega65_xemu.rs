@@ -1940,3 +1940,114 @@ fn constant_tables_reject_assignment_and_bad_initialisers() {
     );
     assert!(error.contains("outside the 2-element array"), "{error}");
 }
+
+#[test]
+fn parallel_arrays_store_each_field_as_a_column() {
+    let Some(run) = run_source(
+        "parallel-arrays",
+        "
+        module Parallel
+        fixed($0d00) volatile var out: [8]u8
+        fixed($0d10) volatile var wout: [2]u16
+
+        type Point = record(x: u8, y: u8)
+        type Actor = record(pos: Point, dx: i8, score: u16)
+
+        var actors: parallel [4]Actor = [
+            ((1, 2), 1, 100),
+            ((10, 20), -1, 200),
+            ((30, 40), 2, 300),
+            ((50, 60), 3, 400),
+        ]
+
+        export function main(): u8
+            var i: u8
+            for i = 0 to 3
+                actors[i].pos.x = actors[i].pos.x + u8(actors[i].dx)
+                actors[i].score = actors[i].score + 1
+            end
+            i = 2
+            out[0] = actors[i].pos.x
+            out[1] = actors[1].pos.x
+            out[2] = actors[3].pos.y
+            wout[0] = actors[i].score
+            wout[1] = actors[0].score
+            return 0
+        end
+        ",
+    ) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 0);
+    assert_eq!(&run.memory[0x0d00..0x0d03], &[32, 9, 60]);
+    let word = |at: usize| u16::from_le_bytes([run.memory[at], run.memory[at + 1]]);
+    assert_eq!((word(0x0d10), word(0x0d12)), (301, 101));
+}
+
+#[test]
+fn parallel_array_elements_are_only_reached_through_fields() {
+    let error = driver::compile_source(
+        "
+        module Bad
+        type Point = record(x: u8, y: u8)
+        var points: parallel [4]Point
+        export function main(): u8
+            return points[1][0]
+        end
+        ",
+        Target::Mega65,
+        driver::DEFAULT_DIRECT_PAGE_BUDGET,
+    )
+    .err()
+    .unwrap_or_default();
+    assert!(error.contains("parallel"), "{error}");
+}
+
+#[test]
+fn stack_routines_take_stack_arguments_with_static_locals() {
+    let Some(run) = run_source(
+        "stack-routines",
+        "
+        module StackRoutines
+        fixed($0e00) volatile var out: [3]u16
+        type Combine = stack function(a: u16, b: u8): u16
+
+        stack function weigh(a: u16, b: u8): u16
+            var kept: u16
+            kept = a + u16(b)
+            kept = kept + bump(b)
+            return kept
+        end
+
+        stack function bump(b: u8): u16
+            var twice: u16
+            twice = u16(b) + u16(b)
+            return twice
+        end
+
+        stack function spread(a: u16, b: u8, c: u16, d: u8): u16
+            var left: u16
+            var right: u16
+            left = weigh(a, b)
+            right = weigh(c, d)
+            return left + right
+        end
+
+        export function main(): u8
+            var combine: Combine
+            out[0] = spread(1000, 5, 2000, 7)
+            combine = weigh
+            out[1] = combine(300, 4)
+            out[2] = bump(21)
+            return 0
+        end
+        ",
+    ) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 0);
+    let word =
+        |i: usize| u16::from_le_bytes([run.memory[0x0e00 + 2 * i], run.memory[0x0e01 + 2 * i]]);
+    // weigh(a, b) = a + 3b.
+    assert_eq!((word(0), word(1), word(2)), (1015 + 2021, 312, 42));
+}

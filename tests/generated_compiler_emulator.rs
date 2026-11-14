@@ -1292,3 +1292,52 @@ fn generated_frontend_data_tables_record_elements_and_for_loops_run() {
     assert_eq!(word(0x040120), 0xfffe);
     assert_eq!(word(0x040122), 55);
 }
+
+#[test]
+fn generated_frontend_stack_routines_run() {
+    let binary = assemble_source_fixture(
+        "frontend-stack",
+        "
+        module StackDemo
+        fixed($040200) volatile var out: [3]u16
+        type Combine = stack function(a: u16, b: u8): u16
+
+        export far procedure main()
+            var combine: Combine
+            out[0] = spread(1000, 5, 2000, 7)
+            combine = weigh
+            out[1] = combine(300, 4)
+            out[2] = bump(21)
+            return
+        end
+        stack function weigh(a: u16, b: u8): u16
+            var kept: u16
+            kept = a + u16(b)
+            kept = kept + bump(b)
+            return kept
+        end
+
+        stack function bump(b: u8): u16
+            var twice: u16
+            twice = u16(b) + u16(b)
+            return twice
+        end
+
+        stack function spread(a: u16, b: u8, c: u16, d: u8): u16
+            var left: u16
+            var right: u16
+            left = weigh(a, b)
+            right = weigh(c, d)
+            return left + right
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_long_generated_routine(&binary);
+
+    let word = |at: usize| u16::from_le_bytes([memory.byte(at), memory.byte(at + 1)]);
+    assert_eq!(
+        (word(0x040200), word(0x040202), word(0x040204)),
+        (1015 + 2021, 312, 42)
+    );
+}

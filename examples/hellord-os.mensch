@@ -4,7 +4,7 @@ vector irq = serial_irq
 
 external interrupt procedure serial_irq()
 external procedure serial_init()
-external reentrant procedure gemdos_init()
+external stack procedure gemdos_init()
 external procedure dos_boot()
 
 export procedure main()

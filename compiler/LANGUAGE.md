@@ -15,6 +15,7 @@ each construct is represented on the 65816 and the MEGA65.
 | `direct ^T` | 2 | direct-page (base-page) data |
 | `far ^T` | 4 | 32-bit flat address (the 65816 uses 24 bits) |
 | `[N]T` | N × size | arrays, indexed from 0 |
+| `parallel [N]R` | N × size | an array of records stored field by field (below) |
 | `record ... end` | sum of fields | fields at fixed offsets, no padding |
 | `procedure(...)`, `function(...): T` | 2 | routine pointers (below) |
 
@@ -78,6 +79,18 @@ Element and field accesses compose, and can be read or assigned:
 Arrays indexed by a variable must be global (or reached through a pointer).
 Pointer arithmetic counts bytes: `p = p + size(Actor)`.
 
+A `parallel` array of records stores each field as its own column (all the
+`x` fields, then all the `y` fields, ...), the layout 65xx code favours:
+`actors[i].x` is then indexed by `i` times the field's size, not the
+record's, which for byte fields is just `lda actors_x,x`. A parallel
+array's elements are reachable only through their fields, and it must be
+global.
+
+```text
+var actors: parallel [16]Actor
+actors[i].pos.x = actors[i].pos.x + u8(actors[i].dx)
+```
+
 ## Statements
 
 ```text
@@ -91,11 +104,31 @@ A `for` loop runs zero times when the start is already past the end, and
 stops after the pass where the variable equals the end, so it works up to a
 type's largest value. The end is evaluated on every pass.
 
+## Routines
+
+```text
+procedure draw(x: u8, y: u8)              # parameters in fixed storage
+stack function read(handle: u16): u16      # parameters on the stack
+reentrant function depth(node: u16): u16   # recursive / interrupt-safe
+interrupt procedure tick()
+far procedure entry()                      # long call (65816)
+```
+
+| Kind | Arguments | Locals | Use for |
+|---|---|---|---|
+| (plain) | the routine's own storage | static | most code: smallest and fastest |
+| `stack` | the stack | static | routine pointers, traps, calls from any module |
+| `reentrant` | the stack | a stack frame | recursion, routines called from interrupts |
+
+Locals start undefined, except in `reentrant` routines, where they start at
+zero. An interrupt handler may only call `reentrant` routines (or ones
+without parameters).
+
 ## Routine pointers
 
 ```text
-type Handler = reentrant procedure(event: u16)
-type Compare = reentrant function(a: u16, b: u16): i16
+type Handler = stack procedure(event: u16)
+type Compare = stack function(a: u16, b: u16): i16
 type Thunk = procedure()
 
 var on_event: Handler
@@ -104,10 +137,11 @@ on_event = handle_key          # a routine named without arguments
 on_event(42)                   # an indirect call
 ```
 
-A routine type with parameters must be `reentrant`, since the arguments of
-an indirect call travel on the stack, and only routines with a matching
-signature can be assigned. Routines without parameters can be pointed at
-whatever their ABI, except `far` and `interrupt` routines.
+A routine type with parameters must be `stack` (or, equivalently,
+`reentrant`), since the arguments of an indirect call travel on the stack;
+`stack` and `reentrant` routines with a matching signature can be assigned.
+Routines without parameters can be pointed at whatever their ABI, except
+`far` and `interrupt` routines.
 
 ## Names
 

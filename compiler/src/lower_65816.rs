@@ -750,7 +750,7 @@ fn return_inst(routine: &Routine) -> AsmInst {
     match routine.abi {
         Abi::Far => AsmInst::Rtl,
         Abi::Interrupt => AsmInst::Rti,
-        Abi::Internal | Abi::Exported | Abi::Reentrant => match routine.kind {
+        Abi::Internal | Abi::Exported | Abi::Reentrant | Abi::Stack => match routine.kind {
             RoutineKind::Procedure | RoutineKind::Function { .. } => AsmInst::Rts,
         },
     }
@@ -759,7 +759,7 @@ fn return_inst(routine: &Routine) -> AsmInst {
 fn call_inst(name: &str, abi: Abi) -> AsmInst {
     match abi {
         Abi::Far => AsmInst::Jsl(name.to_owned()),
-        Abi::Internal | Abi::Exported | Abi::Interrupt | Abi::Reentrant => {
+        Abi::Internal | Abi::Exported | Abi::Interrupt | Abi::Reentrant | Abi::Stack => {
             AsmInst::Jsr(name.to_owned())
         }
     }
@@ -1063,13 +1063,19 @@ fn symbol_with_offset(name: &str, offset: u16) -> Symbol {
 
 /// Whether preparing `addr` has to go through the accumulator.
 fn address_clobbers_a(addr: &Address) -> bool {
-    matches!(
-        addr,
+    match addr {
         Address::Indexed {
-            index: Value::Stack { .. } | Value::Accumulator,
+            index: Value::Const(_) | Value::IndexX,
             ..
+        } => false,
+        Address::Indexed {
+            byte_offset: true, ..
+        } => true,
+        Address::Indexed { index, .. } => {
+            matches!(index, Value::Stack { .. } | Value::Accumulator)
         }
-    )
+        _ => false,
+    }
 }
 
 /// Loads a 16-bit index into X and returns `base,x`, or folds a constant
@@ -1078,6 +1084,7 @@ fn indexed_operand(
     out: &mut Vec<AsmInst>,
     base: &str,
     index: &Value,
+    byte_offset: bool,
     outgoing_stack_bytes: u16,
 ) -> Result<Operand, LowerError> {
     if let Value::Const(value) = index {
@@ -1089,6 +1096,17 @@ fn indexed_operand(
             }
         };
         return Ok(Operand::Absolute(symbol_with_offset(base, offset)));
+    }
+    if byte_offset {
+        // X is 16 bits: widen the one-byte offset through A.
+        if !matches!(index, Value::IndexX) {
+            out.push(AsmInst::Mode(Mode::Acc8Index16));
+            load_value_to_a(out, index, outgoing_stack_bytes)?;
+            out.push(AsmInst::Mode(Mode::Acc16Index16));
+            out.push(AsmInst::And(Operand::Immediate(Immediate::Word(0x00ff))));
+            out.push(AsmInst::Tax);
+        }
+        return Ok(Operand::AbsoluteIndexedX(Symbol::Named(base.to_owned())));
     }
     match index {
         Value::Stack { .. } | Value::Accumulator => {
@@ -1113,9 +1131,11 @@ fn load_operand_for_address(
     outgoing_stack_bytes: u16,
 ) -> Result<Operand, LowerError> {
     match addr {
-        Address::Indexed { base, index, .. } => {
-            indexed_operand(out, base, index, outgoing_stack_bytes)
-        }
+        Address::Indexed {
+            base,
+            index,
+            byte_offset,
+        } => indexed_operand(out, base, index, *byte_offset, outgoing_stack_bytes),
         Address::NearPtr(Value::Direct(name)) => {
             Ok(Operand::IndirectDirect(Symbol::Named(name.clone())))
         }
@@ -1150,9 +1170,11 @@ fn store_operand_for_address(
     outgoing_stack_bytes: u16,
 ) -> Result<Operand, LowerError> {
     match addr {
-        Address::Indexed { base, index, .. } => {
-            indexed_operand(out, base, index, outgoing_stack_bytes)
-        }
+        Address::Indexed {
+            base,
+            index,
+            byte_offset,
+        } => indexed_operand(out, base, index, *byte_offset, outgoing_stack_bytes),
         Address::NearPtr(Value::Direct(name)) => {
             Ok(Operand::IndirectDirect(Symbol::Named(name.clone())))
         }

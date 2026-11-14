@@ -1,8 +1,8 @@
 module HellordConsole
 
-external reentrant function gemdos_cconis(): u16
-external reentrant function gemdos_cconin(): u8
-external reentrant procedure gemdos_cconout(ch: u8)
+external stack function gemdos_cconis(): u16
+external stack function gemdos_cconin(): u8
+external stack procedure gemdos_cconout(ch: u8)
 
 export far procedure console_write(value: u8)
     gemdos_cconout(value)

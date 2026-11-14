@@ -111,6 +111,7 @@ const SAVED_FP_BYTES: u16 = 2;
 const STORAGE_OPTIONS: StorageOptions = StorageOptions {
     wide_scratch_direct: false,
     temp_registers: Some((TMP_SYMBOL, TMP_BYTES)),
+    cheap_frames: false,
 };
 
 pub fn lower_module_with_storage(
@@ -349,10 +350,13 @@ enum ByteSource {
 
 impl<'a> RoutineLowerer<'a> {
     fn new(routine: &'a Routine) -> Self {
+        // A frame for frame locals, spilled values, or (through the frame
+        // pointer) stack arguments.
         let reentrant = matches!(routine.abi, Abi::Reentrant);
-        let frame =
-            (reentrant || routine.stack_frame_bytes != 0).then_some(routine.stack_frame_bytes);
-        let param_bytes = if reentrant {
+        let stack_args = routine.abi.stack_arguments() && !routine.params.is_empty();
+        let frame = (reentrant || stack_args || routine.stack_frame_bytes != 0)
+            .then_some(routine.stack_frame_bytes);
+        let param_bytes = if routine.abi.stack_arguments() {
             routine
                 .params
                 .iter()
@@ -857,7 +861,25 @@ impl<'a> RoutineLowerer<'a> {
         let count = u16::from(count.byte(0));
         let bytes = width.size_bytes();
         let (byte_shift, bit_shift) = (count / 8, count % 8);
-        let acc = Value::Accumulator;
+        // Shift in place when the destination is compiler-owned memory (a
+        // user global may be an I/O register); otherwise in the base-page
+        // accumulator.
+        let in_place = (0..bytes).all(|i| {
+            matches!(
+                self.value_byte(dst, i),
+                Ok(ByteSource::Operand(Operand::Base(symbol) | Operand::Absolute(symbol)))
+                    if symbol.starts_with("__")
+            )
+        });
+        let work = if in_place {
+            dst.clone()
+        } else {
+            Value::Accumulator
+        };
+        let operand = |this: &Self, i: u16| match this.value_byte(&work, i) {
+            Ok(ByteSource::Operand(operand)) => operand,
+            _ => unreachable!("the working value is plain memory"),
+        };
         // Iterate so each source byte is read before the same location is written.
         let order: Vec<u16> = if left {
             (0..bytes).rev().collect()
@@ -871,43 +893,50 @@ impl<'a> RoutineLowerer<'a> {
                 Some(i + byte_shift).filter(|source| *source < bytes)
             };
             match source {
+                Some(source) if source == i && lhs == &work => {}
                 Some(source) => {
                     self.load_byte_to_a(lhs, source)?;
-                    self.store_a_to_byte(&acc, i)?;
+                    self.store_a_to_byte(&work, i)?;
                 }
                 // Bytes run in ascending order for right shifts, so the
                 // moved-down sign byte is already in place.
                 None if signed => {
-                    self.sign_fill_from(&acc, bytes - 1 - byte_shift)?;
-                    self.emit(Op::Sta, Operand::Base(offset(ACC_SYMBOL, i)));
+                    self.sign_fill_from(&work, bytes - 1 - byte_shift)?;
+                    let target = operand(self, i);
+                    self.emit(Op::Sta, target);
                 }
-                None => self.emit(Op::Stz, Operand::Base(offset(ACC_SYMBOL, i))),
+                None => {
+                    let target = operand(self, i);
+                    self.emit(Op::Stz, target);
+                }
             }
         }
         for _ in 0..bit_shift {
             if left {
                 for i in 0..bytes {
                     let op = if i == 0 { Op::Asl } else { Op::Rol };
-                    self.emit(op, Operand::Base(offset(ACC_SYMBOL, i)));
+                    let target = operand(self, i);
+                    self.emit(op, target);
                 }
             } else {
                 for i in (0..bytes).rev() {
+                    let target = operand(self, i);
                     let op = if i + 1 != bytes {
                         Op::Ror
                     } else if signed {
                         // Carry in a copy of the sign bit.
-                        self.emit(Op::Lda, Operand::Base(offset(ACC_SYMBOL, i)));
+                        self.emit(Op::Lda, target.clone());
                         self.implied(Op::Asl);
                         Op::Ror
                     } else {
                         Op::Lsr
                     };
-                    self.emit(op, Operand::Base(offset(ACC_SYMBOL, i)));
+                    self.emit(op, target);
                 }
             }
         }
-        if dst != &acc {
-            self.copy_value(width, dst, &acc)?;
+        if &work != dst {
+            self.copy_value(width, dst, &work)?;
         }
         Ok(())
     }
@@ -1135,11 +1164,15 @@ impl<'a> RoutineLowerer<'a> {
             Address::Symbol(name) => (AddressForm::Absolute(name.clone()), false),
             Address::Direct(name) => (AddressForm::Base(name.clone()), false),
             Address::SymbolIndexedX(name) => (AddressForm::AbsoluteX(name.clone()), false),
-            Address::Indexed { base, index, small } => {
+            Address::Indexed {
+                base,
+                index,
+                byte_offset,
+            } => {
                 if let Value::Const(value) = index {
                     let offset_bytes = value.bits() as u16;
                     (AddressForm::Absolute(offset(base, offset_bytes)), false)
-                } else if *small && x_free {
+                } else if *byte_offset && x_free {
                     // The byte offset fits in X.
                     match self.value_byte(index, 0)? {
                         ByteSource::X => {}

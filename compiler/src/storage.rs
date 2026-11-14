@@ -260,6 +260,10 @@ pub struct StorageOptions {
     /// (symbol, bytes). Reentrant routines keep expression temporaries that
     /// do not live across a call there instead of in their stack frame.
     pub temp_registers: Option<(&'static str, u16)>,
+    /// Stack-frame accesses cost no more than direct-page ones (the 65816's
+    /// `offset,s`), so `stack` routines put spilled scratch values in a frame
+    /// rather than spend direct page on them.
+    pub cheap_frames: bool,
 }
 
 impl Default for StorageOptions {
@@ -267,6 +271,7 @@ impl Default for StorageOptions {
         Self {
             wide_scratch_direct: true,
             temp_registers: None,
+            cheap_frames: true,
         }
     }
 }
@@ -287,6 +292,7 @@ fn assign_storage_with_direct_page_budget(
     let mut allocator = DirectAllocator::new(budget);
     allocator.wide_scratch_direct = options.wide_scratch_direct;
     allocator.temp_registers = options.temp_registers;
+    allocator.cheap_frames = options.cheap_frames;
     let mut args = DirectSlotPool::new("__dp_arg");
     let mut scratch = DirectSlotPool::new("__dp_scratch");
     let routines = module
@@ -442,7 +448,7 @@ fn assign_routine(
         bindings: BTreeMap::new(),
     };
 
-    if matches!(routine.abi, Abi::Reentrant) {
+    if routine.abi.stack_arguments() {
         let mut registers = allocator
             .temp_registers
             .map(|(symbol, bytes)| TempRegisters::new(symbol, bytes));
@@ -450,9 +456,15 @@ fn assign_routine(
         assign_scratch_bindings(routine, allocator, scratch, registers.as_mut(), &mut out);
         assign_stack_params(routine, &mut out);
     } else {
+        // Interrupt handlers keep private slots rather than save the temp
+        // registers.
+        let mut registers = allocator
+            .temp_registers
+            .filter(|_| !matches!(routine.abi, Abi::Interrupt))
+            .map(|(symbol, bytes)| TempRegisters::new(symbol, bytes));
         assign_params(routine, allocator, args, &mut out);
-        assign_locals(routine, allocator, None, &mut out);
-        assign_scratch_bindings(routine, allocator, scratch, None, &mut out);
+        assign_locals(routine, allocator, registers.as_mut(), &mut out);
+        assign_scratch_bindings(routine, allocator, scratch, registers.as_mut(), &mut out);
     }
 
     out
@@ -509,8 +521,9 @@ fn assign_locals(
     let mut stack_offset = 1;
 
     for local in &routine.locals {
-        // A reentrant routine's scalar local that never lives across a call
-        // can use the temp registers instead of the frame.
+        // A scalar local that never lives across a call can use the temp
+        // registers instead of the frame or static storage. (Locals start
+        // undefined, except in reentrant routines, where they start at zero.)
         if let (Some(registers), Storage::Default) = (registers.as_deref_mut(), local.storage) {
             let size = local.ty.size_bytes();
             let lifetime = (size <= 4)
@@ -526,7 +539,10 @@ fn assign_locals(
                             size,
                         },
                     );
-                    out.zeroed_registers.push((symbol, size));
+                    // Reentrant locals start at zero, like the frame they replace.
+                    if matches!(routine.abi, Abi::Reentrant) {
+                        out.zeroed_registers.push((symbol, size));
+                    }
                     continue;
                 }
             }
@@ -609,26 +625,39 @@ fn assign_scratch_bindings(
         )
     });
 
-    if matches!(routine.abi, Abi::Reentrant) {
-        for binding in lifetimes {
-            // Temporaries live within one statement, so their linear
-            // lifetime is exact (unlike variables, which loops can keep
-            // alive around a back edge).
-            if matches!(binding.key, BindingKey::Temp(_)) && !binding.crosses_call {
-                if let Some(symbol) = registers.as_deref_mut().and_then(|registers| {
-                    registers.place(binding.first_use, binding.last_use, binding.size)
-                }) {
-                    out.bindings.insert(
-                        binding.key,
-                        Location::Direct {
-                            symbol,
-                            offset: 0,
-                            size: binding.size,
-                        },
-                    );
-                    continue;
-                }
+    // Temporaries live within one statement, so their linear lifetime is
+    // exact (unlike variables, which loops can keep alive around a back
+    // edge): those that do not live across a call can use temp registers.
+    let mut lifetimes: Vec<ScratchLifetime> = lifetimes
+        .into_iter()
+        .filter(|binding| {
+            if !matches!(binding.key, BindingKey::Temp(_)) || binding.crosses_call {
+                return true;
             }
+            let Some(symbol) = registers.as_deref_mut().and_then(|registers| {
+                registers.place(binding.first_use, binding.last_use, binding.size)
+            }) else {
+                return true;
+            };
+            out.bindings.insert(
+                binding.key.clone(),
+                Location::Direct {
+                    symbol,
+                    offset: 0,
+                    size: binding.size,
+                },
+            );
+            false
+        })
+        .collect();
+
+    let framed = match routine.abi {
+        Abi::Reentrant => true,
+        Abi::Stack => allocator.cheap_frames,
+        _ => false,
+    };
+    if framed {
+        for binding in lifetimes.drain(..) {
             let offset = out.stack_frame_bytes + 1;
             out.bindings.insert(
                 binding.key,
@@ -1257,10 +1286,14 @@ fn rewrite_address(
         },
         Address::NearPtr(value) => Address::NearPtr(rewrite_value(value, layout, direct_aliases)),
         Address::FarPtr(value) => Address::FarPtr(rewrite_value(value, layout, direct_aliases)),
-        Address::Indexed { base, index, small } => Address::Indexed {
+        Address::Indexed {
+            base,
+            index,
+            byte_offset,
+        } => Address::Indexed {
             base: base.clone(),
             index: rewrite_value(index, layout, direct_aliases),
-            small: *small,
+            byte_offset: *byte_offset,
         },
         other => other.clone(),
     }
@@ -1950,6 +1983,7 @@ struct DirectAllocator {
     budget: Option<u16>,
     wide_scratch_direct: bool,
     temp_registers: Option<(&'static str, u16)>,
+    cheap_frames: bool,
 }
 
 impl DirectAllocator {
@@ -1959,6 +1993,7 @@ impl DirectAllocator {
             budget,
             wide_scratch_direct: true,
             temp_registers: None,
+            cheap_frames: true,
         }
     }
 
@@ -3010,6 +3045,7 @@ mod tests {
         StorageOptions {
             wide_scratch_direct: false,
             temp_registers: Some(("__tmp_regs", 8)),
+            cheap_frames: false,
         }
     }
 

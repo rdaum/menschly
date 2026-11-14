@@ -26,15 +26,15 @@ fixed($009f69) volatile var block_error: u8
 fixed($009f6a) volatile var block_sector_count0: u8
 fixed($009f6b) volatile var block_sector_count1: u8
 
-export reentrant function blockdev_status(): u16
+export stack function blockdev_status(): u16
     return u16(block_status)
 end
 
-export reentrant function blockdev_sector_count(): u16
+export stack function blockdev_sector_count(): u16
     return u16(block_sector_count1) << 8 | u16(block_sector_count0)
 end
 
-export reentrant procedure blockdev_set_lba(lba: u16)
+export stack procedure blockdev_set_lba(lba: u16)
     block_lba0 = u8(lba)
     block_lba1 = u8(lba >> 8)
     block_lba2 = 0
@@ -42,13 +42,13 @@ export reentrant procedure blockdev_set_lba(lba: u16)
     return
 end
 
-export reentrant procedure blockdev_set_lba_high(high: u16)
+export stack procedure blockdev_set_lba_high(high: u16)
     block_lba2 = u8(high)
     block_lba3 = u8(high >> 8)
     return
 end
 
-export reentrant function blockdev_read(buffer: near ^u8): u16
+export stack function blockdev_read(buffer: near ^u8): u16
     var index: u16
     block_command = BLOCK_COMMAND_READ
     if block_error
@@ -61,7 +61,7 @@ export reentrant function blockdev_read(buffer: near ^u8): u16
     return 0
 end
 
-export reentrant function blockdev_write(buffer: near ^u8): u16
+export stack function blockdev_write(buffer: near ^u8): u16
     var index: u16
     block_index_lo = 0
     block_index_hi = 0
@@ -80,7 +80,7 @@ end
 
 # Program loading (hellord-exec.mensch) is MEGA65-only for now: the x65's
 # 65816 programs would need their own loader entry and calling convention.
-export reentrant function exec_program(path: near ^u8): u16
+export stack function exec_program(path: near ^u8): u16
     return $fffd
 end
 
@@ -90,7 +90,7 @@ export function machine_caller_bank(): u16
     return 0
 end
 
-export reentrant procedure machine_copy_in(bank: u16, dst: near ^u8, src: u16, count: u16)
+export stack procedure machine_copy_in(bank: u16, dst: near ^u8, src: u16, count: u16)
     var from: near ^u8
     from = src
     while count
@@ -102,7 +102,7 @@ export reentrant procedure machine_copy_in(bank: u16, dst: near ^u8, src: u16, c
     return
 end
 
-export reentrant procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, count: u16)
+export stack procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, count: u16)
     var to: near ^u8
     to = dst
     while count

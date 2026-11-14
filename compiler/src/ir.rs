@@ -237,7 +237,20 @@ pub enum Abi {
     Exported,
     Far,
     Interrupt,
+    /// Arguments on the stack, locals in a stack frame: safe to recurse or
+    /// to re-enter from an interrupt.
     Reentrant,
+    /// Arguments on the stack (the convention traps and routine pointers
+    /// use), but static locals: not safe to recurse or re-enter.
+    Stack,
+}
+
+impl Abi {
+    /// Whether callers push the arguments (rather than storing them in the
+    /// callee's parameter storage).
+    pub fn stack_arguments(self) -> bool {
+        matches!(self, Self::Reentrant | Self::Stack)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,9 +353,13 @@ pub enum Type {
     Record {
         fields: Vec<Field>,
     },
+    /// `parallel` arrays of records store each field as its own column of
+    /// `len` values (all the first fields, then all the second, ...), so an
+    /// element's field is indexed directly by the element number.
     Array {
         len: u16,
         element: Box<Type>,
+        parallel: bool,
     },
     Slice {
         element: Box<Type>,
@@ -381,7 +398,7 @@ impl Type {
             } => 4,
             Self::Pointer { .. } | Self::Routine(_) => 2,
             Self::Record { fields } => fields.iter().map(|field| field.ty.size_bytes()).sum(),
-            Self::Array { len, element } => len.saturating_mul(element.size_bytes()),
+            Self::Array { len, element, .. } => len.saturating_mul(element.size_bytes()),
             Self::Slice { .. } => 4,
             Self::Result { ok, err } => ok.size_bytes().max(err.size_bytes()) + 1,
         }
@@ -655,9 +672,8 @@ pub enum Address {
     Indexed {
         base: String,
         index: Value,
-        /// The array spans at most 256 bytes, so (for any in-bounds index)
-        /// the byte offset fits in its low byte.
-        small: bool,
+        /// `index` is a one-byte offset (the array spans at most 256 bytes).
+        byte_offset: bool,
     },
     ValueOffset {
         base: Value,

@@ -765,7 +765,7 @@ impl Parser {
     /// An initialiser for a value of type `ty`.
     fn parse_init(&mut self, ty: &Type) -> Result<Init, FrontendError> {
         let (close, elements): (TokenKind, Vec<Type>) = match ty {
-            Type::Array { len, element } if self.take(TokenKind::LBracket) => (
+            Type::Array { len, element, .. } if self.take(TokenKind::LBracket) => (
                 TokenKind::RBracket,
                 vec![(**element).clone(); usize::from(*len)],
             ),
@@ -910,6 +910,8 @@ impl Parser {
             interrupt = self.parse_interrupt_attr()?;
         } else if self.take_keyword("reentrant") {
             abi = Abi::Reentrant;
+        } else if self.take_keyword("stack") {
+            abi = Abi::Stack;
         }
 
         let is_function = if self.take_keyword("procedure") {
@@ -1072,6 +1074,20 @@ impl Parser {
             return Ok(Type::Array {
                 len: len as u16,
                 element: Box::new(self.parse_type()?),
+                parallel: false,
+            });
+        }
+        if self.take_keyword("parallel") {
+            let Type::Array { len, element, .. } = self.parse_type()? else {
+                return Err(self.parse_error("parallel needs an array of records"));
+            };
+            if !matches!(*element, Type::Record { .. }) {
+                return Err(self.parse_error("parallel needs an array of records"));
+            }
+            return Ok(Type::Array {
+                len,
+                element,
+                parallel: true,
             });
         }
         if self.take_keyword("record") {
@@ -1104,6 +1120,7 @@ impl Parser {
             });
         }
         if self.is_keyword_at(0, "reentrant")
+            || self.is_keyword_at(0, "stack")
             || self.is_keyword_at(0, "procedure")
             || self.is_keyword_at(0, "function")
         {
@@ -1130,8 +1147,9 @@ impl Parser {
     /// `[reentrant] procedure(params)` or `[reentrant] function(params): T`,
     /// where each parameter is a type, optionally named (`count: u16`).
     fn parse_routine_type(&mut self) -> Result<Type, FrontendError> {
-        let abi = if self.take_keyword("reentrant") {
-            Abi::Reentrant
+        // `stack` and `reentrant` routines are called the same way.
+        let abi = if self.take_keyword("reentrant") || self.take_keyword("stack") {
+            Abi::Stack
         } else {
             Abi::Internal
         };
@@ -1175,9 +1193,9 @@ impl Parser {
             params,
             result,
         };
-        if !routine.params.is_empty() && !matches!(routine.abi, Abi::Reentrant) {
+        if !routine.params.is_empty() && !routine.abi.stack_arguments() {
             return Err(self.parse_error(
-                "routine types with parameters must be reentrant (arguments on the stack)",
+                "routine types with parameters must be stack or reentrant (arguments on the stack)",
             ));
         }
         Ok(Type::Routine(Box::new(routine)))
@@ -1847,7 +1865,7 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
     module.external_direct_symbols = source
         .externals
         .iter()
-        .filter(|external| !matches!(external.abi, Abi::Reentrant))
+        .filter(|external| !external.abi.stack_arguments())
         .flat_map(|external| {
             external
                 .params
@@ -2079,9 +2097,9 @@ impl Lowerer {
                 // Trap vectors point at a family dispatcher with the trap ABI:
                 // reentrant function(call: u16, arg0: u16, arg1: u16): u16.
                 family.map_err(FrontendError::Type)?;
-                if !matches!(sig.abi, Abi::Reentrant) {
+                if !sig.abi.stack_arguments() {
                     return Err(FrontendError::Type(format!(
-                        "trap vector {} references non-reentrant routine {}",
+                        "trap vector {} references routine {} without stack arguments",
                         vector.name, vector.routine
                     )));
                 }
@@ -2131,19 +2149,50 @@ impl Lowerer {
         out: &mut Vec<DataItem>,
     ) -> Result<(), FrontendError> {
         match (ty, init) {
-            (Type::Array { len, element }, Init::List(items)) => {
+            (
+                Type::Array {
+                    len,
+                    element,
+                    parallel,
+                },
+                Init::List(items),
+            ) => {
                 if items.len() != usize::from(*len) {
                     return Err(FrontendError::Type(format!(
                         "{} elements for a {len}-element array",
                         items.len()
                     )));
                 }
-                for item in items {
-                    self.encode_init(element, item, consts, globals, out)?;
+                if !*parallel {
+                    for item in items {
+                        self.encode_init(element, item, consts, globals, out)?;
+                    }
+                    return Ok(());
+                }
+                // Column by column: each field of every element in turn.
+                let Type::Record { fields } = &**element else {
+                    unreachable!("parallel arrays hold records")
+                };
+                for (index, field) in fields.iter().enumerate() {
+                    for item in items {
+                        let Init::List(values) = item else {
+                            return Err(FrontendError::Type(
+                                "a record element needs (...)".to_owned(),
+                            ));
+                        };
+                        if values.len() != fields.len() {
+                            return Err(FrontendError::Type(format!(
+                                "{} values for a {}-field record",
+                                values.len(),
+                                fields.len()
+                            )));
+                        }
+                        self.encode_init(&field.ty, &values[index], consts, globals, out)?;
+                    }
                 }
                 Ok(())
             }
-            (Type::Array { len, element }, Init::Expr(Expr::String(text)))
+            (Type::Array { len, element, .. }, Init::Expr(Expr::String(text)))
                 if element.size_bytes() == 1 =>
             {
                 let mut bytes = text.as_bytes().to_vec();
@@ -2700,7 +2749,7 @@ impl<'a> RoutineLowerer<'a> {
                 ensure_assignable(expected, &result)?;
                 let params: Vec<Type> = sig.params.iter().map(|param| param.ty.clone()).collect();
                 self.lower_call_args(name, sig.abi, args, &sig.params)?;
-                let capture_before_cleanup = matches!(sig.abi, Abi::Reentrant)
+                let capture_before_cleanup = sig.abi.stack_arguments()
                     && !sig.params.is_empty()
                     && (matches!(dst, Value::Accumulator | Value::Stack { .. })
                         || (matches!(self.routine.abi, Abi::Reentrant)
@@ -2922,6 +2971,7 @@ impl<'a> RoutineLowerer<'a> {
                             offset: 0,
                             index: None,
                             whole: binding.ty.size_bytes(),
+                            pending: None,
                         },
                         binding.ty,
                     )),
@@ -2934,31 +2984,41 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Field(base, name) => {
                 let (mut place, ty) = self.place(base)?;
                 let field = record_field(&ty, name)?.clone();
-                place.add_offset(field.offset)?;
+                if let Some((len, index)) = place.take_pending() {
+                    // A parallel element: the field's column, then the
+                    // element within it.
+                    place.add_offset(field.offset * len)?;
+                    self.apply_index(&mut place, &index, len, field.ty.size_bytes())?;
+                } else {
+                    place.add_offset(field.offset)?;
+                }
                 Ok((place, field.ty))
             }
             Expr::Index(base, index) => {
                 let (mut place, ty) = self.place(base)?;
-                let Type::Array { len, element } = ty else {
+                if place.pending_parallel() {
+                    return Err(parallel_element_error());
+                }
+                let Type::Array {
+                    len,
+                    element,
+                    parallel,
+                } = ty
+                else {
                     return Err(FrontendError::Type(
                         "indexed access needs an array".to_owned(),
                     ));
                 };
-                let size = element.size_bytes();
-                if self.is_const_expr(index)? {
-                    let at = self.const_expr_value(index)?;
-                    if !(0..i64::from(len)).contains(&at) {
-                        return Err(FrontendError::Type(format!(
-                            "index {at} is outside the {len}-element array"
-                        )));
-                    }
-                    place.add_offset(at as u16 * size)?;
+                if parallel {
+                    let Place::Global { pending, .. } = &mut place else {
+                        return Err(FrontendError::Type(
+                            "parallel arrays must be global".to_owned(),
+                        ));
+                    };
+                    *pending = Some((len, (**index).clone()));
                     return Ok((place, *element));
                 }
-                // Evaluating the index may need the accumulator.
-                self.spill_place_index(&mut place);
-                let offset = self.index_offset(index, size)?;
-                self.add_place_index(&mut place, offset)?;
+                self.apply_index(&mut place, index, len, element.size_bytes())?;
                 Ok((place, *element))
             }
             Expr::Deref(pointer) => {
@@ -3003,10 +3063,55 @@ impl<'a> RoutineLowerer<'a> {
         }
     }
 
+    /// Adds element `index` of an array of `len` elements of `size` bytes.
+    fn apply_index(
+        &mut self,
+        place: &mut Place,
+        index: &Expr,
+        len: u16,
+        size: u16,
+    ) -> Result<(), FrontendError> {
+        if self.is_const_expr(index)? {
+            let at = self.const_expr_value(index)?;
+            if !(0..i64::from(len)).contains(&at) {
+                return Err(FrontendError::Type(format!(
+                    "index {at} is outside the {len}-element array"
+                )));
+            }
+            return place.add_offset(at as u16 * size);
+        }
+        // Evaluating the index may need the accumulator.
+        let width = place.offset_width();
+        self.spill_place_index(place, width);
+        let offset = self.index_offset(index, size, width)?;
+        self.add_place_index(place, offset, width)
+    }
+
     /// The byte offset of element `index` (a 1- or 2-byte integer) in
-    /// elements of `size` bytes, as a 16-bit value.
-    fn index_offset(&mut self, index: &Expr, size: u16) -> Result<Value, FrontendError> {
+    /// elements of `size` bytes, as a value of `width`. A one-byte offset
+    /// (into an array of at most 256 bytes) uses only the index's low byte:
+    /// any in-bounds index fits.
+    fn index_offset(
+        &mut self,
+        index: &Expr,
+        size: u16,
+        width: Width,
+    ) -> Result<Value, FrontendError> {
         let ty = self.infer_expr(index)?;
+        if width == Width::Byte {
+            if integer_width(&ty).is_none_or(|bytes| bytes > 2) {
+                return Err(FrontendError::Type(
+                    "array indexes need an 8- or 16-bit integer".to_owned(),
+                ));
+            }
+            let value = if matches!(index, Expr::Name(_)) {
+                self.expr_value(index, &ty)?
+            } else {
+                self.lower_expr_to(index, &ty, Value::Accumulator)?;
+                Value::Accumulator
+            };
+            return self.scale_index(value, size, Width::Byte);
+        }
         let value = match integer_width(&ty) {
             Some(2) if matches!(index, Expr::Name(_)) => self.expr_value(index, &ty)?,
             Some(2) => {
@@ -3032,16 +3137,16 @@ impl<'a> RoutineLowerer<'a> {
                 ))
             }
         };
-        self.scale_index(value, size)
+        self.scale_index(value, size, Width::Word)
     }
 
     /// Moves a place's index out of the accumulator.
-    fn spill_place_index(&mut self, place: &mut Place) {
+    fn spill_place_index(&mut self, place: &mut Place, width: Width) {
         if let Place::Global { index, .. } | Place::Pointer { index, .. } = place {
             if *index == Some(Value::Accumulator) {
                 let temp = self.parent.temp();
                 self.body.push(IrInst::Move {
-                    width: Width::Word,
+                    width,
                     dst: temp.clone(),
                     src: Value::Accumulator,
                 });
@@ -3050,7 +3155,12 @@ impl<'a> RoutineLowerer<'a> {
         }
     }
 
-    fn add_place_index(&mut self, place: &mut Place, offset: Value) -> Result<(), FrontendError> {
+    fn add_place_index(
+        &mut self,
+        place: &mut Place,
+        offset: Value,
+        width: Width,
+    ) -> Result<(), FrontendError> {
         let index = match place {
             Place::Global { index, .. } | Place::Pointer { index, .. } => index,
             Place::Value { .. } => {
@@ -3070,7 +3180,7 @@ impl<'a> RoutineLowerer<'a> {
                     (previous, offset)
                 };
                 self.body.push(IrInst::Add {
-                    width: Width::Word,
+                    width,
                     dst: Value::Accumulator,
                     lhs,
                     rhs,
@@ -3083,6 +3193,9 @@ impl<'a> RoutineLowerer<'a> {
 
     /// The IR address of a place.
     fn place_address(&mut self, place: Place) -> Result<Address, FrontendError> {
+        if place.pending_parallel() {
+            return Err(parallel_element_error());
+        }
         Ok(match place {
             Place::Global {
                 symbol,
@@ -3098,6 +3211,7 @@ impl<'a> RoutineLowerer<'a> {
                 offset,
                 index: Some(index),
                 whole,
+                ..
             } => Address::Indexed {
                 base: if offset == 0 {
                     symbol
@@ -3105,7 +3219,7 @@ impl<'a> RoutineLowerer<'a> {
                     format!("{symbol}+{offset}")
                 },
                 index,
-                small: whole <= 0x100,
+                byte_offset: whole <= 0x100,
             },
             Place::Value { base, offset } => Address::ValueOffset { base, offset },
             Place::Pointer {
@@ -3182,18 +3296,33 @@ impl<'a> RoutineLowerer<'a> {
 
     /// Turns an element index into a byte offset: `index * element_size`,
     /// as shifts and adds.
-    fn scale_index(&mut self, index: Value, element_size: u16) -> Result<Value, FrontendError> {
+    fn scale_index(
+        &mut self,
+        index: Value,
+        element_size: u16,
+        width: Width,
+    ) -> Result<Value, FrontendError> {
         if element_size == 1 {
             return Ok(index);
         }
         if let Value::Const(value) = index {
-            let offset = u32::from(value.bits() as u16) * u32::from(element_size);
-            return Ok(Value::Const(Const::U16(offset as u16)));
+            let offset = i64::from(value.bits() as u16) * i64::from(element_size);
+            return Ok(Value::Const(wrap_const(offset, width)));
+        }
+        // A power of two is one shift of the index.
+        if element_size.is_power_of_two() {
+            self.body.push(IrInst::ShiftLeft {
+                width,
+                dst: Value::Accumulator,
+                lhs: index,
+                rhs: Value::Const(Const::U8(element_size.trailing_zeros() as u8)),
+            });
+            return Ok(Value::Accumulator);
         }
         let source = if matches!(index, Value::Accumulator) {
             let temp = self.parent.temp();
             self.body.push(IrInst::Move {
-                width: Width::Word,
+                width,
                 dst: temp.clone(),
                 src: Value::Accumulator,
             });
@@ -3205,7 +3334,7 @@ impl<'a> RoutineLowerer<'a> {
         // over each run of bits, adding the index for each set bit. Only the
         // index's own copy is needed besides the accumulator.
         self.body.push(IrInst::Move {
-            width: Width::Word,
+            width,
             dst: Value::Accumulator,
             src: source.clone(),
         });
@@ -3215,14 +3344,14 @@ impl<'a> RoutineLowerer<'a> {
             pending += 1;
             if element_size & (1 << bit) != 0 {
                 self.body.push(IrInst::ShiftLeft {
-                    width: Width::Word,
+                    width,
                     dst: Value::Accumulator,
                     lhs: Value::Accumulator,
                     rhs: Value::Const(Const::U8(pending)),
                 });
                 pending = 0;
                 self.body.push(IrInst::Add {
-                    width: Width::Word,
+                    width,
                     dst: Value::Accumulator,
                     lhs: Value::Accumulator,
                     rhs: source.clone(),
@@ -3231,7 +3360,7 @@ impl<'a> RoutineLowerer<'a> {
         }
         if pending != 0 {
             self.body.push(IrInst::ShiftLeft {
-                width: Width::Word,
+                width,
                 dst: Value::Accumulator,
                 lhs: Value::Accumulator,
                 rhs: Value::Const(Const::U8(pending)),
@@ -3354,7 +3483,7 @@ impl<'a> RoutineLowerer<'a> {
             && !matches!(sig.abi, Abi::Reentrant)
         {
             return Err(FrontendError::Type(format!(
-                "interrupt routine {} cannot call parameterized routine {name}; direct-page parameters are not interrupt-safe",
+                "interrupt routine {} cannot call parameterized routine {name}: only reentrant routines are interrupt-safe",
                 self.routine.name
             )));
         }
@@ -3526,7 +3655,7 @@ impl<'a> RoutineLowerer<'a> {
         args: &[Expr],
         params: &[ParamSig],
     ) -> Result<(), FrontendError> {
-        if matches!(abi, Abi::Reentrant) {
+        if abi.stack_arguments() {
             let types: Vec<Type> = params.iter().map(|param| param.ty.clone()).collect();
             return self.push_call_args(args, &types);
         }
@@ -3554,7 +3683,7 @@ impl<'a> RoutineLowerer<'a> {
     }
 
     fn cleanup_call_args(&mut self, abi: Abi, params: &[Type]) {
-        if matches!(abi, Abi::Reentrant) {
+        if abi.stack_arguments() {
             self.body.push(IrInst::CleanupStack {
                 bytes: params.iter().map(Type::size_bytes).sum(),
             });
@@ -3636,7 +3765,7 @@ impl<'a> RoutineLowerer<'a> {
     ) -> Result<(), FrontendError> {
         self.check_indirect_call(name, routine, args, result.is_none())?;
         let target = self.binding(name)?.value.clone();
-        if matches!(routine.abi, Abi::Reentrant) {
+        if routine.abi.stack_arguments() {
             self.push_call_args(args, &routine.params)?;
         }
         let Some((expected, dst)) = result else {
@@ -3653,7 +3782,7 @@ impl<'a> RoutineLowerer<'a> {
         let width = width_for_type(&result_ty)?;
         // As for direct calls: the 65816 cleanup clobbers A, so a reentrant
         // result is parked in X across it.
-        let capture_before_cleanup = matches!(routine.abi, Abi::Reentrant)
+        let capture_before_cleanup = routine.abi.stack_arguments()
             && (matches!(dst, Value::Accumulator | Value::Stack { .. })
                 || (matches!(self.routine.abi, Abi::Reentrant)
                     && matches!(dst, Value::Temp(_) | Value::Local(_) | Value::Param(_))));
@@ -4156,11 +4285,11 @@ fn const_value(value: Const, ty: &Type) -> i64 {
 /// it cannot be called indirectly.
 fn routine_type_of(name: &str, sig: &RoutineSig) -> Result<RoutineType, FrontendError> {
     match sig.abi {
-        Abi::Reentrant => {}
+        Abi::Reentrant | Abi::Stack => {}
         Abi::Internal | Abi::Exported if sig.params.is_empty() => {}
         Abi::Internal | Abi::Exported => {
             return Err(FrontendError::Type(format!(
-                "routine {name} cannot be called through a pointer: its parameters live in its own storage (declare it reentrant)"
+                "routine {name} cannot be called through a pointer: its parameters live in its own storage (declare it stack)"
             )))
         }
         Abi::Far | Abi::Interrupt => {
@@ -4174,7 +4303,7 @@ fn routine_type_of(name: &str, sig: &RoutineSig) -> Result<RoutineType, Frontend
         abi: if sig.params.is_empty() {
             Abi::Internal
         } else {
-            Abi::Reentrant
+            Abi::Stack
         },
         params: sig.params.iter().map(|param| param.ty.clone()).collect(),
         result: match &sig.kind {
@@ -4194,6 +4323,9 @@ enum Place {
         offset: u16,
         index: Option<Value>,
         whole: u16,
+        /// An element of a parallel array waiting for its field: the
+        /// array's length and the (unevaluated) index.
+        pending: Option<(u16, Expr)>,
     },
     /// Inside a local or parameter (constant offsets only).
     Value { base: Value, offset: u16 },
@@ -4206,7 +4338,39 @@ enum Place {
     },
 }
 
+fn parallel_element_error() -> FrontendError {
+    FrontendError::Type(
+        "an element of a parallel array is only reachable through its fields".to_owned(),
+    )
+}
+
 impl Place {
+    fn pending_parallel(&self) -> bool {
+        matches!(
+            self,
+            Place::Global {
+                pending: Some(_),
+                ..
+            }
+        )
+    }
+
+    fn take_pending(&mut self) -> Option<(u16, Expr)> {
+        match self {
+            Place::Global { pending, .. } => pending.take(),
+            _ => None,
+        }
+    }
+
+    /// The width of the dynamic offset: one byte within a global of at most
+    /// 256 bytes.
+    fn offset_width(&self) -> Width {
+        match self {
+            Place::Global { whole, .. } if *whole <= 0x100 => Width::Byte,
+            _ => Width::Word,
+        }
+    }
+
     fn add_offset(&mut self, more: u16) -> Result<(), FrontendError> {
         let offset = match self {
             Place::Global { offset, .. }
@@ -5000,7 +5164,7 @@ mod tests {
         assert!(
             error.contains("interrupt routine irq cannot call parameterized routine serial_write")
         );
-        assert!(error.contains("direct-page parameters are not interrupt-safe"));
+        assert!(error.contains("only reentrant routines are interrupt-safe"));
     }
 
     #[test]
@@ -5021,7 +5185,7 @@ mod tests {
         assert!(
             error.contains("interrupt routine irq cannot call parameterized routine serial_write")
         );
-        assert!(error.contains("direct-page parameters are not interrupt-safe"));
+        assert!(error.contains("only reentrant routines are interrupt-safe"));
     }
 
     #[test]
@@ -5285,7 +5449,7 @@ mod tests {
             end
             ",
         );
-        assert!(error.contains("declare it reentrant"), "{error}");
+        assert!(error.contains("declare it stack"), "{error}");
     }
 
     #[test]
@@ -5318,7 +5482,7 @@ mod tests {
             end
             ",
         );
-        assert!(error.contains("must be reentrant"), "{error}");
+        assert!(error.contains("must be stack or reentrant"), "{error}");
     }
 
     #[test]
