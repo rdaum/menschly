@@ -87,3 +87,33 @@ end
 export reentrant function exec_program(path: near ^u8): u16
     return $fffd
 end
+
+# Everything shares one address space here: copies between a trap's caller
+# and the kernel are plain copies.
+export function machine_caller_bank(): u16
+    return 0
+end
+
+export reentrant procedure machine_copy_in(bank: u16, dst: near ^u8, src: u16, count: u16)
+    var from: near ^u8
+    from = src
+    while count != 0
+        dst^ = from^
+        dst = dst + 1
+        from = from + 1
+        count = count - 1
+    end
+    return
+end
+
+export reentrant procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, count: u16)
+    var to: near ^u8
+    to = dst
+    while count != 0
+        to^ = src^
+        src = src + 1
+        to = to + 1
+        count = count - 1
+    end
+    return
+end

@@ -1656,3 +1656,97 @@ fn window_banks_reject_interrupt_handlers() {
     .expect_err("an interrupt vector cannot point into a window bank");
     assert!(error.contains("needs resident code"), "{error}");
 }
+
+/// A program larger than the old bank-0 program area that reads a file
+/// into its own memory through GEMDOS: its BSS reaches into the program
+/// bank's $8000-$BFFF part, so the read goes through the kernel's copies.
+const BIG_PROGRAM: &str = "
+module Big
+const GEMDOS = $01
+const CCONOUT = $0002
+const FOPEN = $003d
+const FCLOSE = $003e
+const FREAD = $003f
+const FCOUNT = $0102
+
+var big: [40000]u8
+var tail: [64]u8
+
+procedure say(text: near ^u8)
+    var ignored: u16
+    while text^ != 0
+        ignored = trap(GEMDOS, CCONOUT, u16(text^), 0)
+        text = text + 1
+    end
+    return
+end
+
+export function main(): u8
+    var handle: u16
+    var got: u16
+    var i: u16
+    var ignored: u16
+    big[0] = $5a
+    big[39999] = $a5
+    handle = trap(GEMDOS, FOPEN, \"DATA.TXT\", 0)
+    ignored = trap(GEMDOS, FCOUNT, 64, 0)
+    got = trap(GEMDOS, FREAD, handle, addr(tail))
+    ignored = trap(GEMDOS, FCLOSE, handle, 0)
+    i = 0
+    while i != got
+        ignored = trap(GEMDOS, CCONOUT, u16(tail[i]), 0)
+        i = i + 1
+    end
+    if big[0] == $5a and big[39999] == $a5
+        say(\"40000 bytes of BSS\\r\\n\")
+    end
+    return u8(got)
+end
+";
+
+#[test]
+fn hellord_runs_programs_in_their_own_bank() {
+    let modules = mega65::compile_program_modules(&[("big".to_owned(), BIG_PROGRAM.to_owned())])
+        .expect("program should compile");
+    let refs = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect::<Vec<_>>();
+    let program =
+        mega65::build_program(&temp_dir("big-program"), &refs).expect("program should link");
+    let (dir, rom) = hellord_rom("hellord-program-bank");
+    let Some(xemu) = mega65::find_xemu() else {
+        return;
+    };
+    if !mega65::xemu_supports_type_in(&xemu) {
+        eprintln!("skipping: this Xemu build has no -typein option");
+        return;
+    }
+    let data = b"Data read by a big program\r\n";
+    let run = mega65::run_rom_with(
+        &xemu,
+        &dir,
+        &rom,
+        &mega65::XemuOptions {
+            type_in: Some("S:\rBIG\rREBOOT\r".to_owned()),
+            sd_files: vec![
+                ("BIG.PRG".to_owned(), program),
+                ("DATA.TXT".to_owned(), data.to_vec()),
+            ],
+            ..mega65::XemuOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(!run.timed_out, "REBOOT should end the run:\n{}", run.screen);
+    let expected = format!(
+        "S> BIG\nData read by a big program\n40000 bytes of BSS\nExit status ${:02X}\n",
+        data.len()
+    );
+    assert!(run.screen.contains(&expected), "screen:\n{}", run.screen);
+    // The data landed in the program bank's $8000-$BFFF part (linear $48000).
+    let upper = &run.memory[0x48000..0x4c000];
+    assert!(
+        upper.windows(data.len()).any(|window| window == data),
+        "the file's bytes should be in the program bank"
+    );
+}

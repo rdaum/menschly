@@ -554,17 +554,25 @@ file at linear `$20000`; a two-stage loader in the `$E000` ROM window copies
 the kernel to the same addresses in bank 0 and maps the ROMs out:
 
 ```text
-$0002-$00ff   base page: the kernel's, then the running program's
+$0002-$00ff   base page
 $0200-$1fff   free (the console screen is at $0400)
-$2000-...     resident kernel code, data and BSS
-...-$7fff     program area (from the end of the kernel's BSS; up to $c7ff
-              in a kernel without window banks)
+$2000-$7fff   resident kernel code, data and BSS
 $8000-$bfff   window: the mapped window bank's code
+$c000-$c7ff   resident core state (mapping, switch stack)
 $c800-$cfff   16-bit stack, growing down from $cfff
 $d000-$dfff   I/O
-$ff00-$ff1f   trap vector table
-$fffa-$ffff   NMI / RESET / IRQ vectors
+$e000-$febf   startup and the resident core's code
+$fec0-$fedf   the kernel's trap dispatchers (the modules' trap vectors)
+$fee0-$fee5   the kernel's NMI / IRQ handlers
+$ff00-$ff1f   trap vector table (the core's trap entries)
+$fffa-$ffff   NMI / RESET / IRQ vectors (IRQ: the core's entry)
 ```
+
+This is the *split* kernel, the layout of any kernel with window banks
+(which Hellord's is). While a program runs, `$0000-$bfff` show the program
+bank instead (below). A kernel without window banks is one bank-0 image up
+to `$cfff`: its programs load after its BSS, up to `$c7ff`, share its base
+page, and its vectors point straight at its handlers.
 
 ### Window banks
 
@@ -599,7 +607,10 @@ Hellord puts its DOS in bank 1 and the FAT driver and program loader in bank 2.
   (`__m65_acc+3` is never touched). The window stack only changes with
   interrupts off, so interrupt handlers can call into banks too. It is 32
   entries deep; overflowing it stops the machine with a red border.
-- The current bank is `__m65_window` (0 = nothing mapped). Calling into a
+- The current bank is `__m65_window` (0 = nothing mapped).
+- All mapping changes, including the program-bank switches below, go
+  through one routine of the resident core, `__m65_switch`
+  (`mega65::WINDOW_RUNTIME`), with one switch stack. Calling into a
   bank and back costs roughly 250 cycles (about 6 µs at 40 MHz).
 
 ### Machine drivers
@@ -639,10 +650,17 @@ extension is added when the name has none) with `hellord-exec.mensch`.
 Programs are relocatable o65 files ("small" mode, byte-wise relocation)
 built by `mensch-mega65-program` (`mega65::build_program`):
 
+- On a split kernel a program runs in its own bank, linear `$40000`: `MAP`
+  shows `$40000-$4bfff` at CPU `$0000-$bfff` while it runs. The stack
+  (`$c800`), I/O, and the resident core stay shared. The program area is
+  `$0200-$bfff` (47.5 KB), and the program has its own base page.
 - The whole file is read into the program area and relocated in place: text
   and data stay where they were read, BSS follows the data (over the
-  relocation tables), and the base-page segment is placed in the base page
-  the kernel leaves free. BSS and base page are cleared.
+  relocation tables), and the base-page segment goes at `$02` of the
+  program's base page (after the kernel's, on a kernel without window
+  banks). BSS and base page are cleared. The loader writes the program
+  bank through flat pointers (`machine_peek`, `machine_poke`,
+  `machine_copy_out`, `machine_fill` in `mega65-machine.mensch`).
 - The loader calls the exported `main` (else the start of the text) with
   `JSR`, Z = 0 and the kernel's stack; `A` on return is the exit status,
   which `RUN` reports when it is non-zero.
@@ -650,14 +668,25 @@ built by `mensch-mega65-program` (`mega65::build_program`):
   base-page registers and `__m65_enter`/`__m65_leave`), so they never share
   scratch state with the kernel. They reach the kernel only through the trap
   table, so a file with undefined references is rejected.
+- Traps and interrupts switch back to the kernel's bank 0 (through the core's
+  `$FF00` and IRQ entries) and back to the program afterwards. A trap's
+  pointer arguments are program addresses, which the kernel cannot see
+  directly: GEMDOS asks `machine_caller_bank()` who called and copies path
+  strings (`Fopen`, `Dsetpath`), DTAs (`Fsfirst`, `Fsnext`) and data
+  (`Fread`, `Fwrite`, through a 128-byte buffer) between the program and
+  kernel buffers. Trap `$0102` (`Fcount`) sets the byte count for the next
+  `Fread`/`Fwrite`, since the trap ABI has two arguments.
 - Program code gets a base-page budget of `PROGRAM_BASE_PAGE_BUDGET` bytes
-  (plus the 12 runtime bytes); the loader rejects a program whose base-page
+  (plus the 16 runtime bytes); the loader rejects a program whose base-page
   segment does not fit.
 
-The kernel side needs four machine services, provided by the MEGA65
-startup code: `machine_program_start`, `machine_program_end`,
-`machine_base_page_start`, and `machine_call(entry)` to enter the program.
-The x65-alike's machine driver stubs `exec_program` out for now.
+The kernel side needs these machine services, provided by the MEGA65
+runtime (`mega65::WINDOW_RUNTIME` for split kernels, `BANK0_SERVICES`
+otherwise): `machine_program_start`, `machine_program_end`,
+`machine_base_page_start`, `machine_program_bank`, `machine_caller_bank`,
+and `machine_call(entry)` to enter the program. The x65-alike's machine
+driver stubs `exec_program` out and has trivial `machine_caller_bank` and
+copy routines.
 
 Mensch's `addr(global)` builtin gives a near byte pointer to a global
 variable, so buffers such as the DOS sector buffer live in BSS instead of at

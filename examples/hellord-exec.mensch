@@ -2,8 +2,9 @@ module HellordExec
 
 # Loads and runs relocatable o65 programs.
 #
-# The whole file is read into the machine's program area, then relocated in
-# place: its text and data stay where they landed, its BSS goes right after
+# The whole file is read into the machine's program area (in the program's
+# own bank on a split kernel; all accesses go through machine_peek/poke),
+# then relocated in place: its text and data stay where they landed, its BSS goes right after
 # the data (over the relocation tables, once they have been applied), and its
 # base-page segment goes in the base page the kernel leaves free. Then the
 # exported `main` (or the start of the text) is called; its A is the exit
@@ -19,7 +20,12 @@ external reentrant function dos_fclose(handle: u16): u16
 external function machine_program_start(): u16
 external function machine_program_end(): u16
 external function machine_base_page_start(): u16
+external function machine_program_bank(): u16
 external reentrant function machine_call(entry: u16): u16
+external reentrant function machine_peek(bank: u16, address: u16): u8
+external reentrant procedure machine_poke(bank: u16, address: u16, value: u8)
+external reentrant procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, count: u16)
+external reentrant procedure machine_fill(bank: u16, dst: u16, value: u8, count: u16)
 
 const DOS_HANDLE_BASE = 6
 const DOS_HANDLE_LIMIT = 10
@@ -44,6 +50,7 @@ const SEGMENT_BSS = 4
 const SEGMENT_ZERO = 5
 const SKIP_STEP = 255
 const SKIP_BYTES = 254
+const CHUNK_BYTES = 256
 
 var image: u16
 var cursor: u16
@@ -51,18 +58,15 @@ var text_delta: u16
 var data_delta: u16
 var bss_delta: u16
 var zero_delta: u16
-var probe: [1]u8
+var bank: u16
+var chunk: [256]u8
 
 reentrant function peek(address: u16): u8
-    var p: near ^u8
-    p = address
-    return p^
+    return machine_peek(bank, address)
 end
 
 reentrant procedure poke(address: u16, value: u8)
-    var p: near ^u8
-    p = address
-    p^ = value
+    machine_poke(bank, address, value)
     return
 end
 
@@ -166,22 +170,37 @@ reentrant function relocate(start: u16): u8
 end
 
 reentrant procedure clear(start: u16, count: u16)
-    while count != 0
-        poke(start, 0)
-        start = start + 1
-        count = count - 1
-    end
+    machine_fill(bank, start, 0, count)
     return
+end
+
+# Reads the open file into the program area from `image`. Returns its
+# length, or EXEC_ERR_TOO_LARGE when it does not fit before `area_end`.
+reentrant function load_file(handle: u16, area_end: u16): u16
+    var length: u16
+    var got: u16
+    length = 0
+    got = CHUNK_BYTES
+    while got == CHUNK_BYTES
+        got = dos_fread(handle, CHUNK_BYTES, addr(chunk))
+        if got > CHUNK_BYTES
+            return EXEC_ERR_FORMAT
+        end
+        if got > area_end - image - length
+            return EXEC_ERR_TOO_LARGE
+        end
+        machine_copy_out(bank, image + length, addr(chunk), got)
+        length = length + got
+    end
+    return length
 end
 
 # Loads and runs the program in file `path` on the current drive. Returns its
 # exit status (0-255), or one of the EXEC_ERR_* codes.
 export reentrant function exec_program(path: near ^u8): u16
     var handle: u16
-    var buffer: near ^u8
     var area_end: u16
     var length: u16
-    var extra: u16
     var options: u8
     var text_start: u16
     var data_start: u16
@@ -196,16 +215,15 @@ export reentrant function exec_program(path: near ^u8): u16
     var is_main: u8
     image = machine_program_start()
     area_end = machine_program_end()
+    bank = machine_program_bank()
     handle = dos_fopen(path)
     if handle < DOS_HANDLE_BASE or handle >= DOS_HANDLE_LIMIT
         return EXEC_ERR_NOT_FOUND
     end
-    buffer = image
-    length = dos_fread(handle, area_end - image, buffer)
-    extra = dos_fread(handle, 1, addr(probe))
+    length = load_file(handle, area_end)
     handle = dos_fclose(handle)
-    if extra != 0
-        return EXEC_ERR_TOO_LARGE
+    if length >= EXEC_ERR_FORMAT
+        return length
     end
     if length < HEADER_BYTES
         return EXEC_ERR_FORMAT

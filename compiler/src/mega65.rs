@@ -15,8 +15,6 @@
 //! $0200-$1fff   free low RAM (screen, buffers, test output)
 //! $2000-...     kernel image: code, data, then BSS
 //! ...-$c7ff     program area for loaded o65 programs (see `build_program`)
-//!               ($7fff when the kernel has window banks, below)
-//! $8000-$bfff   window: the mapped window bank's code (windowed kernels)
 //! $c800-$cfff   16-bit stack, growing down from $cfff
 //! $d000-$dfff   I/O
 //! $e000-$feff   stage-1 loader (ROM window), copied to RAM by stage 2
@@ -37,6 +35,12 @@
 //! window there; their data and strings stay in the resident image. Calls
 //! into a bank go through resident stubs and [`WINDOW_RUNTIME`], so any
 //! module can call any other (see `lower_45gs02::place_in_window`).
+//!
+//! A kernel with window banks is a *split* kernel: its resident image ends
+//! below the window at `$8000`, a small resident core in `$C000-$C7FF` and
+//! `$E000-$FEFF` handles every mapping change, and programs run in a bank
+//! of their own (linear `$40000`, seen at `$0000-$BFFF`), entering the
+//! kernel through the core's trap and IRQ entries. See `ABI.md`.
 
 pub use crate::lower_45gs02::WINDOW_BANKS;
 
@@ -132,6 +136,66 @@ __m65_leave:
 "#;
 
 /// The runtime's math routines, linked only into images that call them.
+/// Program services for a kernel without window banks: programs load into
+/// bank-0 RAM between the end of the kernel's BSS and the stack, and share
+/// the base page with the kernel.
+pub const BANK0_SERVICES: &str = r#".setcpu "45GS02"
+.importzp __m65_ptr, __m65_fp
+.import __m65_enter, __m65_leave
+.import __BSS_RUN__, __BSS_SIZE__, __ZEROPAGE_RUN__, __ZEROPAGE_SIZE__
+.export machine_program_start, machine_program_end, machine_base_page_start
+.export machine_call, machine_caller_bank, machine_program_bank, __m65_mode_init
+
+__m65_program_end = $c800
+
+.segment "CODE"
+__m65_mode_init:
+	rts
+
+; Everything runs in bank 0.
+machine_caller_bank:
+machine_program_bank:
+	lda #$00
+	tax
+	rts
+
+; Machine services for the program loader (hellord-exec.mensch).
+; First byte of free RAM after the kernel.
+machine_program_start:
+	lda #<(__BSS_RUN__ + __BSS_SIZE__)
+	ldx #>(__BSS_RUN__ + __BSS_SIZE__)
+	rts
+
+; End (exclusive) of the program area.
+machine_program_end:
+	lda #<__m65_program_end
+	ldx #>__m65_program_end
+	rts
+
+; First base-page byte the kernel does not use.
+machine_base_page_start:
+	lda #<(__ZEROPAGE_RUN__ + __ZEROPAGE_SIZE__)
+	ldx #$00
+	rts
+
+; reentrant function machine_call(entry: u16): u16 -- calls `entry` with
+; Z = 0 and returns its A/X. The callee keeps its own runtime registers.
+machine_call:
+	jsr __m65_enter
+	ldy #$05            ; the argument, above the saved fp and return address
+	lda (__m65_fp),y
+	sta __m65_ptr
+	iny
+	lda (__m65_fp),y
+	sta __m65_ptr+1
+	jsr @call
+	jsr __m65_leave
+	rtn #$02
+@call:
+	jmp (__m65_ptr)
+
+"#;
+
 pub const MATH_RUNTIME: &str = r#".setcpu "45GS02"
 .importzp __m65_acc, __m65_farp, __m65_arg
 .export __m65_mul, __m65_divu, __m65_divs
@@ -309,84 +373,172 @@ __m65_divide:
 	rts
 "#;
 
-/// Window-bank calls (see the module docs and `lower_45gs02::place_in_window`),
-/// linked into kernels that have window banks. A stub for routine `foo`
-/// in bank `n` is `jsr __m65_farcall / .byte n / .addr __window_foo`.
+/// The resident core of a split kernel (one with window banks): memory
+/// mapping, calls into window banks, trap and interrupt entry, and running
+/// programs in their own bank. It lives in the always-visible `$C000-$C7FF`
+/// (state) and `$E000-$FEFF` (code), linked into kernels with window banks.
+///
+/// Two mapping registers describe the CPU's view: the *lower* bank shown at
+/// `$0000-$7FFF` (0 = the kernel's bank 0, 1 = the program bank at linear
+/// `$40000`) and the *window* shown at `$8000-$BFFF` (0 = none, 1-4 = kernel
+/// window banks, 5 = the program bank's `$8000-$BFFF`). Every switch goes
+/// through one routine, `__m65_switch`, which keeps the caller's flags,
+/// return address and mapping on a resident stack, so the target sees the
+/// stack a direct call would give it, and restores them when it returns.
+///
+/// - Window stubs (`jsr __m65_farcall / .byte n / .addr body`) select window
+///   `n` and keep the lower bank.
+/// - The trap table at `$FF00` points at `__m65_trap_N`, which select the
+///   kernel's lower bank and call the kernel's dispatcher for family N
+///   (the modules' trap vectors, linked at `$FEC0`).
+/// - The IRQ vector points at `__m65_irq`, which maps the kernel in, runs
+///   the kernel's handler (the modules' IRQ vector, linked at `$FEE4`) and
+///   maps the interrupted code back.
+/// - `machine_call(entry)` maps the program bank in (lower bank 1, window 5)
+///   and calls `entry`.
 pub const WINDOW_RUNTIME: &str = r#".setcpu "45GS02"
-.importzp __m65_ptr
-.export __m65_farcall, __m65_map_window, __m65_window
+.importzp __m65_ptr, __m65_fp
+.import __m65_enter, __m65_leave
+.export __m65_farcall, __m65_mode_init, __m65_lower, __m65_window
+.export machine_program_start, machine_program_end, machine_base_page_start
+.export machine_call, machine_caller_bank, machine_program_bank
 
-; Nesting depth of calls into window banks.
-WINDOW_DEPTH = 32
+; Nesting depth of mapping switches (window calls, traps, program calls).
+SWITCH_DEPTH = 32
+KERNEL_TRAPS = $fec0
+KERNEL_IRQ = $fee4
+PROGRAM_LOWER = 1
+PROGRAM_WINDOW = 5
 
-.segment "BSS"
-__m65_window: .res 1                    ; window bank now mapped (0 = none)
-__m65_window_depth: .res 1
-; One entry per call in progress: the caller's flags, return address and
-; window bank.
-__m65_window_p: .res WINDOW_DEPTH
-__m65_window_ret_lo: .res WINDOW_DEPTH
-__m65_window_ret_hi: .res WINDOW_DEPTH
-__m65_window_prev: .res WINDOW_DEPTH
-; The callee's results, while the caller's bank is mapped back.
-__m65_window_a: .res 1
-__m65_window_x: .res 1
-__m65_window_y: .res 1
+.segment "HIBSS"
+__m65_lower: .res 1                     ; lower bank now mapped
+__m65_window: .res 1                    ; window bank now mapped
+__m65_depth: .res 1
+__m65_next_lower: .res 1                ; the switch being made
+__m65_next_window: .res 1
+__m65_next_lo: .res 1
+__m65_next_hi: .res 1
+; One entry per switch in progress: the caller's flags, return address and
+; mapping.
+__m65_switch_p: .res SWITCH_DEPTH
+__m65_switch_lo: .res SWITCH_DEPTH
+__m65_switch_hi: .res SWITCH_DEPTH
+__m65_switch_window: .res SWITCH_DEPTH
+__m65_switch_lower: .res SWITCH_DEPTH
+; The callee's results, while the caller's mapping comes back.
+__m65_switch_a: .res 1
+__m65_switch_x: .res 1
+__m65_switch_y: .res 1
 
-.segment "CODE"
-; MAP values for the upper half: bank n runs at $8000-$bfff from linear
-; $30000 + (n - 1) * $4000 (offset = linear - $8000; blocks 4 and 5).
-__m65_window_map_y: .byte $00, $80, $c0, $00, $40
-__m65_window_map_z: .byte $00, $32, $32, $33, $33
+.segment "HICODE"
+; MAP values. Lower bank n: A, X. Window bank n: Y, Z (bank n of 1-4 runs
+; from linear $30000 + (n - 1) * $4000; offset = linear - $8000).
+__m65_lower_map_a: .byte $00, $00
+__m65_lower_map_x: .byte $00, $f4       ; blocks 0-3 at linear $40000
+__m65_window_map_y: .byte $00, $80, $c0, $00, $40, $00
+__m65_window_map_z: .byte $00, $32, $32, $33, $33, $34
 
-; Maps window bank A (0 = none) into $8000-$bfff. Clobbers A/X/Y; Z = 0.
-__m65_map_window:
-	tax
+; Applies __m65_lower and __m65_window. Clobbers A/X/Y; Z = 0.
+__m65_apply_map:
+	ldx __m65_window
 	ldy __m65_window_map_y,x
 	ldz __m65_window_map_z,x
-	lda #$00            ; lower half: nothing mapped
-	ldx #$00
+	ldx __m65_lower
+	lda __m65_lower_map_x,x
+	pha
+	lda __m65_lower_map_a,x
+	plx
 	map
 	eom
 	ldz #$00
 	rts
 
-; Called by a stub, with the stub's return address (pointing just before
-; its bank and target) on top of the caller's, and the caller's arguments
-; below. Moves the caller's return address to the window stack, so the
-; target sees exactly the stack a direct call would give it, and arranges
-; for the target to return to @back, which maps the caller's bank again.
-; The window stack is only touched with interrupts off, so handlers can make
-; window calls too.
+__m65_mode_init:
+	lda #$00
+	sta __m65_lower
+	sta __m65_window
+	sta __m65_depth
+	jmp __m65_apply_map
+
+; Window stub entry: the stub's return address points just before its bank
+; and target.
 __m65_farcall:
 	php
 	sei
-	ldx __m65_window_depth
 	pla
-	sta __m65_window_p,x
+	sta __m65_switch_a      ; (scratch: interrupts are off)
 	pla
-	sta __m65_ptr
+	sta __m65_ptr           ; kernel code only: this is the kernel's base page
 	pla
 	sta __m65_ptr+1
-	pla
-	sta __m65_window_ret_lo,x
-	pla
-	sta __m65_window_ret_hi,x
+	lda __m65_switch_a
+	pha
+	ldy #$01
+	lda (__m65_ptr),y
+	sta __m65_next_window
+	iny
+	lda (__m65_ptr),y
+	sta __m65_next_lo
+	iny
+	lda (__m65_ptr),y
+	sta __m65_next_hi
+	lda __m65_lower
+	sta __m65_next_lower
+	jmp __m65_switch
+
+; Trap entry for family X/2: the kernel's lower bank, the window kept.
+__m65_trapcall:
+	php
+	sei
+	lda KERNEL_TRAPS,x
+	sta __m65_next_lo
+	lda KERNEL_TRAPS+1,x
+	sta __m65_next_hi
+	lda #$00
+	sta __m65_next_lower
 	lda __m65_window
-	sta __m65_window_prev,x
+	sta __m65_next_window
+	jmp __m65_switch
+
+; Calls the program entry point in __m65_ptr with the program bank mapped.
+__m65_usercall:
+	php
+	sei
+	lda __m65_ptr
+	sta __m65_next_lo
+	lda __m65_ptr+1
+	sta __m65_next_hi
+	lda #PROGRAM_LOWER
+	sta __m65_next_lower
+	lda #PROGRAM_WINDOW
+	sta __m65_next_window
+	jmp __m65_switch
+
+; With interrupts off and the caller's flags on top of its return address
+; (and its arguments below), switches to __m65_next_* and enters
+; __m65_next_lo/hi, which returns to @back.
+__m65_switch:
+	ldx __m65_depth
+	pla
+	sta __m65_switch_p,x
+	pla
+	sta __m65_switch_lo,x
+	pla
+	sta __m65_switch_hi,x
+	lda __m65_window
+	sta __m65_switch_window,x
+	lda __m65_lower
+	sta __m65_switch_lower,x
 	inx
-	cpx #WINDOW_DEPTH
+	cpx #SWITCH_DEPTH
 	bcs @overflow
-	stx __m65_window_depth
+	stx __m65_depth
 	lda #>(@back - 1)   ; the target returns to @back
 	pha
 	lda #<(@back - 1)
 	pha
-	ldy #$03            ; RTS into the target: push target - 1
-	lda (__m65_ptr),y
-	tax
-	dey
-	lda (__m65_ptr),y
+	ldx __m65_next_hi   ; RTS into the target: push target - 1
+	lda __m65_next_lo
 	bne @low
 	dex
 @low:
@@ -394,43 +546,141 @@ __m65_farcall:
 	sbc #$01
 	phx
 	pha
-	dey
-	lda (__m65_ptr),y
+	lda __m65_next_lower
+	sta __m65_lower
+	lda __m65_next_window
 	sta __m65_window
-	jsr __m65_map_window
-	ldx __m65_window_depth
-	lda __m65_window_p-1,x
+	jsr __m65_apply_map
+	ldx __m65_depth
+	lda __m65_switch_p-1,x
 	pha
 	plp                 ; the caller's interrupt state
 	rts
 @back:
 	sei
-	sta __m65_window_a
-	stx __m65_window_x
-	sty __m65_window_y
-	ldx __m65_window_depth
+	sta __m65_switch_a
+	stx __m65_switch_x
+	sty __m65_switch_y
+	ldx __m65_depth
 	dex
-	stx __m65_window_depth
-	lda __m65_window_prev,x
+	stx __m65_depth
+	lda __m65_switch_window,x
 	sta __m65_window
-	jsr __m65_map_window
-	ldx __m65_window_depth
-	lda __m65_window_ret_hi,x
+	lda __m65_switch_lower,x
+	sta __m65_lower
+	jsr __m65_apply_map
+	ldx __m65_depth
+	lda __m65_switch_hi,x
 	pha
-	lda __m65_window_ret_lo,x
+	lda __m65_switch_lo,x
 	pha
-	lda __m65_window_p,x
+	lda __m65_switch_p,x
 	pha
-	lda __m65_window_a
-	ldx __m65_window_x
-	ldy __m65_window_y
+	lda __m65_switch_a
+	ldx __m65_switch_x
+	ldy __m65_switch_y
 	plp
 	rts
-@overflow:              ; window calls nested too deeply: stop, red border
+@overflow:              ; switches nested too deeply: stop, red border
 	lda #$02
 	sta $d020
 @halt:
 	bra @halt
+
+; IRQ entry: maps the kernel in around its handler. The handler returns
+; with RTI into @restore through a frame pushed here.
+__m65_irq:
+	pha
+	phx
+	phy
+	phz
+	lda __m65_lower
+	pha
+	lda #$00
+	sta __m65_lower
+	jsr __m65_apply_map
+	lda #>@restore
+	pha
+	lda #<@restore
+	pha
+	php
+	jmp (KERNEL_IRQ)
+@restore:
+	pla
+	sta __m65_lower
+	jsr __m65_apply_map
+	plz
+	ply
+	plx
+	pla
+	rti
+
+.macro trap_entry family
+	.ident(.sprintf("__m65_trap_%d", family)):
+	ldx #family * 2
+	jmp __m65_trapcall
+.endmacro
+.repeat 16, family
+	trap_entry family
+.endrepeat
+
+.segment "M65_TRAPS"
+.repeat 16, family
+	.addr .ident(.sprintf("__m65_trap_%d", family))
+.endrepeat
+
+.segment "M65_IRQ"
+	.addr __m65_irq
+
+.segment "CODE"
+; Machine services for the program loader (hellord-exec.mensch). Programs
+; run in their own bank: $0200-$bfff of linear $40000, with their own base
+; page (from $02).
+machine_program_start:
+	lda #$00
+	ldx #$02
+	rts
+
+machine_program_end:
+	lda #$00
+	ldx #$c0
+	rts
+
+machine_base_page_start:
+	lda #$02
+	ldx #$00
+	rts
+
+machine_program_bank:
+	lda #PROGRAM_LOWER
+	ldx #$00
+	rts
+
+; The lower bank of whoever made the innermost switch: the program (1) when
+; called from a trap dispatcher serving a program, else the kernel (0).
+machine_caller_bank:
+	ldx __m65_depth
+	beq @kernel
+	lda __m65_switch_lower-1,x
+	ldx #$00
+	rts
+@kernel:
+	lda #$00
+	rts
+
+; reentrant function machine_call(entry: u16): u16 -- runs the program's
+; entry point in the program bank and returns its A/X.
+machine_call:
+	jsr __m65_enter
+	ldy #$05            ; the argument, above the saved fp and return address
+	lda (__m65_fp),y
+	sta __m65_ptr
+	iny
+	lda (__m65_fp),y
+	sta __m65_ptr+1
+	jsr __m65_usercall
+	jsr __m65_leave
+	rtn #$02
 "#;
 
 /// Startup code: the two-stage loader, base-page and BSS clearing,
@@ -440,12 +690,8 @@ pub const CRT0: &str = r#".setcpu "45GS02"
 .importzp __m65_acc, __m65_ptr, __m65_farp, __m65_fp, __m65_arg
 .import __m65_enter, __m65_leave
 .import main
-.import __BSS_RUN__, __BSS_SIZE__, __ZEROPAGE_RUN__, __ZEROPAGE_SIZE__
-; Programs load between the end of the kernel's BSS and this address (set by
-; the linker configuration: below the window, or below the stack).
-.import __m65_program_end
-.export machine_program_start, machine_program_end, machine_base_page_start
-.export machine_call
+.import __BSS_RUN__, __BSS_SIZE__
+.import __m65_mode_init
 
 __m65_stack_top = $cfff
 __m65_image_start = $2000
@@ -549,48 +795,13 @@ __m65_stage2:
 	dew __m65_acc
 	bra @clear_bss
 @bss_done:
+	jsr __m65_mode_init
 	jsr main
 	sta $d6cf           ; exit status (Xemu -testing)
 	lda #$42
 	sta $d6cf           ; request exit
 @hang:
 	bra @hang
-
-.segment "CODE"
-; Machine services for the program loader (hellord-exec.mensch).
-; First byte of free RAM after the kernel.
-machine_program_start:
-	lda #<(__BSS_RUN__ + __BSS_SIZE__)
-	ldx #>(__BSS_RUN__ + __BSS_SIZE__)
-	rts
-
-; End (exclusive) of the program area.
-machine_program_end:
-	lda #<__m65_program_end
-	ldx #>__m65_program_end
-	rts
-
-; First base-page byte the kernel does not use.
-machine_base_page_start:
-	lda #<(__ZEROPAGE_RUN__ + __ZEROPAGE_SIZE__)
-	ldx #$00
-	rts
-
-; reentrant function machine_call(entry: u16): u16 -- calls `entry` with
-; Z = 0 and returns its A/X. The callee keeps its own runtime registers.
-machine_call:
-	jsr __m65_enter
-	ldy #$05            ; the argument, above the saved fp and return address
-	lda (__m65_fp),y
-	sta __m65_ptr
-	iny
-	lda (__m65_fp),y
-	sta __m65_ptr+1
-	jsr @call
-	jsr __m65_leave
-	rtn #$02
-@call:
-	jmp (__m65_ptr)
 
 .segment "VECTOR_RESET"
 	.addr __m65_reset
@@ -601,19 +812,71 @@ machine_call:
 /// end below the window at `$8000`; otherwise it may run up to the I/O area.
 /// The four window banks fill the second half of the ROM file.
 pub fn linker_config(windowed: bool) -> String {
-    let (image_size, gap, program_end) = if windowed {
-        (
-            "$6000",
-            "  GAP:   start = $8000,  size = $5000, file = %O, fill = yes;\n",
-            "$8000",
-        )
-    } else {
-        ("$b000", "", "$c800")
-    };
+    if windowed {
+        return windowed_linker_config();
+    }
     LINKER_CONFIG_TEMPLATE
-        .replace("{image_size}", image_size)
-        .replace("{gap}", gap)
-        .replace("{program_end}", program_end)
+        .replace("{image_size}", "$b000")
+        .replace("{gap}", "")
+}
+
+/// The split kernel's configuration: the resident image below the window,
+/// the resident core's state at `$C000` and code in the `$E000` area, the
+/// modules' trap and IRQ vectors in a kernel table at `$FEC0` (the CPU's
+/// point at the core's entry routines), and the four window banks in the
+/// second half of the ROM file.
+fn windowed_linker_config() -> String {
+    let mut traps = String::new();
+    for family in 0..16 {
+        traps.push_str(&format!(
+            "  VECTOR_TRAP_{family:02X}: load = KTRAP, type = ro, optional = yes, offset = ${:04x};\n",
+            family * 2
+        ));
+    }
+    format!(
+        r#"MEMORY {{
+  ZP:    start = $0002,  size = $00fe, type = rw;
+  LOW:   start = $0000,  size = $2000, file = %O, fill = yes;
+  IMAGE: start = $2000,  size = $6000, file = %O, fill = yes;
+  GAP:   start = $8000,  size = $5000, file = %O, fill = yes;
+  HIRAM: start = $c000,  size = $0800, type = rw;
+  IO:    start = $d000,  size = $1000, file = %O, fill = yes;
+  ROM:   start = $e000,  size = $1ec0, file = %O, fill = yes;
+  KTRAP: start = $fec0,  size = $0020, file = %O, fill = yes;
+  KVEC:  start = $fee0,  size = $0006, file = %O, fill = yes;
+  KTAIL: start = $fee6,  size = $001a, file = %O, fill = yes;
+  TRAP:  start = $ff00,  size = $0020, file = %O, fill = yes;
+  TAIL:  start = $ff20,  size = $00da, file = %O, fill = yes;
+  VEC:   start = $fffa,  size = $0006, file = %O, fill = yes;
+  WIN1:  start = $8000,  size = $4000, file = %O, fill = yes;
+  WIN2:  start = $8000,  size = $4000, file = %O, fill = yes;
+  WIN3:  start = $8000,  size = $4000, file = %O, fill = yes;
+  WIN4:  start = $8000,  size = $4000, file = %O, fill = yes;
+}}
+SEGMENTS {{
+  ZEROPAGE:     load = ZP,    type = zp, define = yes;
+  KERNEL_START: load = IMAGE, type = ro;
+  LOWCODE:      load = IMAGE, type = ro, optional = yes;
+  CODE:         load = IMAGE, type = ro;
+  RODATA:       load = IMAGE, type = ro, optional = yes;
+  MENSCH_META:  load = IMAGE, type = ro, optional = yes;
+  BANK1:        load = IMAGE, type = ro, optional = yes;
+  BSS:          load = IMAGE, type = bss, define = yes;
+  HIBSS:        load = HIRAM, type = bss;
+  STARTUP:      load = ROM,   type = ro;
+  HICODE:       load = ROM,   type = ro;
+{traps}  VECTOR_NMI:   load = KVEC,  type = ro, optional = yes, offset = $0000;
+  VECTOR_IRQ:   load = KVEC,  type = ro, optional = yes, offset = $0004;
+  M65_TRAPS:    load = TRAP,  type = ro;
+  VECTOR_RESET: load = VEC,   type = ro, offset = $0002;
+  M65_IRQ:      load = VEC,   type = ro, offset = $0004;
+  WINDOW1:      load = WIN1,  type = ro, optional = yes;
+  WINDOW2:      load = WIN2,  type = ro, optional = yes;
+  WINDOW3:      load = WIN3,  type = ro, optional = yes;
+  WINDOW4:      load = WIN4,  type = ro, optional = yes;
+}}
+"#
+    )
 }
 
 const LINKER_CONFIG_TEMPLATE: &str = r#"MEMORY {
@@ -625,10 +888,7 @@ const LINKER_CONFIG_TEMPLATE: &str = r#"MEMORY {
   TRAP:  start = $ff00,  size = $0020, file = %O, fill = yes;
   TAIL:  start = $ff20,  size = $00da, file = %O, fill = yes;
   VEC:   start = $fffa,  size = $0006, file = %O, fill = yes;
-  WIN1:  start = $8000,  size = $4000, file = %O, fill = yes;
-  WIN2:  start = $8000,  size = $4000, file = %O, fill = yes;
-  WIN3:  start = $8000,  size = $4000, file = %O, fill = yes;
-  WIN4:  start = $8000,  size = $4000, file = %O, fill = yes;
+  HIGH:  start = $10000, size = $10000, file = %O, fill = yes;
 }
 SEGMENTS {
   ZEROPAGE:     load = ZP,    type = zp, define = yes;
@@ -659,13 +919,6 @@ SEGMENTS {
   VECTOR_NMI:   load = VEC, type = ro, optional = yes, offset = $0000;
   VECTOR_RESET: load = VEC, type = ro, offset = $0002;
   VECTOR_IRQ:   load = VEC, type = ro, optional = yes, offset = $0004;
-  WINDOW1:      load = WIN1, type = ro, optional = yes;
-  WINDOW2:      load = WIN2, type = ro, optional = yes;
-  WINDOW3:      load = WIN3, type = ro, optional = yes;
-  WINDOW4:      load = WIN4, type = ro, optional = yes;
-}
-SYMBOLS {
-  __m65_program_end: type = export, value = {program_end};
 }
 "#;
 
@@ -759,9 +1012,11 @@ pub fn build_rom(dir: &Path, modules: &[(&str, &str)]) -> Result<Vec<u8>, String
         .iter()
         .any(|(_, asm)| asm.contains(crate::lower_45gs02::FARCALL_ROUTINE));
     let mut runtime = vec![("runtime", RUNTIME), ("crt0", CRT0)];
-    if windowed {
-        runtime.push(("window", WINDOW_RUNTIME));
-    }
+    runtime.push(if windowed {
+        ("window", WINDOW_RUNTIME)
+    } else {
+        ("bank0", BANK0_SERVICES)
+    });
     let image = link(dir, "kernel", &linker_config(windowed), &runtime, modules)?;
     if image.len() != ROM_SIZE {
         return Err(format!(

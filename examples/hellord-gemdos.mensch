@@ -17,6 +17,11 @@ external reentrant function dos_fopen(path: near ^u8): u16
 external reentrant function dos_fread(handle: u16, count: u16, buffer: near ^u8): u16
 external reentrant function dos_fwrite(handle: u16, count: u16, buffer: near ^u8): u16
 external reentrant function dos_fclose(handle: u16): u16
+# Where a trap's caller lives (0 = the kernel), and copies to and from it:
+# a program may run in a bank of its own (see the machine modules).
+external function machine_caller_bank(): u16
+external reentrant procedure machine_copy_in(bank: u16, dst: near ^u8, src: u16, count: u16)
+external reentrant procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, count: u16)
 
 const DEVICE_KIND_CHAR = $0001
 const DEVICE_FLAG_READ = $0001
@@ -40,6 +45,13 @@ const GEMDOS_FSFIRST = $004e
 const GEMDOS_FSNEXT = $004f
 const GEMDOS_GET_STDDEV = $0100
 const GEMDOS_SET_STDDEV = $0101
+# Sets the byte count for the next Fread/Fwrite (the trap ABI has two
+# arguments; Fread and Fwrite take handle and buffer).
+const GEMDOS_FCOUNT = $0102
+const DOS_ERR_FIRST = $ff00
+const PATH_BYTES = 64
+const DTA_BYTES = 16
+const CHUNK_BYTES = 128
 
 var gemdos_initialized: u8
 var gemdos_stdin_device: u16
@@ -47,6 +59,10 @@ var gemdos_stdout_device: u16
 var gemdos_stderr_device: u16
 var gemdos_arg_byte: u8
 var gemdos_arg_word: u16
+# Kernel copies of a program's arguments.
+var gemdos_path: [64]u8
+var gemdos_dta: [16]u8
+var gemdos_chunk: [128]u8
 
 export reentrant function gemdos_cconis(): u16
     return trap(GEMDOS_FAMILY, GEMDOS_CCONIS, 0, 0)
@@ -235,8 +251,97 @@ reentrant function gemdos_impl_fclose(handle: u16): u16
     return dos_fclose(handle)
 end
 
+# Copies the caller's NUL-terminated path into gemdos_path.
+reentrant function gemdos_caller_path(caller: u16, path: u16): near ^u8
+    machine_copy_in(caller, addr(gemdos_path), path, PATH_BYTES)
+    gemdos_path[PATH_BYTES - 1] = 0
+    return addr(gemdos_path)
+end
+
+# Fread for a caller in another bank: reads through gemdos_chunk.
+reentrant function gemdos_caller_fread(caller: u16, handle: u16, buffer: u16): u16
+    var total: u16
+    var want: u16
+    var got: u16
+    total = 0
+    while total != gemdos_arg_word
+        want = gemdos_arg_word - total
+        if want > CHUNK_BYTES
+            want = CHUNK_BYTES
+        end
+        got = dos_fread(handle, want, addr(gemdos_chunk))
+        if got >= DOS_ERR_FIRST
+            return got
+        end
+        machine_copy_out(caller, buffer + total, addr(gemdos_chunk), got)
+        total = total + got
+        if got != want
+            return total
+        end
+    end
+    return total
+end
+
+# Fwrite for a caller in another bank: writes through gemdos_chunk.
+reentrant function gemdos_caller_fwrite(caller: u16, handle: u16, buffer: u16): u16
+    var total: u16
+    var want: u16
+    var put: u16
+    total = 0
+    while total != gemdos_arg_word
+        want = gemdos_arg_word - total
+        if want > CHUNK_BYTES
+            want = CHUNK_BYTES
+        end
+        machine_copy_in(caller, addr(gemdos_chunk), buffer + total, want)
+        put = dos_fwrite(handle, want, addr(gemdos_chunk))
+        if put >= DOS_ERR_FIRST
+            return put
+        end
+        total = total + put
+        if put != want
+            return total
+        end
+    end
+    return total
+end
+
+# Fsfirst/Fsnext through gemdos_dta, for callers in another bank.
+reentrant function gemdos_caller_find(caller: u16, first: u8, dta: u16): u16
+    var status: u16
+    machine_copy_in(caller, addr(gemdos_dta), dta, DTA_BYTES)
+    if first != 0
+        status = gemdos_impl_fsfirst(addr(gemdos_path), addr(gemdos_dta))
+    else
+        status = gemdos_impl_fsnext(addr(gemdos_dta))
+    end
+    machine_copy_out(caller, dta, addr(gemdos_dta), DTA_BYTES)
+    return status
+end
+
 export reentrant function gemdos_trap_dispatch(call: u16, arg0: u16, arg1: u16): u16
-    if call == GEMDOS_CCONIS
+    var caller: u16
+    caller = machine_caller_bank()
+    if caller != 0
+        if call == GEMDOS_DSETPATH
+            return gemdos_impl_dsetpath(gemdos_caller_path(caller, arg0))
+        elsif call == GEMDOS_FOPEN
+            return gemdos_impl_fopen(gemdos_caller_path(caller, arg0), arg1)
+        elsif call == GEMDOS_FREAD
+            return gemdos_caller_fread(caller, arg0, arg1)
+        elsif call == GEMDOS_FWRITE
+            return gemdos_caller_fwrite(caller, arg0, arg1)
+        elsif call == GEMDOS_FSFIRST
+            gemdos_path[0] = 0
+            return gemdos_caller_find(caller, 1, arg1)
+        elsif call == GEMDOS_FSNEXT
+            return gemdos_caller_find(caller, 0, arg0)
+        end
+    end
+    if call == GEMDOS_FCOUNT
+        gemdos_arg_word = arg0
+        return 0
+    elsif call == GEMDOS_CCONIS
         return gemdos_impl_cconis()
     elsif call == GEMDOS_CCONIN
         return u16(gemdos_impl_cconin())

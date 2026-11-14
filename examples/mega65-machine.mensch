@@ -357,3 +357,70 @@ export procedure machine_reboot()
     fpga_reconfigure = $42
     return
 end
+
+# Memory in other banks. A split kernel (one with window banks, see
+# mega65.rs) runs programs in their own bank: bank 1 is linear $40000, seen
+# by the program at $0000-$BFFF; $C000 and up is shared with the kernel.
+# Bank 0 is the kernel's own view. The kernel reaches a program's memory
+# through flat 32-bit pointers.
+const PROGRAM_LINEAR = $40000
+const PROGRAM_TOP = $c000
+
+# The flat address of `address` as seen from `bank`.
+export reentrant function machine_far_address(bank: u16, address: u16): u32
+    if bank == 0 or address >= PROGRAM_TOP
+        return u32(address)
+    end
+    return PROGRAM_LINEAR + u32(address)
+end
+
+export reentrant function machine_peek(bank: u16, address: u16): u8
+    var p: far ^u8
+    p = machine_far_address(bank, address)
+    return p^
+end
+
+export reentrant procedure machine_poke(bank: u16, address: u16, value: u8)
+    var p: far ^u8
+    p = machine_far_address(bank, address)
+    p^ = value
+    return
+end
+
+# Copies `count` bytes from `src` in `bank` to kernel memory at `dst`.
+export reentrant procedure machine_copy_in(bank: u16, dst: near ^u8, src: u16, count: u16)
+    var from: far ^u8
+    from = machine_far_address(bank, src)
+    while count != 0
+        dst^ = from^
+        dst = dst + 1
+        from = from + 1
+        count = count - 1
+    end
+    return
+end
+
+# Copies `count` bytes from kernel memory at `src` to `dst` in `bank`.
+export reentrant procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, count: u16)
+    var to: far ^u8
+    to = machine_far_address(bank, dst)
+    while count != 0
+        to^ = src^
+        src = src + 1
+        to = to + 1
+        count = count - 1
+    end
+    return
+end
+
+# Sets `count` bytes at `dst` in `bank` to `value`.
+export reentrant procedure machine_fill(bank: u16, dst: u16, value: u8, count: u16)
+    var to: far ^u8
+    to = machine_far_address(bank, dst)
+    while count != 0
+        to^ = value
+        to = to + 1
+        count = count - 1
+    end
+    return
+end
