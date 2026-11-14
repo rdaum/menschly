@@ -51,14 +51,12 @@ end
 export reentrant function blockdev_read(buffer: near ^u8): u16
     var index: u16
     block_command = BLOCK_COMMAND_READ
-    if block_error != 0
+    if block_error
         return u16(block_error)
     end
-    index = 0
-    while index != $0200
+    for index = 0 to $01ff
         buffer^ = block_data
         buffer = buffer + 1
-        index = index + 1
     end
     return 0
 end
@@ -67,11 +65,9 @@ export reentrant function blockdev_write(buffer: near ^u8): u16
     var index: u16
     block_index_lo = 0
     block_index_hi = 0
-    index = 0
-    while index != $0200
+    for index = 0 to $01ff
         block_data = buffer^
         buffer = buffer + 1
-        index = index + 1
     end
     block_command = BLOCK_COMMAND_WRITE
     return u16(block_error)
@@ -97,7 +93,7 @@ end
 export reentrant procedure machine_copy_in(bank: u16, dst: near ^u8, src: u16, count: u16)
     var from: near ^u8
     from = src
-    while count != 0
+    while count
         dst^ = from^
         dst = dst + 1
         from = from + 1
@@ -109,7 +105,7 @@ end
 export reentrant procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, count: u16)
     var to: near ^u8
     to = dst
-    while count != 0
+    while count
         to^ = src^
         src = src + 1
         to = to + 1

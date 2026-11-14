@@ -21,7 +21,7 @@ export far procedure console_prompt_drive(drive: u8)
 end
 
 export far function console_read(): u8
-    while gemdos_cconis() == 0
+    while not gemdos_cconis()
     end
     return gemdos_cconin()
 end
@@ -29,7 +29,7 @@ end
 export far procedure console_write_text(text: near ^u8)
     var ch: u8
     ch = text^
-    while ch != 0
+    while ch
         console_write(ch)
         text = text + 1
         ch = text^
@@ -41,14 +41,14 @@ procedure console_write_hex_digit(value: u16)
     var ch: u8
     if value < 10
         ch = '0'
-        while value != 0
+        while value
             ch = ch + 1
             value = value - 1
         end
     else
         ch = 'A'
         value = value - 10
-        while value != 0
+        while value
             ch = ch + 1
             value = value - 1
         end
@@ -61,14 +61,14 @@ procedure console_write_hex_digit8(value: u8)
     var ch: u8
     if value < 10
         ch = '0'
-        while value != 0
+        while value
             ch = ch + 1
             value = value - 1
         end
     else
         ch = 'A'
         value = value - 10
-        while value != 0
+        while value
             ch = ch + 1
             value = value - 1
         end
@@ -148,7 +148,7 @@ export far procedure console_write_flag(name: u8, value: u8)
     console_write(name)
     console_write(':')
     console_write(' ')
-    if value == 0
+    if not value
         console_write('0')
     else
         console_write('1')

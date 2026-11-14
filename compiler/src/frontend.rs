@@ -2430,10 +2430,20 @@ impl<'a> RoutineLowerer<'a> {
                 rhs: end.clone(),
             })
         };
-        self.lower_branch_if_true(
-            &compare(if down { CondOp::Lt } else { CondOp::Gt }),
-            done.clone(),
-        )?;
+        // Constant bounds already in order need no test before the first pass.
+        let in_order = self.is_const_expr(start)?
+            && self.is_const_expr(end)?
+            && if down {
+                self.const_expr_value(start)? >= self.const_expr_value(end)?
+            } else {
+                self.const_expr_value(start)? <= self.const_expr_value(end)?
+            };
+        if !in_order {
+            self.lower_branch_if_true(
+                &compare(if down { CondOp::Lt } else { CondOp::Gt }),
+                done.clone(),
+            )?;
+        }
         self.body.push(IrInst::Label(top.clone()));
         for stmt in body {
             self.lower_stmt(stmt)?;
@@ -5334,5 +5344,40 @@ mod tests {
             ",
         );
         assert!(error.contains("reserved by the assembler"), "{error}");
+    }
+
+    #[test]
+    fn for_loops_with_constant_ordered_bounds_skip_the_first_test() {
+        let compares = |source: &str| {
+            compile_source(source).unwrap().routines[0]
+                .body
+                .iter()
+                .filter(|inst| matches!(inst, IrInst::Compare { .. }))
+                .count()
+        };
+        let constant = "
+            module Loops
+            export procedure main()
+                var i: u8
+                for i = 0 to 9
+                    i = i
+                end
+                return
+            end
+        ";
+        let variable = "
+            module Loops
+            var last: u8
+            export procedure main()
+                var i: u8
+                for i = 0 to last
+                    i = i
+                end
+                return
+            end
+        ";
+        // Only the end-of-pass test, versus that plus the one before the loop.
+        assert_eq!(compares(constant), 1);
+        assert_eq!(compares(variable), 2);
     }
 }

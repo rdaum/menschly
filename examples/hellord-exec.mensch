@@ -95,15 +95,15 @@ reentrant function next_name_is(expected: near ^u8): u8
     var ch: u8
     matched = 1
     ch = next_byte()
-    while ch != 0
-        if matched != 0 and ch == expected^
+    while ch
+        if matched and ch == expected^
             expected = expected + 1
         else
             matched = 0
         end
         ch = next_byte()
     end
-    if expected^ != 0
+    if expected^
         matched = 0
     end
     return matched
@@ -136,9 +136,9 @@ reentrant function relocate(start: u16): u8
     var value: u16
     var low: u8
     position = start - 1
-    while 1 != 0
+    while 1
         step = next_byte()
-        if step == 0
+        if not step
             return 1
         end
         if step == SKIP_STEP
@@ -232,19 +232,19 @@ export reentrant function exec_program(path: near ^u8): u16
     if length < HEADER_BYTES
         return EXEC_ERR_FORMAT
     end
-    if peek(image) != 1 or peek(image + 1) != 0 or peek(image + 2) != 'o'
+    if peek(image) != 1 or peek(image + 1) or peek(image + 2) != 'o'
         return EXEC_ERR_FORMAT
     end
-    if peek(image + 3) != '6' or peek(image + 4) != '5' or peek(image + 5) != 0
+    if peek(image + 3) != '6' or peek(image + 4) != '5' or peek(image + 5)
         return EXEC_ERR_FORMAT
     end
-    if header_word(6) & MODE_UNSUPPORTED != 0
+    if header_word(6) & MODE_UNSUPPORTED
         return EXEC_ERR_FORMAT
     end
 
     cursor = image + HEADER_BYTES
     options = next_byte()
-    while options != 0
+    while options
         cursor = cursor + u16(options) - 1
         options = next_byte()
     end
@@ -270,23 +270,23 @@ export reentrant function exec_program(path: near ^u8): u16
 
     # Undefined references, then the text and data relocation tables.
     cursor = bss_start
-    if next_word() != 0
+    if next_word()
         return EXEC_ERR_IMPORTS
     end
-    if relocate(text_start) == 0
+    if not relocate(text_start)
         return EXEC_ERR_FORMAT
     end
-    if relocate(data_start) == 0
+    if not relocate(data_start)
         return EXEC_ERR_FORMAT
     end
 
     entry = text_start
     count = next_word()
-    while count != 0
+    while count
         is_main = next_name_is("main")
         segment = next_byte()
         value = next_word()
-        if is_main != 0
+        if is_main
             entry = value + segment_delta(segment)
         end
         count = count - 1

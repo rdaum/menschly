@@ -70,7 +70,7 @@ export function serial_tx_overflow(): u8
 end
 
 export interrupt procedure serial_irq()
-    if serial_status & RX_EMPTY == 0
+    if not (serial_status & RX_EMPTY)
         rx_next = rx_head + 1 & RING_MASK
         if rx_next == rx_tail
             rx_drop = serial_data
@@ -84,7 +84,7 @@ export interrupt procedure serial_irq()
         serial_ctrl = RX_IRQ
         return
     end
-    if serial_status & TX_FULL == 0
+    if not (serial_status & TX_FULL)
         serial_data = tx_buffer[tx_tail]
         tx_tail = tx_tail + 1 & RING_MASK
     end

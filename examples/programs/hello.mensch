@@ -16,7 +16,7 @@ procedure put(ch: u8)
 end
 
 procedure say(text: near ^u8)
-    while text^ != 0
+    while text^
         put(text^)
         text = text + 1
     end

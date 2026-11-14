@@ -79,11 +79,9 @@ end
 
 procedure clear_screen()
     var cell: u16
-    cell = 0
-    while cell != SCREEN_CELLS
+    for cell = 0 to SCREEN_CELLS - 1
         screen[cell] = ' '
         colour[cell] = TEXT_COLOUR
-        cell = cell + 1
     end
     row_start = 0
     column = 0
@@ -136,7 +134,7 @@ end
 export procedure serial_write(value: u16)
     var ch: u8
     ch = u8(value)
-    if in_escape != 0
+    if in_escape
         # Minimal ANSI: ESC [ ... J clears the screen, ESC [ ... H homes.
         if not (ch >= '@' and ch <= '~' and ch != '[')
             return
@@ -166,7 +164,7 @@ export procedure serial_write(value: u16)
         return
     end
     if ch == BACKSPACE
-        if column == 0
+        if not column
             return
         end
         column = column - 1
@@ -186,7 +184,7 @@ export procedure serial_write(value: u16)
 end
 
 export function serial_has_data(): u8
-    if kbd_ascii != 0
+    if kbd_ascii
         return 1
     end
     return 0
@@ -222,16 +220,12 @@ end
 function sd_wait(): u8
     var spins: u16
     var rounds: u8
-    rounds = 0
-    while rounds != 64
-        spins = 0
-        while spins != $ffff
-            if sd_control & SD_BUSY == 0
+    for rounds = 0 to 63
+        for spins = 0 to $fffe
+            if not (sd_control & SD_BUSY)
                 return 1
             end
-            spins = spins + 1
         end
-        rounds = rounds + 1
     end
     return 0
 end
@@ -261,7 +255,7 @@ procedure sd_ensure_ready()
     sd_state = SD_FAILED
     sd_control = SD_RESET
     sd_control = SD_END_RESET
-    if sd_wait() == 0
+    if not sd_wait()
         return
     end
     sd_control = SD_SDHC
@@ -270,13 +264,13 @@ procedure sd_ensure_ready()
     partition_lo = 0
     partition_hi = 0
     partition_sectors = $ffff
-    if sd_read_sector(0, 0) == 0
+    if not sd_read_sector(0, 0)
         return
     end
-    if sd_buffer[510] == $55 and sd_buffer[511] == $aa and partition_type_is_fat(sd_buffer[$1c2]) != 0
+    if sd_buffer[510] == $55 and sd_buffer[511] == $aa and partition_type_is_fat(sd_buffer[$1c2])
         partition_lo = u16(sd_buffer[$1c6]) | u16(sd_buffer[$1c7]) << 8
         partition_hi = u16(sd_buffer[$1c8]) | u16(sd_buffer[$1c9]) << 8
-        if sd_buffer[$1cc] == 0 and sd_buffer[$1cd] == 0
+        if not sd_buffer[$1cc] and not sd_buffer[$1cd]
             partition_sectors = u16(sd_buffer[$1ca]) | u16(sd_buffer[$1cb]) << 8
         end
     end
@@ -335,14 +329,12 @@ export reentrant function blockdev_read(buffer: near ^u8): u16
     end
     sd_select_block()
     sd_control = SD_READ
-    if sd_wait() == 0
+    if not sd_wait()
         return BLOCK_ERROR_TIMEOUT
     end
-    index = 0
-    while index != 512
+    for index = 0 to 511
         buffer^ = sd_buffer[index]
         buffer = buffer + 1
-        index = index + 1
     end
     return 0
 end
@@ -353,16 +345,14 @@ export reentrant function blockdev_write(buffer: near ^u8): u16
     if sd_state != SD_READY
         return BLOCK_ERROR_NO_MEDIA
     end
-    index = 0
-    while index != 512
+    for index = 0 to 511
         sd_buffer[index] = buffer^
         buffer = buffer + 1
-        index = index + 1
     end
     sd_select_block()
     sd_control = SD_WRITE_GATE
     sd_control = SD_WRITE
-    if sd_wait() == 0
+    if not sd_wait()
         return BLOCK_ERROR_TIMEOUT
     end
     return 0
@@ -387,7 +377,7 @@ const PROGRAM_TOP = $c000
 
 # The flat address of `address` as seen from `bank`.
 export reentrant function machine_far_address(bank: u16, address: u16): u32
-    if bank == 0 or address >= PROGRAM_TOP
+    if not bank or address >= PROGRAM_TOP
         return u32(address)
     end
     return PROGRAM_LINEAR + u32(address)
@@ -410,7 +400,7 @@ end
 export reentrant procedure machine_copy_in(bank: u16, dst: near ^u8, src: u16, count: u16)
     var from: far ^u8
     from = machine_far_address(bank, src)
-    while count != 0
+    while count
         dst^ = from^
         dst = dst + 1
         from = from + 1
@@ -423,7 +413,7 @@ end
 export reentrant procedure machine_copy_out(bank: u16, dst: u16, src: near ^u8, count: u16)
     var to: far ^u8
     to = machine_far_address(bank, dst)
-    while count != 0
+    while count
         to^ = src^
         src = src + 1
         to = to + 1
@@ -436,7 +426,7 @@ end
 export reentrant procedure machine_fill(bank: u16, dst: u16, value: u8, count: u16)
     var to: far ^u8
     to = machine_far_address(bank, dst)
-    while count != 0
+    while count
         to^ = value
         to = to + 1
         count = count - 1

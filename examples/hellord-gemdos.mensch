@@ -143,7 +143,7 @@ export reentrant procedure gemdos_init()
 end
 
 reentrant procedure gemdos_ensure_init()
-    if gemdos_initialized != 0
+    if gemdos_initialized
         return
     end
     gemdos_init()
@@ -154,11 +154,11 @@ reentrant function gemdos_find_default_console(): u16
     var dev: u16
     var flags: u16
     dev = bios_device_first()
-    while dev != 0
+    while dev
         if bios_device_kind(dev) == DEVICE_KIND_CHAR
             flags = bios_device_flags(dev)
-            if flags & DEVICE_FLAG_READ != 0
-                if flags & DEVICE_FLAG_WRITE != 0
+            if flags & DEVICE_FLAG_READ
+                if flags & DEVICE_FLAG_WRITE
                     return dev
                 end
             end
@@ -317,7 +317,7 @@ end
 reentrant function gemdos_caller_find(caller: u16, first: u8, dta: u16): u16
     var status: u16
     machine_copy_in(caller, addr(gemdos_dta), dta, DTA_BYTES)
-    if first != 0
+    if first
         status = gemdos_impl_fsfirst(addr(gemdos_path), addr(gemdos_dta))
     else
         status = gemdos_impl_fsnext(addr(gemdos_dta))
@@ -329,7 +329,7 @@ end
 export reentrant function gemdos_trap_dispatch(call: u16, arg0: u16, arg1: u16): u16
     var caller: u16
     caller = machine_caller_bank()
-    if caller != 0
+    if caller
         if call == GEMDOS_DSETPATH
             return gemdos_impl_dsetpath(gemdos_caller_path(caller, arg0))
         end
