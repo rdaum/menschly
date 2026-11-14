@@ -4,8 +4,12 @@
 //! lowered byte by byte: a value of width N is N bytes at some location, and
 //! add/sub/compare/move walk those bytes. The IR's virtual accumulator
 //! (`Value::Accumulator`) lives in the base-page runtime register
-//! [`ACC_SYMBOL`]; function results come back in `A` (byte 0), `X` (byte 1)
-//! and `Y` (byte 2).
+//! [`ACC_SYMBOL`]; function results come back in `A` (byte 0), `X` (byte 1),
+//! `Y` (byte 2) and `ACC+3` (byte 3).
+//!
+//! Multiplication and division call the runtime's math routines
+//! ([`MATH_ROUTINES`]) with the operands in `ACC` and [`ARG_SYMBOL`]; they
+//! use the MEGA65's hardware multiplier and divider.
 //!
 //! # Stack frames
 //!
@@ -33,16 +37,16 @@
 //! A/X/Y result registers survive until the caller stores them.
 //!
 //! Not yet supported (lowering returns an error naming the construct):
-//! COP-style traps and absolute addresses above `$FFFF`.
+//! COP trap frames and absolute addresses above `$FFFF`.
 
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, IrInst, Label, Module, Routine, RoutineKind, Type, Value, Width,
+    Abi, Address, BinaryOp, Const, IrInst, Label, Module, Routine, RoutineKind, Type, Value, Width,
 };
 use crate::optimize_45gs02::optimize_routine;
 use crate::storage::{
-    apply_storage, assign_storage, assign_storage_with_budget, StorageAssignment,
+    apply_storage, assign_storage_with_options, StorageAssignment, StorageOptions,
 };
 use crate::target_45gs02::{AsmModule, AsmRoutine, Inst, Op, Operand};
 
@@ -54,15 +58,34 @@ pub const PTR_SYMBOL: &str = "__m65_ptr";
 pub const FARP_SYMBOL: &str = "__m65_farp";
 /// Base-page frame pointer (2 bytes), defined by the runtime.
 pub const FP_SYMBOL: &str = "__m65_fp";
+/// Base-page second operand of the math routines (4 bytes).
+pub const ARG_SYMBOL: &str = "__m65_arg";
 
-pub const RUNTIME_DIRECT_SYMBOLS: [&str; 4] = [ACC_SYMBOL, PTR_SYMBOL, FARP_SYMBOL, FP_SYMBOL];
+pub const RUNTIME_DIRECT_SYMBOLS: [&str; 5] =
+    [ACC_SYMBOL, PTR_SYMBOL, FARP_SYMBOL, FP_SYMBOL, ARG_SYMBOL];
 
 /// Runtime routine that builds a stack frame (Z = local bytes).
 pub const ENTER_ROUTINE: &str = "__m65_enter";
 /// Runtime routine that releases a stack frame (Z = local bytes).
 pub const LEAVE_ROUTINE: &str = "__m65_leave";
+/// `ACC = ACC * ARG` (the low 32 bits).
+pub const MUL_ROUTINE: &str = "__m65_mul";
+/// Unsigned `ACC / ARG` for X-byte operands: quotient in ACC, remainder in
+/// ARG (both 32-bit).
+pub const DIVU_ROUTINE: &str = "__m65_divu";
+/// Signed `ACC / ARG`, like [`DIVU_ROUTINE`]: the quotient truncates toward
+/// zero and the remainder has the dividend's sign.
+pub const DIVS_ROUTINE: &str = "__m65_divs";
+/// Runtime routines that take their operands in ACC and ARG.
+pub const MATH_ROUTINES: [&str; 3] = [MUL_ROUTINE, DIVU_ROUTINE, DIVS_ROUTINE];
 /// Runtime routines generated code may call.
-pub const RUNTIME_ROUTINES: [&str; 2] = [ENTER_ROUTINE, LEAVE_ROUTINE];
+pub const RUNTIME_ROUTINES: [&str; 5] = [
+    ENTER_ROUTINE,
+    LEAVE_ROUTINE,
+    MUL_ROUTINE,
+    DIVU_ROUTINE,
+    DIVS_ROUTINE,
+];
 
 /// Fixed address of the trap vector table: family `n`'s dispatcher address
 /// is the word at `TRAP_TABLE + 2n`. Part of the MEGA65 kernel ABI.
@@ -71,10 +94,19 @@ pub const TRAP_TABLE: u16 = 0xff00;
 /// Bytes between the locals and the return address (the saved fp).
 const SAVED_FP_BYTES: u16 = 2;
 
+/// Wide values never need base page here: far pointers are copied into
+/// the runtime's flat pointer before use.
+const STORAGE_OPTIONS: StorageOptions = StorageOptions {
+    wide_scratch_direct: false,
+};
+
 pub fn lower_module_with_storage(
     module: &Module,
 ) -> Result<(AsmModule, StorageAssignment), LowerError> {
-    lower_with_assignment(module, assign_storage(module))
+    lower_with_assignment(
+        module,
+        assign_storage_with_options(module, None, STORAGE_OPTIONS),
+    )
 }
 
 pub fn lower_module_with_storage_budget(
@@ -83,7 +115,7 @@ pub fn lower_module_with_storage_budget(
 ) -> Result<(AsmModule, StorageAssignment), LowerError> {
     lower_with_assignment(
         module,
-        assign_storage_with_budget(module, direct_page_budget),
+        assign_storage_with_options(module, Some(direct_page_budget), STORAGE_OPTIONS),
     )
 }
 
@@ -170,8 +202,12 @@ struct RoutineLowerer<'a> {
 
 /// Base-page runtime registers an interrupt handler may need to preserve,
 /// with their sizes. `__m65_fp` is handled by frame setup itself.
-const INTERRUPT_SAVED_RUNTIME: [(&str, u16); 3] =
-    [(ACC_SYMBOL, 4), (PTR_SYMBOL, 2), (FARP_SYMBOL, 4)];
+const INTERRUPT_SAVED_RUNTIME: [(&str, u16); 4] = [
+    (ACC_SYMBOL, 4),
+    (PTR_SYMBOL, 2),
+    (FARP_SYMBOL, 4),
+    (ARG_SYMBOL, 4),
+];
 
 /// Where one byte of a value lives.
 enum ByteSource {
@@ -258,10 +294,13 @@ impl<'a> RoutineLowerer<'a> {
     /// disturb: those its own code names, or all of them if it calls out.
     /// Inserts the saves into the prologue; the shared epilogue restores them.
     fn save_runtime_registers(&mut self) {
-        // The frame routines only touch the accumulator and pointer.
+        // The frame routines only touch the accumulator and pointer; anything
+        // else (including the math routines) may use every register.
         let calls_out = self.out.iter().any(|inst| {
             matches!(inst, Inst::Op(Op::Jsr, operand)
-                if !RUNTIME_ROUTINES.iter().any(|helper| operand_mentions(operand, helper)))
+                if ![ENTER_ROUTINE, LEAVE_ROUTINE]
+                    .iter()
+                    .any(|helper| operand_mentions(operand, helper)))
         });
         let framed = self.frame.is_some();
         let used = |symbol: &str, out: &[Inst]| {
@@ -392,12 +431,18 @@ impl<'a> RoutineLowerer<'a> {
                 }
             }
             IrInst::LoadConst { dst, value } => {
-                self.copy_value(const_width(*value), dst, &Value::Const(*value))?;
+                self.copy_value(value.width(), dst, &Value::Const(*value))?;
             }
             IrInst::LoadAddress { dst, symbol, width } => {
                 for i in 0..width.size_bytes() {
-                    let prefix = ["<", ">", "^"][usize::from(i.min(2))];
-                    self.emit(Op::Lda, Operand::Immediate(format!("{prefix}{symbol}")));
+                    // Symbols are 24-bit; a flat address's top byte is zero.
+                    let operand = match i {
+                        0 => Operand::Immediate(format!("<{symbol}")),
+                        1 => Operand::Immediate(format!(">{symbol}")),
+                        2 => Operand::Immediate(format!("^{symbol}")),
+                        _ => Operand::imm_byte(0),
+                    };
+                    self.emit(Op::Lda, operand);
                     self.store_a_to_byte(dst, i)?;
                 }
             }
@@ -446,16 +491,34 @@ impl<'a> RoutineLowerer<'a> {
                 dst,
                 lhs,
                 rhs,
-            } => self.shift(*width, true, dst, lhs, rhs)?,
+            } => self.shift(*width, true, false, dst, lhs, rhs)?,
             IrInst::ShiftRight {
                 width,
                 dst,
                 lhs,
                 rhs,
-            } => self.shift(*width, false, dst, lhs, rhs)?,
+            } => self.shift(*width, false, false, dst, lhs, rhs)?,
+            IrInst::Binary {
+                op,
+                width,
+                dst,
+                lhs,
+                rhs,
+            } => self.binary(*op, *width, dst, lhs, rhs)?,
+            IrInst::SignExtend {
+                width,
+                src_width,
+                dst,
+                src,
+            } => self.sign_extend(*width, *src_width, dst, src)?,
             IrInst::Inc { width, value } => self.inc(*width, value)?,
             IrInst::Dec { width, value } => self.dec(*width, value)?,
-            IrInst::Compare { width, lhs, rhs } => self.compare(*width, lhs, rhs)?,
+            IrInst::Compare {
+                width,
+                signed,
+                lhs,
+                rhs,
+            } => self.compare(*width, *signed, lhs, rhs)?,
             IrInst::Branch { target } => self.branch(Op::Lbra, target),
             IrInst::BranchIfEqual { target } => self.branch(Op::Lbeq, target),
             IrInst::BranchIfNotEqual { target } => self.branch(Op::Lbne, target),
@@ -482,10 +545,18 @@ impl<'a> RoutineLowerer<'a> {
                 name, width, dst, ..
             } => {
                 self.emit(Op::Jsr, Operand::Label(name.clone()));
-                if matches!(dst, Value::IndexX) {
-                    self.pending_result = Some(*width);
-                } else {
-                    self.store_result(*width, dst)?;
+                self.take_result(*width, dst)?;
+            }
+            IrInst::CallIndirect { target, result, .. } => {
+                // The arguments are pushed; the vector goes in the scratch
+                // pointer, which the callee's prologue is free to reuse.
+                for i in 0..2 {
+                    self.load_byte_to_a(target, i)?;
+                    self.emit(Op::Sta, Operand::Base(offset(PTR_SYMBOL, i)));
+                }
+                self.emit(Op::Jsr, Operand::Indirect(PTR_SYMBOL.to_owned()));
+                if let Some((width, dst)) = result {
+                    self.take_result(*width, dst)?;
                 }
             }
             IrInst::Return => self.emit_return(),
@@ -524,6 +595,17 @@ impl<'a> RoutineLowerer<'a> {
         Ok(())
     }
 
+    /// Stores a call's result, or leaves it in the result registers for a
+    /// following `Move` from X (see `IrInst::CallFunction`).
+    fn take_result(&mut self, width: Width, dst: &Value) -> Result<(), LowerError> {
+        if matches!(dst, Value::IndexX) {
+            self.pending_result = Some(width);
+            Ok(())
+        } else {
+            self.store_result(width, dst)
+        }
+    }
+
     fn branch(&mut self, op: Op, target: &Label) {
         self.emit(op, Operand::Label(target.to_string()));
     }
@@ -533,7 +615,7 @@ impl<'a> RoutineLowerer<'a> {
     /// Describes byte `i` of `value`.
     fn value_byte(&self, value: &Value, i: u16) -> Result<ByteSource, LowerError> {
         Ok(match value {
-            Value::Const(value) => ByteSource::Operand(Operand::imm_byte(const_byte(*value, i))),
+            Value::Const(value) => ByteSource::Operand(Operand::imm_byte(value.byte(i))),
             Value::Accumulator => ByteSource::Operand(Operand::Base(offset(ACC_SYMBOL, i))),
             Value::Direct(name) => ByteSource::Operand(Operand::Base(offset(name, i))),
             Value::Temp(name) | Value::Local(name) | Value::Param(name) | Value::Global(name) => {
@@ -629,11 +711,13 @@ impl<'a> RoutineLowerer<'a> {
     }
 
     /// Constant shifts: whole bytes move first, then the remaining bits
-    /// ripple through the bytes in the base-page accumulator.
+    /// ripple through the bytes in the base-page accumulator. A `signed`
+    /// right shift fills with copies of the sign bit.
     fn shift(
         &mut self,
         width: Width,
         left: bool,
+        signed: bool,
         dst: &Value,
         lhs: &Value,
         rhs: &Value,
@@ -641,7 +725,7 @@ impl<'a> RoutineLowerer<'a> {
         let Value::Const(count) = rhs else {
             return Err(self.unsupported("shifting by a non-constant count"));
         };
-        let count = u16::from(const_byte(*count, 0));
+        let count = u16::from(count.byte(0));
         let bytes = width.size_bytes();
         let (byte_shift, bit_shift) = (count / 8, count % 8);
         let acc = Value::Accumulator;
@@ -662,6 +746,12 @@ impl<'a> RoutineLowerer<'a> {
                     self.load_byte_to_a(lhs, source)?;
                     self.store_a_to_byte(&acc, i)?;
                 }
+                // Bytes run in ascending order for right shifts, so the
+                // moved-down sign byte is already in place.
+                None if signed => {
+                    self.sign_fill_from(&acc, bytes - 1 - byte_shift)?;
+                    self.emit(Op::Sta, Operand::Base(offset(ACC_SYMBOL, i)));
+                }
                 None => self.emit(Op::Stz, Operand::Base(offset(ACC_SYMBOL, i))),
             }
         }
@@ -673,7 +763,16 @@ impl<'a> RoutineLowerer<'a> {
                 }
             } else {
                 for i in (0..bytes).rev() {
-                    let op = if i + 1 == bytes { Op::Lsr } else { Op::Ror };
+                    let op = if i + 1 != bytes {
+                        Op::Ror
+                    } else if signed {
+                        // Carry in a copy of the sign bit.
+                        self.emit(Op::Lda, Operand::Base(offset(ACC_SYMBOL, i)));
+                        self.implied(Op::Asl);
+                        Op::Ror
+                    } else {
+                        Op::Lsr
+                    };
                     self.emit(op, Operand::Base(offset(ACC_SYMBOL, i)));
                 }
             }
@@ -682,6 +781,58 @@ impl<'a> RoutineLowerer<'a> {
             self.copy_value(width, dst, &acc)?;
         }
         Ok(())
+    }
+
+    /// Leaves A = $FF if byte `i` of `value` is negative, else $00.
+    fn sign_fill_from(&mut self, value: &Value, i: u16) -> Result<(), LowerError> {
+        self.load_byte_to_a(value, i)?;
+        self.implied(Op::Asl);
+        self.emit(Op::Lda, Operand::imm_byte(0xff));
+        self.emit(Op::Adc, Operand::imm_byte(0));
+        self.emit(Op::Eor, Operand::imm_byte(0xff));
+        Ok(())
+    }
+
+    fn sign_extend(
+        &mut self,
+        width: Width,
+        src_width: Width,
+        dst: &Value,
+        src: &Value,
+    ) -> Result<(), LowerError> {
+        let src_bytes = src_width.size_bytes();
+        self.copy_value(src_width, dst, src)?;
+        self.sign_fill_from(src, src_bytes - 1)?;
+        for i in src_bytes..width.size_bytes() {
+            self.store_a_to_byte(dst, i)?;
+        }
+        Ok(())
+    }
+
+    fn binary(
+        &mut self,
+        op: BinaryOp,
+        width: Width,
+        dst: &Value,
+        lhs: &Value,
+        rhs: &Value,
+    ) -> Result<(), LowerError> {
+        let (routine, result) = match op {
+            BinaryOp::Xor => return self.byte_op(width, Op::Eor, dst, lhs, rhs),
+            BinaryOp::ShiftRightSigned => return self.shift(width, false, true, dst, lhs, rhs),
+            BinaryOp::Mul => (MUL_ROUTINE, ACC_SYMBOL),
+            BinaryOp::Div { signed } => (div_routine(signed), ACC_SYMBOL),
+            BinaryOp::Rem { signed } => (div_routine(signed), ARG_SYMBOL),
+        };
+        // The right operand goes first: the left may be the accumulator.
+        let arg = Value::Direct(ARG_SYMBOL.to_owned());
+        self.copy_value(width, &arg, rhs)?;
+        self.copy_value(width, &Value::Accumulator, lhs)?;
+        if routine != MUL_ROUTINE {
+            self.emit(Op::Ldx, Operand::imm_byte(width.size_bytes() as u8));
+        }
+        self.emit(Op::Jsr, Operand::Label(routine.to_owned()));
+        self.copy_value(width, dst, &Value::Direct(result.to_owned()))
     }
 
     fn inc(&mut self, width: Width, value: &Value) -> Result<(), LowerError> {
@@ -746,12 +897,34 @@ impl<'a> RoutineLowerer<'a> {
         Ok(())
     }
 
-    /// Unsigned compare: leaves C and Z exactly as a single wide `cmp` would.
-    fn compare(&mut self, width: Width, lhs: &Value, rhs: &Value) -> Result<(), LowerError> {
+    /// Compare: leaves C and Z exactly as a single wide `cmp` would. A signed
+    /// compare flips both sign bits, which maps two's-complement order onto
+    /// unsigned order.
+    fn compare(
+        &mut self,
+        width: Width,
+        signed: bool,
+        lhs: &Value,
+        rhs: &Value,
+    ) -> Result<(), LowerError> {
         let bytes = width.size_bytes();
         let done = self.local_label();
         for i in (0..bytes).rev() {
-            if matches!(self.value_byte(lhs, i)?, ByteSource::X) {
+            if signed && i + 1 == bytes {
+                let rhs_operand = match rhs {
+                    Value::Const(value) => Operand::imm_byte(value.byte(i) ^ 0x80),
+                    _ => {
+                        // The scratch pointer is free between instructions.
+                        self.load_byte_to_a(rhs, i)?;
+                        self.emit(Op::Eor, Operand::imm_byte(0x80));
+                        self.emit(Op::Sta, Operand::Base(PTR_SYMBOL.to_owned()));
+                        Operand::Base(PTR_SYMBOL.to_owned())
+                    }
+                };
+                self.load_byte_to_a(lhs, i)?;
+                self.emit(Op::Eor, Operand::imm_byte(0x80));
+                self.emit(Op::Cmp, rhs_operand);
+            } else if matches!(self.value_byte(lhs, i)?, ByteSource::X) {
                 self.value_op(Op::Cpx, rhs, i)?;
             } else {
                 self.load_byte_to_a(lhs, i)?;
@@ -769,9 +942,14 @@ impl<'a> RoutineLowerer<'a> {
 
     // ---- calls and returns -------------------------------------------------
 
-    /// Puts `value` in the result registers: A (byte 0), X (byte 1), Y (byte 2).
+    /// Puts `value` in the result registers: A (byte 0), X (byte 1), Y (byte 2)
+    /// and ACC+3 (byte 3, which the frame release leaves alone).
     fn load_result(&mut self, width: Width, value: &Value) -> Result<(), LowerError> {
         let bytes = width.size_bytes();
+        if bytes > 3 {
+            self.load_byte_to_a(value, 3)?;
+            self.emit(Op::Sta, Operand::Base(offset(ACC_SYMBOL, 3)));
+        }
         // Frame loads use Y, so byte 2 is parked on the stack until A is loaded.
         if bytes > 2 {
             self.load_byte_to_a(value, 2)?;
@@ -807,6 +985,10 @@ impl<'a> RoutineLowerer<'a> {
             self.implied(Op::Pla);
             self.store_a_to_byte(dst, 2)?;
         }
+        if bytes > 3 {
+            self.emit(Op::Lda, Operand::Base(offset(ACC_SYMBOL, 3)));
+            self.store_a_to_byte(dst, 3)?;
+        }
         Ok(())
     }
 
@@ -821,8 +1003,7 @@ impl<'a> RoutineLowerer<'a> {
             Address::SymbolIndexedX(name) => (AddressForm::AbsoluteX(name.clone()), false),
             Address::Indexed { base, index } => {
                 if let Value::Const(value) = index {
-                    let offset_bytes =
-                        u16::from(const_byte(*value, 0)) | u16::from(const_byte(*value, 1)) << 8;
+                    let offset_bytes = value.bits() as u16;
                     (AddressForm::Absolute(offset(base, offset_bytes)), false)
                 } else {
                     // X is only 8 bits, so form the full 16-bit address.
@@ -862,13 +1043,11 @@ impl<'a> RoutineLowerer<'a> {
                 (AddressForm::IndirectZ(base), true)
             }
             Address::FarPtr(pointer) => {
-                // Copy the 3-byte Mensch far pointer into the 4-byte flat
-                // pointer; its top byte is kept zero.
-                for i in 0..3 {
+                // Copy the 32-bit far pointer into the flat pointer.
+                for i in 0..4 {
                     self.load_byte_to_a(pointer, i)?;
                     self.emit(Op::Sta, Operand::Base(offset(FARP_SYMBOL, i)));
                 }
-                self.emit(Op::Stz, Operand::Base(offset(FARP_SYMBOL, 3)));
                 (AddressForm::FlatZ(FARP_SYMBOL.to_owned()), true)
             }
         })
@@ -990,10 +1169,7 @@ fn operand_mentions(operand: &Operand, symbol: &str) -> bool {
 
 /// `dst = dst ± 1` on a memory value (not an index register).
 fn is_step_in_place(dst: &Value, lhs: &Value, rhs: &Value) -> bool {
-    let one = matches!(
-        rhs,
-        Value::Const(Const::U8(1)) | Value::Const(Const::U16(1)) | Value::Const(Const::U24(1))
-    );
+    let one = matches!(rhs, Value::Const(value) if value.bits() == 1);
     one && dst == lhs
         && matches!(
             dst,
@@ -1007,6 +1183,14 @@ fn is_step_in_place(dst: &Value, lhs: &Value, rhs: &Value) -> bool {
         )
 }
 
+fn div_routine(signed: bool) -> &'static str {
+    if signed {
+        DIVS_ROUTINE
+    } else {
+        DIVU_ROUTINE
+    }
+}
+
 fn offset(name: &str, i: u16) -> String {
     if i == 0 {
         name.to_owned()
@@ -1015,30 +1199,8 @@ fn offset(name: &str, i: u16) -> String {
     }
 }
 
-fn const_width(value: Const) -> Width {
-    match value {
-        Const::U8(_) => Width::Byte,
-        Const::U16(_) => Width::Word,
-        Const::U24(_) => Width::Long,
-    }
-}
-
-fn const_byte(value: Const, i: u16) -> u8 {
-    let raw = match value {
-        Const::U8(value) => u32::from(value),
-        Const::U16(value) => u32::from(value),
-        Const::U24(value) => value,
-    };
-    raw.checked_shr(u32::from(i) * 8).unwrap_or(0) as u8
-}
-
 fn width_for_type(ty: &Type) -> Result<Width, ()> {
-    match ty.size_bytes() {
-        1 => Ok(Width::Byte),
-        2 => Ok(Width::Word),
-        3 => Ok(Width::Long),
-        _ => Err(()),
-    }
+    Width::from_bytes(ty.size_bytes()).ok_or(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

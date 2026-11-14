@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, CopRegister, InterruptPreserve, IrInst, Label, Module, Routine,
+    Abi, Address, BinaryOp, Const, CopRegister, InterruptPreserve, IrInst, Label, Module, Routine,
     RoutineKind, Type, Value, Width,
 };
 use crate::optimize_65816::optimize_module;
@@ -14,7 +14,105 @@ const COP_SIGNATURE_SYMBOL: &str = "__mensch_cop_signature";
 const COP_A_SYMBOL: &str = "__mensch_cop_a";
 const COP_X_SYMBOL: &str = "__mensch_cop_x";
 const COP_Y_SYMBOL: &str = "__mensch_cop_y";
+/// Indirect-call trampoline: called with the target in the 16-bit A, it
+/// pushes `target - 1` and "returns" into the target, which then returns
+/// straight to the caller.
+const ICALL_ROUTINE: &str = "__mensch_icall";
+/// Right operand of a signed compare, with its sign bit flipped.
+const COMPARE_SYMBOL: &str = "__mensch_compare";
+const MUL_ROUTINE: &str = "__mensch_mul16";
+const DIVU_ROUTINE: &str = "__mensch_divu16";
+const DIVS_ROUTINE: &str = "__mensch_divs16";
 
+/// Per-module scratch words for the math routines.
+const MATH_SYMBOLS: [&str; 4] = [
+    "__mensch_math_a",
+    "__mensch_math_b",
+    "__mensch_math_sa",
+    "__mensch_math_sq",
+];
+
+/// 16-bit math routines (A and X in, 16-bit registers), emitted into each
+/// module that uses them. They keep their state in module statics, so they
+/// are not interrupt-safe.
+const MATH_ROUTINE_SOURCE: [(&str, &str); 3] = [
+    (
+        MUL_ROUTINE,
+        // A = A * X (low 16 bits).
+        "sta __mensch_math_a
+	stx __mensch_math_b
+	lda #$0000
+@loop:
+	ldx __mensch_math_b
+	beq @done
+	lsr __mensch_math_b
+	bcc @skip
+	clc
+	adc __mensch_math_a
+@skip:
+	asl __mensch_math_a
+	bra @loop
+@done:
+	rts",
+    ),
+    (
+        DIVU_ROUTINE,
+        // A = A / X, X = A % X (unsigned; X = 0 gives $FFFF, A).
+        "sta __mensch_math_a
+	stx __mensch_math_b
+	lda #$0000
+	ldx #$0010
+@loop:
+	asl __mensch_math_a
+	rol a
+	cmp __mensch_math_b
+	bcc @skip
+	sbc __mensch_math_b
+	inc __mensch_math_a
+@skip:
+	dex
+	bne @loop
+	tax
+	lda __mensch_math_a
+	rts",
+    ),
+    (
+        DIVS_ROUTINE,
+        // Signed: the quotient truncates toward zero, the remainder has the
+        // dividend's sign.
+        "sta __mensch_math_sa
+	stx __mensch_math_b
+	eor __mensch_math_b
+	sta __mensch_math_sq
+	txa
+	bpl @divisor
+	eor #$ffff
+	inc a
+@divisor:
+	tax
+	lda __mensch_math_sa
+	bpl @dividend
+	eor #$ffff
+	inc a
+@dividend:
+	jsr __mensch_divu16
+	bit __mensch_math_sq
+	bpl @quotient
+	eor #$ffff
+	inc a
+@quotient:
+	bit __mensch_math_sa
+	bpl @done
+	pha
+	txa
+	eor #$ffff
+	inc a
+	tax
+	pla
+@done:
+	rts",
+    ),
+];
 pub fn lower_module(module: &Module) -> Result<AsmModule, LowerError> {
     Ok(optimize_module(&lower_module_unoptimized(module)?))
 }
@@ -25,7 +123,54 @@ fn lower_module_unoptimized(module: &Module) -> Result<AsmModule, LowerError> {
     for routine in &module.routines {
         out.routines.push(lower_routine(routine)?);
     }
+    add_support_routines(&mut out);
     Ok(out)
+}
+
+/// Adds the math routines and scratch words the lowered code refers to.
+fn add_support_routines(out: &mut AsmModule) {
+    let mentions = |out: &AsmModule, symbol: &str| {
+        out.routines.iter().any(|routine| {
+            routine.insts.iter().any(|inst| match inst {
+                AsmInst::Jsr(name) => name == symbol,
+                AsmInst::Raw(text) => text.contains(symbol),
+                AsmInst::Sta(Operand::Absolute(Symbol::Named(name))) => name == symbol,
+                _ => false,
+            })
+        })
+    };
+    let mut math = Vec::new();
+    if mentions(out, ICALL_ROUTINE) {
+        math.push((ICALL_ROUTINE, "dec a\n\tpha\n\trts"));
+    }
+    for (name, source) in MATH_ROUTINE_SOURCE {
+        // The signed divide calls the unsigned one.
+        let needed = mentions(out, name) || (name == DIVU_ROUTINE && mentions(out, DIVS_ROUTINE));
+        if needed {
+            math.push((name, source));
+        }
+    }
+    let mut statics = Vec::new();
+    if math.iter().any(|(name, _)| *name != ICALL_ROUTINE) {
+        statics.extend(MATH_SYMBOLS);
+    }
+    if mentions(out, COMPARE_SYMBOL) {
+        statics.push(COMPARE_SYMBOL);
+    }
+    for name in statics {
+        out.static_symbols.push(crate::target_65816::StaticSymbol {
+            name: name.to_owned(),
+            size: 2,
+        });
+    }
+    for (name, source) in math {
+        let mut routine = AsmRoutine::new(name.to_owned());
+        routine.insts = vec![
+            AsmInst::Mode(Mode::Acc16Index16),
+            AsmInst::Raw(source.to_owned()),
+        ];
+        out.routines.push(routine);
+    }
 }
 
 fn lower_module_declarations(module: &Module, out: &mut AsmModule) {
@@ -107,12 +252,45 @@ fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
     Ok(out)
 }
 
+/// Whether the instruction works on 32-bit values, which this backend's
+/// 16-bit accumulator does not handle yet.
+fn uses_quad(inst: &IrInst) -> bool {
+    match inst {
+        IrInst::LoadConst { value, .. } => matches!(value, Const::U32(_)),
+        IrInst::Move { width, .. }
+        | IrInst::LoadAddress { width, .. }
+        | IrInst::Load { width, .. }
+        | IrInst::Store { width, .. }
+        | IrInst::Add { width, .. }
+        | IrInst::Sub { width, .. }
+        | IrInst::BitAnd { width, .. }
+        | IrInst::BitOr { width, .. }
+        | IrInst::ShiftLeft { width, .. }
+        | IrInst::ShiftRight { width, .. }
+        | IrInst::Binary { width, .. }
+        | IrInst::SignExtend { width, .. }
+        | IrInst::Dec { width, .. }
+        | IrInst::Inc { width, .. }
+        | IrInst::Compare { width, .. }
+        | IrInst::Push { width, .. }
+        | IrInst::CallFunction { width, .. } => matches!(width, Width::Quad),
+        IrInst::CallIndirect {
+            result: Some((width, _)),
+            ..
+        } => matches!(width, Width::Quad),
+        _ => false,
+    }
+}
+
 fn lower_inst(
     routine: &Routine,
     inst: &IrInst,
     out: &mut Vec<AsmInst>,
     outgoing_stack_bytes: u16,
 ) -> Result<(), LowerError> {
+    if uses_quad(inst) {
+        return Err(LowerError::UnsupportedWidth(4));
+    }
     match inst {
         IrInst::Label(label) => out.push(AsmInst::Label(label.to_string())),
         IrInst::InlineAsm(line) => out.push(AsmInst::Raw(line.clone())),
@@ -152,8 +330,15 @@ fn lower_inst(
         }
         IrInst::LoadAddress { dst, symbol, width } => {
             set_mode_for_width(out, *width);
+            // A 16-bit address is relative to its bank (near data, or code
+            // in the program bank).
+            let symbol = if *width == Width::Word {
+                format!(".loword({symbol})")
+            } else {
+                symbol.clone()
+            };
             out.push(AsmInst::Lda(Operand::ImmediateSymbol(Symbol::Named(
-                symbol.clone(),
+                symbol,
             ))));
             store_a_to_value(out, dst, outgoing_stack_bytes)?;
         }
@@ -313,7 +498,61 @@ fn lower_inst(
                 other => return Err(LowerError::UnsupportedValue(other.clone())),
             }
         }
-        IrInst::Compare { width, lhs, rhs } => {
+        IrInst::Binary {
+            op,
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => lower_binary(*op, *width, dst, lhs, rhs, out, outgoing_stack_bytes)?,
+        IrInst::SignExtend {
+            width,
+            src_width,
+            dst,
+            src,
+        } => {
+            if !matches!((src_width, width), (Width::Byte, Width::Word)) {
+                return Err(LowerError::UnsupportedWidth(width_bytes(*width)));
+            }
+            load_extended(out, src, Width::Byte, true, outgoing_stack_bytes)?;
+            store_a_to_value(out, dst, outgoing_stack_bytes)?;
+        }
+        IrInst::Compare {
+            width,
+            signed: true,
+            lhs,
+            rhs,
+        } => {
+            // Flipping both sign bits maps signed order onto unsigned order.
+            set_mode_for_width(out, *width);
+            let flip = sign_bit_immediate(*width);
+            if !matches!(lhs, Value::Accumulator) {
+                load_value_to_a(out, lhs, outgoing_stack_bytes)?;
+            }
+            out.push(AsmInst::Eor(Operand::Immediate(flip)));
+            let rhs = match rhs {
+                Value::Const(value) => {
+                    let bits = const_u16(*value) ^ immediate_u16(flip);
+                    Operand::Immediate(match width {
+                        Width::Byte => Immediate::Byte(bits as u8),
+                        _ => Immediate::Word(bits),
+                    })
+                }
+                _ => {
+                    out.push(AsmInst::Pha);
+                    load_value_to_a(out, rhs, outgoing_stack_bytes + width_bytes(*width))?;
+                    out.push(AsmInst::Eor(Operand::Immediate(flip)));
+                    let compare = Operand::Absolute(Symbol::Named(COMPARE_SYMBOL.to_owned()));
+                    out.push(AsmInst::Sta(compare.clone()));
+                    out.push(AsmInst::Pla);
+                    compare
+                }
+            };
+            out.push(AsmInst::Cmp(rhs));
+        }
+        IrInst::Compare {
+            width, lhs, rhs, ..
+        } => {
             set_mode_for_width(out, *width);
             match lhs {
                 Value::Accumulator => {
@@ -343,6 +582,15 @@ fn lower_inst(
             out.push(AsmInst::Pha);
         }
         IrInst::CallProcedure { name, abi } => out.push(call_inst(name, *abi)),
+        IrInst::CallIndirect { target, result, .. } => {
+            set_mode_for_width(out, Width::Word);
+            load_value_to_a(out, target, outgoing_stack_bytes)?;
+            out.push(AsmInst::Jsr(ICALL_ROUTINE.to_owned()));
+            if let Some((width, dst)) = result {
+                set_mode_for_width(out, *width);
+                store_a_to_value(out, dst, outgoing_stack_bytes)?;
+            }
+        }
         IrInst::CallFunction { name, abi, dst, .. } => {
             out.push(call_inst(name, *abi));
             store_a_to_value(out, dst, outgoing_stack_bytes)?;
@@ -590,24 +838,140 @@ fn emit_interrupt_epilogue(out: &mut Vec<AsmInst>, preserve: InterruptPreserve) 
 }
 
 fn set_mode_for_const(out: &mut Vec<AsmInst>, value: Const) {
-    match value {
-        Const::U8(_) => out.push(AsmInst::Mode(Mode::Acc8Index16)),
-        Const::U16(_) | Const::U24(_) => out.push(AsmInst::Mode(Mode::Acc16Index16)),
-    }
+    set_mode_for_width(out, value.width());
 }
 
+// 32-bit values are rejected by `uses_quad` before they get here.
 fn set_mode_for_width(out: &mut Vec<AsmInst>, width: Width) {
     match width {
         Width::Byte => out.push(AsmInst::Mode(Mode::Acc8Index16)),
-        Width::Word | Width::Long => out.push(AsmInst::Mode(Mode::Acc16Index16)),
+        Width::Word | Width::Long | Width::Quad => out.push(AsmInst::Mode(Mode::Acc16Index16)),
     }
 }
 
 fn const_u16(value: Const) -> u16 {
+    value.bits() as u16
+}
+
+fn sign_bit_immediate(width: Width) -> Immediate {
+    match width {
+        Width::Byte => Immediate::Byte(0x80),
+        _ => Immediate::Word(0x8000),
+    }
+}
+
+fn immediate_u16(value: Immediate) -> u16 {
     match value {
-        Const::U8(value) => u16::from(value),
-        Const::U16(value) => value,
-        Const::U24(value) => value as u16,
+        Immediate::Byte(value) => u16::from(value),
+        Immediate::Word(value) => value,
+        Immediate::Long(value) => value as u16,
+    }
+}
+
+/// Loads `value` into the 16-bit accumulator, zero- or sign-extending a
+/// byte. Leaves the accumulator 16 bits wide.
+fn load_extended(
+    out: &mut Vec<AsmInst>,
+    value: &Value,
+    width: Width,
+    signed: bool,
+    outgoing_stack_bytes: u16,
+) -> Result<(), LowerError> {
+    set_mode_for_width(out, width);
+    load_value_to_a(out, value, outgoing_stack_bytes)?;
+    extend_a(out, width, signed);
+    Ok(())
+}
+
+/// Widens a byte in A to 16 bits (A's high byte is stale in 8-bit mode).
+fn extend_a(out: &mut Vec<AsmInst>, width: Width, signed: bool) {
+    out.push(AsmInst::Mode(Mode::Acc16Index16));
+    if width == Width::Byte {
+        out.push(AsmInst::And(Operand::Immediate(Immediate::Word(0x00ff))));
+        if signed {
+            out.push(AsmInst::Eor(Operand::Immediate(Immediate::Word(0x0080))));
+            out.push(AsmInst::Sec);
+            out.push(AsmInst::Sbc(Operand::Immediate(Immediate::Word(0x0080))));
+        }
+    }
+}
+
+fn lower_binary(
+    op: BinaryOp,
+    width: Width,
+    dst: &Value,
+    lhs: &Value,
+    rhs: &Value,
+    out: &mut Vec<AsmInst>,
+    outgoing_stack_bytes: u16,
+) -> Result<(), LowerError> {
+    let (routine, signed, remainder) = match op {
+        BinaryOp::Xor => {
+            set_mode_for_width(out, width);
+            load_value_to_a(out, lhs, outgoing_stack_bytes)?;
+            out.push(AsmInst::Eor(operand_for_value(rhs, outgoing_stack_bytes)?));
+            return store_a_to_value(out, dst, outgoing_stack_bytes);
+        }
+        BinaryOp::ShiftRightSigned => {
+            let Value::Const(count) = rhs else {
+                return Err(LowerError::UnsupportedValue(rhs.clone()));
+            };
+            if matches!(width, Width::Long) {
+                return Err(LowerError::UnsupportedWidth(3));
+            }
+            set_mode_for_width(out, width);
+            load_value_to_a(out, lhs, outgoing_stack_bytes)?;
+            let sign = sign_bit_immediate(width);
+            for _ in 0..const_u16(*count) {
+                // CMP sets the carry to the sign bit; ROR shifts it back in.
+                out.push(AsmInst::Cmp(Operand::Immediate(sign)));
+                out.push(AsmInst::Raw("ror a".to_owned()));
+            }
+            return store_a_to_value(out, dst, outgoing_stack_bytes);
+        }
+        BinaryOp::Mul => (MUL_ROUTINE, false, false),
+        BinaryOp::Div { signed } => (div_routine(signed), signed, false),
+        BinaryOp::Rem { signed } => (div_routine(signed), signed, true),
+    };
+    if matches!(width, Width::Long) {
+        return Err(LowerError::UnsupportedWidth(3));
+    }
+    // The routines take the left operand in A and the right one in X.
+    match (lhs, rhs) {
+        (Value::Accumulator, _) => {
+            set_mode_for_width(out, width);
+            out.push(AsmInst::Tay);
+            load_extended(out, rhs, width, signed, outgoing_stack_bytes)?;
+            out.push(AsmInst::Tax);
+            set_mode_for_width(out, width);
+            out.push(AsmInst::Tya);
+            extend_a(out, width, signed);
+        }
+        (_, Value::Accumulator) => {
+            set_mode_for_width(out, width);
+            extend_a(out, width, signed);
+            out.push(AsmInst::Tax);
+            load_extended(out, lhs, width, signed, outgoing_stack_bytes)?;
+        }
+        _ => {
+            load_extended(out, rhs, width, signed, outgoing_stack_bytes)?;
+            out.push(AsmInst::Tax);
+            load_extended(out, lhs, width, signed, outgoing_stack_bytes)?;
+        }
+    }
+    out.push(AsmInst::Jsr(routine.to_owned()));
+    if remainder {
+        out.push(AsmInst::Txa);
+    }
+    set_mode_for_width(out, width);
+    store_a_to_value(out, dst, outgoing_stack_bytes)
+}
+
+fn div_routine(signed: bool) -> &'static str {
+    if signed {
+        DIVS_ROUTINE
+    } else {
+        DIVU_ROUTINE
     }
 }
 
@@ -625,18 +989,14 @@ fn width_for_size(size: u16) -> Result<Width, LowerError> {
 }
 
 fn width_bytes(width: Width) -> u16 {
-    match width {
-        Width::Byte => 1,
-        Width::Word => 2,
-        Width::Long => 3,
-    }
+    width.size_bytes()
 }
 
 fn immediate(value: Const) -> Immediate {
     match value {
         Const::U8(value) => Immediate::Byte(value),
         Const::U16(value) => Immediate::Word(value),
-        Const::U24(value) => Immediate::Long(value),
+        Const::U24(value) | Const::U32(value) => Immediate::Long(value & 0x00ff_ffff),
     }
 }
 
@@ -644,7 +1004,7 @@ fn one_immediate(width: Width) -> Result<Immediate, LowerError> {
     match width {
         Width::Byte => Ok(Immediate::Byte(1)),
         Width::Word => Ok(Immediate::Word(1)),
-        Width::Long => Err(LowerError::UnsupportedWidth(3)),
+        Width::Long | Width::Quad => Err(LowerError::UnsupportedWidth(width.size_bytes())),
     }
 }
 
@@ -724,7 +1084,9 @@ fn indexed_operand(
         let offset = match value {
             Const::U8(value) => u16::from(*value),
             Const::U16(value) => *value,
-            Const::U24(_) => return Err(LowerError::UnsupportedValue(index.clone())),
+            Const::U24(_) | Const::U32(_) => {
+                return Err(LowerError::UnsupportedValue(index.clone()))
+            }
         };
         return Ok(Operand::Absolute(symbol_with_offset(base, offset)));
     }

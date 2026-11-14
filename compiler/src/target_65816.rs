@@ -32,6 +32,7 @@ pub enum AsmInst {
     Sbc(Operand),
     And(Operand),
     Ora(Operand),
+    Eor(Operand),
     /// `asl a`
     AslA,
     /// `lsr a`

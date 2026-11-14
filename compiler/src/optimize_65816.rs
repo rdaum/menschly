@@ -78,6 +78,7 @@ fn sets_zero_flag_from_a(inst: &AsmInst) -> bool {
         AsmInst::Lda(_)
             | AsmInst::And(_)
             | AsmInst::Ora(_)
+            | AsmInst::Eor(_)
             | AsmInst::Adc(_)
             | AsmInst::Sbc(_)
             | AsmInst::Txa
@@ -141,6 +142,7 @@ fn map_operands(inst: &AsmInst, map: &mut impl FnMut(&Operand) -> Operand) -> As
         AsmInst::Sbc(operand) => AsmInst::Sbc(map(operand)),
         AsmInst::And(operand) => AsmInst::And(map(operand)),
         AsmInst::Ora(operand) => AsmInst::Ora(map(operand)),
+        AsmInst::Eor(operand) => AsmInst::Eor(map(operand)),
         AsmInst::Inc(operand) => AsmInst::Inc(map(operand)),
         AsmInst::Dec(operand) => AsmInst::Dec(map(operand)),
         AsmInst::Cmp(operand) => AsmInst::Cmp(map(operand)),
@@ -339,6 +341,7 @@ fn remove_redundant_accumulator_loads(insts: &[AsmInst]) -> Vec<AsmInst> {
             | AsmInst::Sbc(_)
             | AsmInst::And(_)
             | AsmInst::Ora(_)
+            | AsmInst::Eor(_)
             | AsmInst::AslA
             | AsmInst::LsrA => {
                 out.push(inst.clone());
@@ -590,6 +593,7 @@ impl IndexLoadState {
             | AsmInst::Sbc(_)
             | AsmInst::And(_)
             | AsmInst::Ora(_)
+            | AsmInst::Eor(_)
             | AsmInst::AslA
             | AsmInst::LsrA => {
                 self.x.flags_no_longer_match();
@@ -780,6 +784,7 @@ impl IndexTransferState {
             | AsmInst::Sbc(_)
             | AsmInst::And(_)
             | AsmInst::Ora(_)
+            | AsmInst::Eor(_)
             | AsmInst::AslA
             | AsmInst::LsrA
             | AsmInst::Tya => {

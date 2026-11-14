@@ -28,7 +28,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::lower_45gs02::{ACC_SYMBOL, FARP_SYMBOL, FP_SYMBOL, PTR_SYMBOL};
+use crate::lower_45gs02::{
+    ACC_SYMBOL, ARG_SYMBOL, FARP_SYMBOL, FP_SYMBOL, MATH_ROUTINES, PTR_SYMBOL,
+};
 use crate::target_45gs02::{Inst, Op, Operand};
 
 /// A set of tracked machine locations, one bit each.
@@ -45,14 +47,18 @@ const ACC: Locs = 0xf << 6;
 const PTR: Locs = 0x3 << 10;
 const FARP: Locs = 0xf << 12;
 const FP: Locs = 0x3 << 16;
-const ALL: Locs = (1 << 18) - 1;
+const ARG: Locs = 0xf << 18;
+/// The top byte of the accumulator, which carries a 32-bit result's byte 3.
+const ACC3: Locs = 1 << 9;
+const ALL: Locs = (1 << 22) - 1;
 
 /// Runtime base-page registers: (symbol, first bit, bytes).
-const RUNTIME: [(&str, u32, u32); 4] = [
+const RUNTIME: [(&str, u32, u32); 5] = [
     (ACC_SYMBOL, 6, 4),
     (PTR_SYMBOL, 10, 2),
     (FARP_SYMBOL, 12, 4),
     (FP_SYMBOL, 16, 2),
+    (ARG_SYMBOL, 18, 4),
 ];
 
 /// Optimizes one routine. `z_zero_on_entry` is false for interrupt handlers,
@@ -192,7 +198,7 @@ fn effect(inst: &Inst) -> Effect {
         Op::Inz | Op::Dez => (Z, Z | NZ, true),
         Op::Clc | Op::Sec => (0, C, true),
         Op::Adc | Op::Sbc => (A | C | read, A | NZ | C, pure_read(operand)),
-        Op::And | Op::Ora => (A | read, A | NZ, pure_read(operand)),
+        Op::And | Op::Ora | Op::Eor => (A | read, A | NZ, pure_read(operand)),
         Op::Cmp => (A | read, NZ | C, pure_read(operand)),
         Op::Cpx => (X | read, NZ | C, pure_read(operand)),
         Op::Inc | Op::Dec | Op::Asl | Op::Lsr | Op::Rol | Op::Ror => {
@@ -227,15 +233,24 @@ fn effect(inst: &Inst) -> Effect {
         Op::Bcc | Op::Bcs | Op::Lbcc | Op::Lbcs => (C, 0, false),
         Op::Bra | Op::Lbra => (0, 0, false),
         // Callees take their arguments on the stack or in their own
-        // parameter storage, never in the base-page scratch registers; they
-        // return results in A/X/Y, keep Z = 0 and the frame pointer, and
-        // clobber the scratch registers.
-        Op::Jsr => (
-            A | X | Y | Z | FP,
-            A | X | Y | NZ | C | ACC | PTR | FARP,
-            false,
-        ),
-        Op::Rts | Op::Rtn => (A | X | Y | Z | FP, 0, false),
+        // parameter storage, never in the base-page scratch registers (except
+        // the math helpers, which take theirs in ACC and ARG); they return
+        // results in A/X/Y (and ACC+3), keep Z = 0 and the frame pointer, and
+        // clobber the scratch registers. An indirect call reads its vector.
+        Op::Jsr => {
+            let arguments = match operand {
+                Operand::Label(name) if MATH_ROUTINES.contains(&name.as_str()) => ACC | ARG,
+                Operand::Indirect(vector) => runtime_bytes(vector, 2),
+                _ => 0,
+            };
+            (
+                A | X | Y | Z | FP | arguments,
+                A | X | Y | NZ | C | ACC | PTR | FARP | ARG,
+                false,
+            )
+        }
+        // Results are in A/X/Y, and a 32-bit result's top byte in ACC+3.
+        Op::Rts | Op::Rtn => (A | X | Y | Z | FP | ACC3, 0, false),
         Op::Rti => (ALL, 0, false),
     };
     Effect {
@@ -516,7 +531,7 @@ fn eliminate_redundant(insts: &mut Vec<Inst>, z_zero_on_entry: bool) -> bool {
             {
                 delete[i] = true;
             }
-            Op::Adc | Op::Sbc | Op::And | Op::Ora | Op::Pla => {
+            Op::Adc | Op::Sbc | Op::And | Op::Ora | Op::Eor | Op::Pla => {
                 known.forget(REG_A);
                 known.nz_from_a = true;
             }

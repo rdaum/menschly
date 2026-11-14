@@ -45,7 +45,7 @@ pub const ROM_LOAD_ADDRESS: u32 = 0x20000;
 /// `lower_45gs02`). Each program links its own copy, so a program and the
 /// kernel never share scratch state.
 pub const RUNTIME: &str = r#".setcpu "45GS02"
-.exportzp __m65_acc, __m65_ptr, __m65_farp, __m65_fp
+.exportzp __m65_acc, __m65_ptr, __m65_farp, __m65_fp, __m65_arg
 .export __m65_enter, __m65_leave
 
 .segment "ZEROPAGE"
@@ -53,6 +53,7 @@ __m65_acc: .res 4
 __m65_ptr: .res 2
 __m65_farp: .res 4
 __m65_fp: .res 2
+__m65_arg: .res 4
 
 .segment "CODE"
 ; Stack frames (see lower_45gs02). A routine with a frame starts with
@@ -117,11 +118,189 @@ __m65_leave:
 
 "#;
 
+/// The runtime's math routines, linked only into images that call them.
+pub const MATH_RUNTIME: &str = r#".setcpu "45GS02"
+.importzp __m65_acc, __m65_farp, __m65_arg
+.export __m65_mul, __m65_divu, __m65_divs
+
+; The math unit (MEGA65 I/O personality).
+MULTINA = $d770
+MULTINB = $d774
+MULTOUT = $d778
+DIVOUT_WHOLE = $d76c
+MATHBUSY = $d70f                ; bit 7: divider busy, bit 6: multiplier busy
+
+.segment "CODE"
+; Math (see lower_45gs02). The operands are ACC and ARG; the results go to
+; ACC (product, quotient) and ARG (remainder). The math unit is shared, so
+; interrupts are held off while it is in use. A, X, Y and FARP are
+; clobbered; Z stays 0.
+
+; ACC = ACC * ARG (low 32 bits). Only the low bytes of the operands that
+; the caller set matter for the low bytes of the product.
+__m65_mul:
+	php
+	sei
+	jsr __m65_load_operands
+@wait:
+	bit MATHBUSY
+	bvs @wait
+	ldx #$03
+@out:
+	lda MULTOUT,x
+	sta __m65_acc,x
+	dex
+	bpl @out
+	plp
+	rts
+
+; Writes ACC and ARG to the math unit's inputs.
+__m65_load_operands:
+	ldx #$03
+@in:
+	lda __m65_acc,x
+	sta MULTINA,x
+	lda __m65_arg,x
+	sta MULTINB,x
+	dex
+	bpl @in
+	rts
+
+; Unsigned ACC / ARG for X-byte operands (1-4): ACC = quotient, ARG =
+; remainder. Dividing by zero gives a quotient of $FFFFFFFF.
+__m65_divu:
+	php
+	sei
+@zero:
+	cpx #$04
+	beq @extended
+	lda #$00
+	sta __m65_acc,x
+	sta __m65_arg,x
+	inx
+	bra @zero
+@extended:
+	jsr __m65_divide
+	plp
+	rts
+
+; Signed ACC / ARG for X-byte operands: the quotient truncates toward zero
+; and the remainder has the dividend's sign.
+__m65_divs:
+	php
+	sei
+@extend:
+	cpx #$04
+	beq @extended
+	lda __m65_acc-1,x
+	asl
+	lda #$ff
+	adc #$00
+	eor #$ff
+	sta __m65_acc,x
+	lda __m65_arg-1,x
+	asl
+	lda #$ff
+	adc #$00
+	eor #$ff
+	sta __m65_arg,x
+	inx
+	bra @extend
+@extended:
+	lda __m65_acc+3         ; remainder sign
+	pha
+	eor __m65_arg+3         ; quotient sign
+	pha
+	ldx #<__m65_acc
+	bit __m65_acc+3
+	bpl @positive_dividend
+	jsr @negate
+@positive_dividend:
+	ldx #<__m65_arg
+	bit __m65_arg+3
+	bpl @positive_divisor
+	jsr @negate
+@positive_divisor:
+	jsr __m65_divide
+	pla
+	bpl @positive_quotient
+	ldx #<__m65_acc
+	jsr @negate
+@positive_quotient:
+	pla
+	bpl @done
+	ldx #<__m65_arg
+	jsr @negate
+@done:
+	plp
+	rts
+; Negates the 4-byte base-page value at X.
+@negate:
+	sec
+	lda #$00
+	sbc $00,x
+	sta $00,x
+	lda #$00
+	sbc $01,x
+	sta $01,x
+	lda #$00
+	sbc $02,x
+	sta $02,x
+	lda #$00
+	sbc $03,x
+	sta $03,x
+	rts
+
+; 32-bit unsigned ACC / ARG on the math unit: ACC = quotient, ARG =
+; remainder (ACC - quotient * ARG, using the multiplier).
+__m65_divide:
+	jsr __m65_load_operands
+@wait:
+	bit MATHBUSY
+	bmi @wait
+	ldx #$03
+@quotient:
+	lda DIVOUT_WHOLE,x
+	sta __m65_farp,x
+	dex
+	bpl @quotient
+	; Only now replace the dividend: the unit recomputes on every write.
+	ldx #$03
+@multiply:
+	lda __m65_farp,x
+	sta MULTINA,x           ; quotient * divisor
+	dex
+	bpl @multiply
+@product:
+	bit MATHBUSY
+	bvs @product
+	sec
+	lda __m65_acc
+	sbc MULTOUT
+	sta __m65_arg
+	lda __m65_acc+1
+	sbc MULTOUT+1
+	sta __m65_arg+1
+	lda __m65_acc+2
+	sbc MULTOUT+2
+	sta __m65_arg+2
+	lda __m65_acc+3
+	sbc MULTOUT+3
+	sta __m65_arg+3
+	ldx #$03
+@copy:
+	lda __m65_farp,x
+	sta __m65_acc,x
+	dex
+	bpl @copy
+	rts
+"#;
+
 /// Startup code: the two-stage loader, base-page and BSS clearing,
 /// `jsr main`, then exit through Xemu's testing register with `main`'s `A`
 /// as the status.
 pub const CRT0: &str = r#".setcpu "45GS02"
-.importzp __m65_acc, __m65_ptr, __m65_farp, __m65_fp
+.importzp __m65_acc, __m65_ptr, __m65_farp, __m65_fp, __m65_arg
 .import __m65_enter, __m65_leave
 .import main
 .import __BSS_RUN__, __BSS_SIZE__, __ZEROPAGE_RUN__, __ZEROPAGE_SIZE__
@@ -316,7 +495,7 @@ SEGMENTS {
 "#;
 
 /// Base-page bytes the runtime registers in [`RUNTIME`] take.
-pub const RUNTIME_BASE_PAGE_BYTES: u16 = 12;
+pub const RUNTIME_BASE_PAGE_BYTES: u16 = 16;
 
 /// Base-page bytes available to kernel Mensch code: `$02-$FF` minus the
 /// runtime registers.
@@ -425,8 +604,15 @@ fn link(
     let cfg = dir.join(format!("{output}.cfg"));
     write(&cfg, config)?;
 
+    // The math routines are only linked when some module calls them.
+    let math = modules.iter().any(|(_, source)| {
+        crate::lower_45gs02::MATH_ROUTINES
+            .iter()
+            .any(|routine| source.contains(routine))
+    });
+    let math = math.then_some(("math", MATH_RUNTIME));
     let mut objects = Vec::new();
-    for (name, source) in runtime.iter().chain(modules) {
+    for (name, source) in runtime.iter().chain(math.iter()).chain(modules) {
         let asm = dir.join(format!("{name}.s"));
         let obj = dir.join(format!("{name}.o"));
         write(&asm, source)?;

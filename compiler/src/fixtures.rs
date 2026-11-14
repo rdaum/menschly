@@ -74,6 +74,7 @@ pub fn copy_bytes_near() -> Module {
                 },
                 IrInst::Compare {
                     width: Width::Word,
+                    signed: false,
                     lhs: Value::IndexX,
                     rhs: Value::Const(Const::U16(4)),
                 },
@@ -110,6 +111,7 @@ pub fn clear_memory() -> Module {
                 },
                 IrInst::Compare {
                     width: Width::Word,
+                    signed: false,
                     lhs: Value::IndexX,
                     rhs: Value::Const(Const::U16(4)),
                 },

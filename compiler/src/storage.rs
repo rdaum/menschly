@@ -239,18 +239,45 @@ pub fn validate_direct_page_budget(
 }
 
 pub fn assign_storage(module: &Module) -> StorageAssignment {
-    assign_storage_with_direct_page_budget(module, None)
+    assign_storage_with_direct_page_budget(module, None, StorageOptions::default())
 }
 
 pub fn assign_storage_with_budget(module: &Module, budget: u16) -> StorageAssignment {
-    assign_storage_with_direct_page_budget(module, Some(budget))
+    assign_storage_with_direct_page_budget(module, Some(budget), StorageOptions::default())
+}
+
+/// Target-specific storage choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageOptions {
+    /// Scratch values wider than two bytes must live in the direct page
+    /// (the 65816 reaches 24-bit values through `[dp]`). Targets that copy
+    /// wide values into their own registers can keep them in ordinary RAM.
+    pub wide_scratch_direct: bool,
+}
+
+impl Default for StorageOptions {
+    fn default() -> Self {
+        Self {
+            wide_scratch_direct: true,
+        }
+    }
+}
+
+pub fn assign_storage_with_options(
+    module: &Module,
+    budget: Option<u16>,
+    options: StorageOptions,
+) -> StorageAssignment {
+    assign_storage_with_direct_page_budget(module, budget, options)
 }
 
 fn assign_storage_with_direct_page_budget(
     module: &Module,
     budget: Option<u16>,
+    options: StorageOptions,
 ) -> StorageAssignment {
     let mut allocator = DirectAllocator::new(budget);
+    allocator.wide_scratch_direct = options.wide_scratch_direct;
     let mut args = DirectSlotPool::new("__dp_arg");
     let mut scratch = DirectSlotPool::new("__dp_scratch");
     let routines = module
@@ -512,6 +539,12 @@ fn assign_scratch_bindings(
     out: &mut RoutineStorage,
 ) {
     let mut lifetimes = scratch_lifetimes(routine);
+    if !allocator.wide_scratch_direct {
+        let required = direct_required_bindings(routine);
+        for binding in &mut lifetimes {
+            binding.direct_required = required.contains(&binding.key);
+        }
+    }
     lifetimes.sort_by_key(|binding| {
         (
             binding.first_use,
@@ -941,10 +974,51 @@ fn rewrite_inst(
             width: *width,
             value: rewrite_value(value, layout, direct_aliases),
         },
-        IrInst::Compare { width, lhs, rhs } => IrInst::Compare {
+        IrInst::Compare {
+            width,
+            signed,
+            lhs,
+            rhs,
+        } => IrInst::Compare {
             width: *width,
+            signed: *signed,
             lhs: rewrite_value(lhs, layout, direct_aliases),
             rhs: rewrite_value(rhs, layout, direct_aliases),
+        },
+        IrInst::Binary {
+            op,
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => IrInst::Binary {
+            op: *op,
+            width: *width,
+            dst: rewrite_value(dst, layout, direct_aliases),
+            lhs: rewrite_value(lhs, layout, direct_aliases),
+            rhs: rewrite_value(rhs, layout, direct_aliases),
+        },
+        IrInst::SignExtend {
+            width,
+            src_width,
+            dst,
+            src,
+        } => IrInst::SignExtend {
+            width: *width,
+            src_width: *src_width,
+            dst: rewrite_value(dst, layout, direct_aliases),
+            src: rewrite_value(src, layout, direct_aliases),
+        },
+        IrInst::CallIndirect {
+            target,
+            abi,
+            result,
+        } => IrInst::CallIndirect {
+            target: rewrite_value(target, layout, direct_aliases),
+            abi: *abi,
+            result: result
+                .as_ref()
+                .map(|(width, dst)| (*width, rewrite_value(dst, layout, direct_aliases))),
         },
         IrInst::BranchIfZero { value, target } => IrInst::BranchIfZero {
             value: rewrite_value(value, layout, direct_aliases),
@@ -1230,7 +1304,10 @@ fn direct_required_bindings(routine: &Routine) -> BTreeSet<BindingKey> {
 fn is_call_barrier(inst: &IrInst) -> bool {
     matches!(
         inst,
-        IrInst::CallProcedure { .. } | IrInst::CallFunction { .. } | IrInst::Trap { .. }
+        IrInst::CallProcedure { .. }
+            | IrInst::CallFunction { .. }
+            | IrInst::CallIndirect { .. }
+            | IrInst::Trap { .. }
     )
 }
 
@@ -1287,10 +1364,21 @@ fn param_uses(inst: &IrInst) -> Vec<String> {
             dst,
             lhs,
             rhs,
-        } => {
+        }
+        | IrInst::Binary { dst, lhs, rhs, .. } => {
             collect_param_value(dst, &mut out);
             collect_param_value(lhs, &mut out);
             collect_param_value(rhs, &mut out);
+        }
+        IrInst::SignExtend { dst, src, .. } => {
+            collect_param_value(dst, &mut out);
+            collect_param_value(src, &mut out);
+        }
+        IrInst::CallIndirect { target, result, .. } => {
+            collect_param_value(target, &mut out);
+            if let Some((_, dst)) = result {
+                collect_param_value(dst, &mut out);
+            }
         }
         IrInst::Dec { value, .. } | IrInst::Inc { value, .. } => {
             collect_param_value(value, &mut out);
@@ -1384,16 +1472,40 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
             dst,
             lhs,
             rhs,
+        }
+        | IrInst::Binary {
+            width,
+            dst,
+            lhs,
+            rhs,
+            ..
         } => {
             let size = width.size_bytes();
             collect_temp_value(dst, size, &mut out);
             collect_temp_value(lhs, size, &mut out);
             collect_temp_value(rhs, size, &mut out);
         }
+        IrInst::SignExtend {
+            width,
+            src_width,
+            dst,
+            src,
+        } => {
+            collect_temp_value(dst, width.size_bytes(), &mut out);
+            collect_temp_value(src, src_width.size_bytes(), &mut out);
+        }
+        IrInst::CallIndirect { target, result, .. } => {
+            collect_temp_value(target, 2, &mut out);
+            if let Some((width, dst)) = result {
+                collect_temp_value(dst, width.size_bytes(), &mut out);
+            }
+        }
         IrInst::Dec { width, value } | IrInst::Inc { width, value } => {
             collect_temp_value(value, width.size_bytes(), &mut out);
         }
-        IrInst::Compare { width, lhs, rhs } => {
+        IrInst::Compare {
+            width, lhs, rhs, ..
+        } => {
             let size = width.size_bytes();
             collect_temp_value(lhs, size, &mut out);
             collect_temp_value(rhs, size, &mut out);
@@ -1483,10 +1595,21 @@ fn local_uses(inst: &IrInst) -> Vec<String> {
             dst,
             lhs,
             rhs,
-        } => {
+        }
+        | IrInst::Binary { dst, lhs, rhs, .. } => {
             collect_local_value(dst, &mut out);
             collect_local_value(lhs, &mut out);
             collect_local_value(rhs, &mut out);
+        }
+        IrInst::SignExtend { dst, src, .. } => {
+            collect_local_value(dst, &mut out);
+            collect_local_value(src, &mut out);
+        }
+        IrInst::CallIndirect { target, result, .. } => {
+            collect_local_value(target, &mut out);
+            if let Some((_, dst)) = result {
+                collect_local_value(dst, &mut out);
+            }
         }
         IrInst::Dec { value, .. } | IrInst::Inc { value, .. } => {
             collect_local_value(value, &mut out);
@@ -1529,7 +1652,7 @@ fn collect_temp_address(addr: &Address, out: &mut Vec<(String, u16)>) {
     match addr {
         Address::ValueOffset { base, .. } => collect_temp_value(base, 2, out),
         Address::NearPtr(value) => collect_temp_value(value, 2, out),
-        Address::FarPtr(value) => collect_temp_value(value, 3, out),
+        Address::FarPtr(value) => collect_temp_value(value, 4, out),
         Address::Indexed { index, .. } => collect_temp_value(index, 2, out),
         _ => {}
     }
@@ -1595,11 +1718,7 @@ fn collect_param_value(value: &Value, out: &mut Vec<String>) {
 }
 
 fn const_size(value: Const) -> u16 {
-    match value {
-        Const::U8(_) => 1,
-        Const::U16(_) => 2,
-        Const::U24(_) => 3,
-    }
+    value.width().size_bytes()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1649,6 +1768,7 @@ struct AllocatedSlot {
 struct DirectAllocator {
     next_offset: u16,
     budget: Option<u16>,
+    wide_scratch_direct: bool,
 }
 
 impl DirectAllocator {
@@ -1656,6 +1776,7 @@ impl DirectAllocator {
         Self {
             next_offset: 0,
             budget,
+            wide_scratch_direct: true,
         }
     }
 
@@ -2549,6 +2670,7 @@ mod tests {
                 .with_body(vec![
                     IrInst::Compare {
                         width: Width::Word,
+                        signed: false,
                         lhs: Value::Param("value".to_owned()),
                         rhs: Value::Accumulator,
                     },
@@ -2588,6 +2710,7 @@ mod tests {
                     },
                     IrInst::Compare {
                         width: Width::Word,
+                        signed: false,
                         lhs: Value::Param("saved".to_owned()),
                         rhs: Value::Accumulator,
                     },

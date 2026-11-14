@@ -71,7 +71,11 @@ fn run_loaded_generated_routine(mut memory: Memory) -> (Processor, Memory) {
     memory.write(0x01fe, return_minus_one[1]);
     memory.write(0x01ff, RETURN_BANK);
 
-    for _ in 0..1_000 {
+    run_until_return(cpu, memory, 1_000)
+}
+
+fn run_until_return(mut cpu: Processor, mut memory: Memory, steps: usize) -> (Processor, Memory) {
+    for _ in 0..steps {
         if cpu.pbr == RETURN_BANK && cpu.pc == RETURN_ADDR {
             return (cpu, memory);
         }
@@ -79,6 +83,23 @@ fn run_loaded_generated_routine(mut memory: Memory) -> (Processor, Memory) {
     }
 
     panic!("generated routine did not return; cpu={cpu:?}");
+}
+
+/// Like [`run_generated_routine`], for routines that run long loops.
+fn run_long_generated_routine(binary: &[u8]) -> (Processor, Memory) {
+    let mut memory = Memory::new();
+    memory.load(ROUTINE_ADDR, binary);
+    let mut cpu = Processor::new();
+    cpu.p = StatusRegister::from_byte(0x00, false);
+    cpu.pbr = (ROUTINE_ADDR >> 16) as u8;
+    cpu.dbr = (ROUTINE_ADDR >> 16) as u8;
+    cpu.pc = ROUTINE_ADDR as u16;
+    cpu.s = 0x01fc;
+    let return_minus_one = RETURN_ADDR.wrapping_sub(1).to_le_bytes();
+    memory.write(0x01fd, return_minus_one[0]);
+    memory.write(0x01fe, return_minus_one[1]);
+    memory.write(0x01ff, RETURN_BANK);
+    run_until_return(cpu, memory, 200_000)
 }
 
 fn run_loaded_generated_near_routine(mut memory: Memory) -> (Processor, Memory) {
@@ -1061,4 +1082,135 @@ fn generated_frontend_word_arrays_and_compare_operands_run() {
         .collect::<Vec<_>>();
     assert_eq!(words, vec![0x00, 0x11, 0x01, 0x11, 0x02, 0x11, 0x03, 0x11]);
     assert_eq!(memory.byte(0x040058), 1);
+}
+
+#[test]
+fn generated_frontend_math_signed_and_routine_pointers_run() {
+    let binary = assemble_source_fixture(
+        "frontend-math",
+        "
+        module MathDemo
+        fixed($040040) volatile var w: [12]u16
+        fixed($040060) volatile var by: [8]u8
+        fixed($040070) volatile var ss: [10]i16
+        fixed($040090) volatile var f: [8]u8
+
+        type Binop = reentrant function(a: u16, b: u16): u16
+        type Thunk = procedure()
+
+        var hits: u8
+
+        export far procedure main()
+            var x: u16
+            var y: u16
+            var c: u8
+            var d: u8
+            var sx: i16
+            var sy: i16
+            var sb: i8
+            var op: Binop
+            var t: Thunk
+            x = 1234
+            y = 56
+            w[0] = x * y
+            w[1] = x / y
+            w[2] = x % y
+            w[3] = x xor y
+            c = 200
+            d = 7
+            by[0] = c * d
+            by[1] = c / d
+            by[2] = c % d
+            sx = -1234
+            sy = 56
+            ss[0] = sx / sy
+            ss[1] = sx % sy
+            ss[2] = sx * sy
+            ss[3] = sx >> 2
+            sy = -7
+            sx = 100
+            ss[4] = sx / sy
+            ss[5] = sx % sy
+            sx = 5
+            ss[6] = -sx
+            ss[7] = 100 - sx * 3
+            sb = -3
+            ss[8] = i16(sb)
+            sx = -5
+            sy = 3
+            f[0] = 0
+            f[1] = 0
+            f[2] = 0
+            f[3] = 0
+            if sx < sy
+                f[0] = 1
+            end
+            if sx < 0
+                f[1] = 1
+            end
+            if sx > -5
+                f[2] = 1
+            end
+            if sy >= sx
+                f[3] = 1
+            end
+            op = add
+            w[4] = op(3, 4)
+            op = mul
+            w[5] = apply(op, 6, 7)
+            w[6] = apply(add, 100, 23)
+            t = bump
+            hits = 0
+            t()
+            t()
+            by[3] = hits
+            return
+        end
+
+        reentrant function add(a: u16, b: u16): u16
+            return a + b
+        end
+
+        reentrant function mul(a: u16, b: u16): u16
+            return a * b
+        end
+
+        procedure bump()
+            hits = hits + 1
+            return
+        end
+
+        reentrant function apply(fn: Binop, a: u16, b: u16): u16
+            return fn(a, b)
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_long_generated_routine(&binary);
+
+    let word = |at: usize| u16::from_le_bytes([memory.byte(at), memory.byte(at + 1)]);
+    let words: Vec<u16> = (0..7).map(|i| word(0x040040 + 2 * i)).collect();
+    assert_eq!(
+        words,
+        vec![1234u16.wrapping_mul(56), 22, 2, 1234 ^ 56, 7, 42, 123]
+    );
+    let bytes: Vec<u8> = (0..4).map(|i| memory.byte(0x040060 + i)).collect();
+    assert_eq!(bytes, vec![200u8.wrapping_mul(7), 28, 4, 2]);
+    let signed: Vec<i16> = (0..9).map(|i| word(0x040070 + 2 * i) as i16).collect();
+    assert_eq!(
+        signed,
+        vec![
+            -1234 / 56,
+            -1234 % 56,
+            (-1234i16).wrapping_mul(56),
+            -1234 >> 2,
+            100 / -7,
+            100 % -7,
+            -5,
+            85,
+            -3,
+        ]
+    );
+    let flags: Vec<u8> = (0..4).map(|i| memory.byte(0x040090 + i)).collect();
+    assert_eq!(flags, vec![1, 1, 0, 1]);
 }

@@ -14,8 +14,9 @@ This is the current compiler ABI, not a long-term platform standard.
 
 ## Parameters
 
-The current parameter convention supports scalar `u8`, `i8`, `u16`, and `i16`
-parameters.
+Parameters can be any scalar: integers up to 32 bits, pointers and routine
+pointers (records and arrays are passed by pointer). The 65816 backend does not
+handle 32-bit values yet, so there they are limited to 24 bits.
 
 Each parameter is assigned a routine-specific direct-page symbol:
 
@@ -38,8 +39,7 @@ routine.
 `reentrant` routines pass parameters on the stack instead of through
 direct-page symbols. The caller pushes argument values in reverse parameter
 order before `jsr`, the callee reads them with stack-relative addressing, and
-the caller removes the argument bytes after the routine returns. This currently
-supports `u8`, `i8`, `u16`, and `i16` procedure parameters.
+the caller removes the argument bytes after the routine returns.
 
 Reentrant routines also allocate stack storage for default/`stack` locals. On
 entry, the callee subtracts the local frame size from `S`; before every return,
@@ -56,6 +56,37 @@ $(frame_size + 1),s          return address low byte
 $(frame_size + 2),s          return address high byte
 $(frame_size + 3),s ...      parameters in declaration order
 ```
+
+## Routine Pointers
+
+A routine pointer is a 16-bit code address. Only two kinds of routine can be
+called through one, because the caller cannot know a particular routine's
+parameter storage:
+
+- routines without parameters (any ABI except `far` and `interrupt`), and
+- `reentrant` routines, whose arguments go on the stack.
+
+An indirect call pushes the arguments exactly as a direct call would and then
+calls the address. On the 65816 the address goes in `A` and the caller
+`jsr`s to a per-module trampoline, `__mensch_icall` (`dec a / pha / rts`), so
+the callee returns straight to the caller. On the MEGA65 the address goes in
+`__m65_ptr` and the call is `jsr (__m65_ptr)`.
+
+## Arithmetic Support Routines
+
+`*`, `/` and `%` call support routines (multiplying or dividing by a constant
+power of two becomes a shift or mask instead):
+
+- 65816: per-module copies of `__mensch_mul16`, `__mensch_divu16` and
+  `__mensch_divs16` take the left operand in `A` and the right in `X` (16-bit
+  registers; bytes are widened first) and return the product or quotient in
+  `A` and the remainder in `X`. They keep state in module statics, so they are
+  not safe to use from an interrupt handler and the code it interrupts at the
+  same time. Signed compares stage their right operand in the static
+  `__mensch_compare`, with the same caveat.
+- MEGA65: see below.
+
+Division truncates toward zero and the remainder takes the dividend's sign.
 
 ## Interrupts
 
@@ -469,9 +500,18 @@ assignment with the 65816 backend but lowers everything byte by byte:
 
 - Z is zero between instructions; `(bp),z` and `[bp],z` sequences restore it.
 - The IR's virtual accumulator lives in base page (`__m65_acc`, 4 bytes).
-  Scratch pointers `__m65_ptr` and `__m65_farp` and the frame pointer
-  `__m65_fp` are also runtime base-page registers.
-- Function results come back in `A` (byte 0), `X` (byte 1) and `Y` (byte 2).
+  Scratch pointers `__m65_ptr` and `__m65_farp` (a 32-bit flat address), the
+  frame pointer `__m65_fp` and the math operand `__m65_arg` (4 bytes) are also
+  runtime base-page registers.
+- Function results come back in `A` (byte 0), `X` (byte 1), `Y` (byte 2) and
+  `__m65_acc+3` (byte 3), which the frame release leaves alone.
+- Far pointers are 32-bit flat addresses, dereferenced through `[__m65_farp],z`.
+- `*`, `/` and `%` load the operands into `__m65_acc` and `__m65_arg` and call
+  `__m65_mul`, `__m65_divu` or `__m65_divs` (`X` = the operand width in bytes
+  for the divides). Results: product and quotient in `__m65_acc`, remainder in
+  `__m65_arg`. These use the MEGA65 math unit (`$D768-$D77F`) with interrupts
+  held off, and clobber A/X/Y and `__m65_farp`. They live in
+  `mega65::MATH_RUNTIME`, which is linked only into images that call them.
 - Internal and exported routines use direct-page parameters, as on the 65816.
   `far` currently means nothing: every call is `jsr`/`rts`.
 - The runtime runs with a 16-bit stack pointer. Routines with stack storage
@@ -496,7 +536,8 @@ assignment with the 65816 backend but lowers everything byte by byte:
   redundant load/store removal, branch shortening). It treats only
   compiler-owned storage as plain RAM: accesses to user globals, including
   `fixed` hardware registers, are kept exactly as written. Callees never take
-  inputs in the base-page scratch registers.
+  inputs in the base-page scratch registers, except the math routines
+  (`__m65_acc`, `__m65_arg`) and indirect calls (the vector in `__m65_ptr`).
 - Array indexing forms the full 16-bit address `base + index` in
   `__m65_ptr`, so indexes are not limited to the 8-bit X register.
 - Interrupt routines save A/X/Y/Z, re-establish Z = 0, and save the

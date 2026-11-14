@@ -300,6 +300,7 @@ fn emit_inst(inst: &AsmInst) -> String {
         AsmInst::Sbc(operand) => one_operand("sbc", operand),
         AsmInst::And(operand) => one_operand("and", operand),
         AsmInst::Ora(operand) => one_operand("ora", operand),
+        AsmInst::Eor(operand) => one_operand("eor", operand),
         AsmInst::AslA => "asl a".to_owned(),
         AsmInst::LsrA => "lsr a".to_owned(),
         AsmInst::Xba => "xba".to_owned(),

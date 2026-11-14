@@ -1129,3 +1129,308 @@ fn word_arrays_index_by_element_and_compares_keep_their_left_side() {
         &[0x00, 0x11, 0x01, 0x11, 0x02, 0x11, 0x03, 0x11]
     );
 }
+
+const LANGUAGE_FEATURES: &str = "
+module LanguageFeatures
+fixed($0a00) volatile var w: [16]u16
+fixed($0a20) volatile var by: [16]u8
+fixed($0a30) volatile var qs: [12]u32
+fixed($0a60) volatile var f: [16]u8
+fixed($0a70) volatile var ss: [10]i16
+
+type Binop = reentrant function(a: u16, b: u16): u16
+type Thunk = procedure()
+
+var hits: u8
+var op: Binop
+
+reentrant function add(a: u16, b: u16): u16
+    return a + b
+end
+
+reentrant function mul(a: u16, b: u16): u16
+    return a * b
+end
+
+procedure bump()
+    hits = hits + 1
+    return
+end
+
+reentrant function apply(fn: Binop, a: u16, b: u16): u16
+    return fn(a, b)
+end
+
+reentrant function wide(a: u32, b: u32): u32
+    return a * b + 1
+end
+
+function big(): u32
+    return $12345678
+end
+
+reentrant function flag(value: u8): u8
+    return value
+end
+
+export function main(): u8
+    var x: u16
+    var y: u16
+    var c: u8
+    var d: u8
+    var sx: i16
+    var sy: i16
+    var sb: i8
+    var l: u32
+    var m: u32
+    var sl: i32
+    var t: Thunk
+    var fp: far ^u8
+
+    x = 1234
+    y = 56
+    w[0] = x * y
+    w[1] = x / y
+    w[2] = x % y
+    w[3] = x * 8
+    w[4] = x / 16
+    w[5] = x % 16
+    w[6] = x xor y
+    y = 0
+    w[7] = x / y
+    c = 200
+    d = 7
+    by[0] = c * d
+    by[1] = c / d
+    by[2] = c % d
+
+    sx = -1234
+    sy = 56
+    ss[0] = sx / sy
+    ss[1] = sx % sy
+    ss[2] = sx * sy
+    ss[3] = sx >> 2
+    sy = -7
+    sx = 100
+    ss[4] = sx / sy
+    ss[5] = sx % sy
+    sx = -100
+    ss[6] = sx / sy
+    ss[7] = sx % sy
+    sx = 5
+    ss[8] = -sx
+    ss[9] = 100 - sx * 3
+
+    sx = -5
+    sy = 3
+    if sx < sy
+        f[0] = 1
+    end
+    if sy > sx
+        f[1] = 1
+    end
+    if sx < 0
+        f[2] = 1
+    end
+    if sx >= -5
+        f[3] = 1
+    end
+    if sx > -5
+        f[4] = 1
+    else
+        f[4] = 0
+    end
+    x = $fffb
+    if x < 3
+        f[5] = 1
+    else
+        f[5] = 0
+    end
+
+    sb = -3
+    sx = i16(sb)
+    w[8] = u16(sx)
+    sl = i32(sx)
+    qs[0] = u32(sl)
+    c = $f0
+    w[9] = u16(c)
+
+    l = 100000
+    m = 300
+    qs[1] = l * m
+    qs[2] = l / m
+    qs[3] = l % m
+    qs[4] = l + m - 1
+    qs[5] = big()
+    qs[6] = wide(l, 3)
+    sl = -100000
+    qs[7] = u32(sl / 7)
+    if l > m
+        f[6] = 1
+    end
+    if sl < 0
+        f[7] = 1
+    end
+    l = $12345678
+    qs[8] = l >> 4
+    qs[9] = l << 8
+    sl = -256
+    qs[10] = u32(sl >> 4)
+    qs[11] = u32(sl % 100)
+
+    op = add
+    w[10] = op(3, 4)
+    op = mul
+    w[11] = apply(op, 6, 7)
+    w[12] = apply(add, 100, 23)
+    t = bump
+    hits = 0
+    t()
+    t()
+    by[3] = hits
+    f[8] = flag(u8(apply(add, 1, 1)))
+
+    fp = $00000a20
+    by[4] = fp^
+    return 0
+end
+";
+
+#[test]
+fn multiply_divide_signed_32_bit_and_routine_pointers() {
+    let Some(run) = run_source("language-features", LANGUAGE_FEATURES) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 0);
+    let word =
+        |i: usize| u16::from_le_bytes([run.memory[0x0a00 + 2 * i], run.memory[0x0a01 + 2 * i]]);
+    let signed =
+        |i: usize| i16::from_le_bytes([run.memory[0x0a70 + 2 * i], run.memory[0x0a71 + 2 * i]]);
+    let quad = |i: usize| {
+        let at = 0x0a30 + 4 * i;
+        u32::from_le_bytes(run.memory[at..at + 4].try_into().unwrap())
+    };
+    let words: Vec<u16> = (0..13).map(word).collect();
+    assert_eq!(
+        words,
+        vec![
+            1234u16.wrapping_mul(56),
+            1234 / 56,
+            1234 % 56,
+            1234 * 8,
+            1234 / 16,
+            1234 % 16,
+            1234 ^ 56,
+            0xffff,
+            0xfffd,
+            0x00f0,
+            7,
+            42,
+            123,
+        ]
+    );
+    assert_eq!(
+        &run.memory[0x0a20..0x0a25],
+        &[
+            200u8.wrapping_mul(7),
+            200 / 7,
+            200 % 7,
+            2,
+            200u8.wrapping_mul(7)
+        ]
+    );
+    let signeds: Vec<i16> = (0..10).map(signed).collect();
+    assert_eq!(
+        signeds,
+        vec![
+            -1234 / 56,
+            -1234 % 56,
+            (-1234i16).wrapping_mul(56),
+            -1234 >> 2,
+            100 / -7,
+            100 % -7,
+            -100 / -7,
+            -100 % -7,
+            -5,
+            85,
+        ]
+    );
+    let quads: Vec<u32> = (0..12).map(quad).collect();
+    assert_eq!(
+        quads,
+        vec![
+            -3i32 as u32,
+            30_000_000,
+            333,
+            100,
+            100_299,
+            0x1234_5678,
+            300_001,
+            (-100_000i32 / 7) as u32,
+            0x0123_4567,
+            0x3456_7800,
+            -16i32 as u32,
+            (-256i32 % 100) as u32,
+        ]
+    );
+    assert_eq!(&run.memory[0x0a60..0x0a69], &[1, 1, 1, 1, 0, 0, 1, 1, 2]);
+}
+
+#[test]
+fn interrupts_can_multiply_and_divide_while_main_code_does() {
+    let Some(run) = run_source(
+        "irq-math",
+        "
+        module IrqMath
+        vector irq = tick
+        fixed($dc04) volatile var cia1_ta_lo: u8
+        fixed($dc05) volatile var cia1_ta_hi: u8
+        fixed($dc0d) volatile var cia1_icr: u8
+        fixed($dc0e) volatile var cia1_cra: u8
+        fixed($d01a) volatile var vic_irq_mask: u8
+        fixed($0900) volatile var ticks: u16
+        fixed($0902) volatile var result: u32
+        fixed($0906) volatile var isr_out: u16
+
+        export function main(): u8
+            var i: u32
+            var sum: u32
+            vic_irq_mask = 0
+            cia1_icr = $7f
+            ticks = 0
+            cia1_ta_lo = $f4
+            cia1_ta_hi = $01
+            cia1_icr = $81
+            cia1_cra = $11
+            asm \"cli\"
+            i = 1
+            sum = 0
+            while i != 3000
+                sum = sum + i * 7919 / (i % 13 + 1)
+                i = i + 1
+            end
+            asm \"sei\"
+            result = sum
+            return 0
+        end
+
+        interrupt procedure tick()
+            var ack: u8
+            ack = cia1_icr
+            ticks = ticks + 1
+            isr_out = ticks * 37 / 3 % 1000
+            return
+        end
+        ",
+    ) else {
+        return;
+    };
+    let expected = (1u32..3000).fold(0u32, |sum, i| sum.wrapping_add(i * 7919 / (i % 13 + 1)));
+    let ticks = u16::from_le_bytes([run.memory[0x0900], run.memory[0x0901]]);
+    assert_eq!(run.exit_code, 0);
+    assert!(ticks > 5, "expected timer interrupts, got {ticks}");
+    assert_eq!(
+        u32::from_le_bytes(run.memory[0x0902..0x0906].try_into().unwrap()),
+        expected
+    );
+}

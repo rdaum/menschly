@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, Const, CopRegister, Entry, EntryKind, Field, Global, GlobalPlacement, Import,
-    InterruptPreserve, IrInst, Label, Library, Local, Metadata, Module, Param, PointerKind,
-    Routine, RoutineKind, StaticData, Storage, Type, Value, Vector, Width,
+    Abi, Address, BinaryOp, Const, CopRegister, Entry, EntryKind, Field, Global, GlobalPlacement,
+    Import, InterruptPreserve, IrInst, Label, Library, Local, Metadata, Module, Param, PointerKind,
+    Routine, RoutineKind, RoutineType, StaticData, Storage, Type, Value, Vector, Width,
 };
 
 pub fn parse_source(source: &str) -> Result<SourceModule, FrontendError> {
@@ -56,7 +56,7 @@ pub struct EntryDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstDecl {
     pub name: String,
-    pub value: u32,
+    pub value: i64,
     pub ty: Type,
 }
 
@@ -176,13 +176,22 @@ pub enum Expr {
     Number(u32),
     String(String),
     Name(String),
-    Call { name: String, args: Vec<Expr> },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
     ResultOk(Box<Expr>),
     ResultErr(Box<Expr>),
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
+    Mul(Box<Expr>, Box<Expr>),
+    Div(Box<Expr>, Box<Expr>),
+    Rem(Box<Expr>, Box<Expr>),
+    /// Unary minus.
+    Neg(Box<Expr>),
     BitAnd(Box<Expr>, Box<Expr>),
     BitOr(Box<Expr>, Box<Expr>),
+    BitXor(Box<Expr>, Box<Expr>),
     ShiftLeft(Box<Expr>, Box<Expr>),
     ShiftRight(Box<Expr>, Box<Expr>),
     Deref(Box<Expr>),
@@ -230,6 +239,9 @@ enum TokenKind {
     Caret,
     Plus,
     Minus,
+    Star,
+    Slash,
+    Percent,
     Amp,
     Pipe,
     ShiftLeft,
@@ -277,6 +289,9 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             '^' => out.push(token(TokenKind::Caret, offset)),
             '+' => out.push(token(TokenKind::Plus, offset)),
             '-' => out.push(token(TokenKind::Minus, offset)),
+            '*' => out.push(token(TokenKind::Star, offset)),
+            '/' => out.push(token(TokenKind::Slash, offset)),
+            '%' => out.push(token(TokenKind::Percent, offset)),
             '&' => out.push(token(TokenKind::Amp, offset)),
             '|' => out.push(token(TokenKind::Pipe, offset)),
             '<' => {
@@ -678,9 +693,17 @@ impl Parser {
     fn parse_const_decl(&mut self) -> Result<ConstDecl, FrontendError> {
         let name = self.expect_ident()?;
         self.expect(TokenKind::Equal)?;
-        let value = self
-            .take_number()
-            .ok_or_else(|| self.parse_error("expected constant value"))?;
+        let negative = self.take(TokenKind::Minus);
+        let magnitude = i64::from(
+            self.take_number()
+                .ok_or_else(|| self.parse_error("expected constant value"))?,
+        );
+        let value = if negative { -magnitude } else { magnitude };
+        if value < -0x8000_0000 {
+            return Err(FrontendError::Parse(format!(
+                "constant {name} = {value} does not fit in 32 bits"
+            )));
+        }
         Ok(ConstDecl {
             name,
             value,
@@ -689,16 +712,15 @@ impl Parser {
     }
 
     fn parse_external_decl(&mut self) -> Result<ExternalDecl, FrontendError> {
-        let (_export, abi, interrupt_preserve, interrupt_raw, interrupt_cop, kind, name, params) =
-            self.parse_routine_header()?;
+        let header = self.parse_routine_header()?;
         Ok(ExternalDecl {
-            name,
-            kind,
-            abi,
-            interrupt_preserve,
-            interrupt_raw,
-            interrupt_cop,
-            params,
+            name: header.name,
+            kind: header.kind,
+            abi: header.abi,
+            interrupt_preserve: header.interrupt.preserve,
+            interrupt_raw: header.interrupt.raw,
+            interrupt_cop: header.interrupt.cop,
+            params: header.params,
         })
     }
 
@@ -746,8 +768,14 @@ impl Parser {
     }
 
     fn parse_routine(&mut self) -> Result<RoutineDecl, FrontendError> {
-        let (export, abi, interrupt_preserve, interrupt_raw, interrupt_cop, kind, name, params) =
-            self.parse_routine_header()?;
+        let RoutineHeader {
+            export,
+            abi,
+            interrupt,
+            kind,
+            name,
+            params,
+        } = self.parse_routine_header()?;
 
         let mut locals = Vec::new();
         let mut body = Vec::new();
@@ -766,9 +794,9 @@ impl Parser {
             name,
             kind,
             abi,
-            interrupt_preserve,
-            interrupt_raw,
-            interrupt_cop,
+            interrupt_preserve: interrupt.preserve,
+            interrupt_raw: interrupt.raw,
+            interrupt_cop: interrupt.cop,
             export,
             params,
             locals,
@@ -776,68 +804,50 @@ impl Parser {
         })
     }
 
-    fn parse_routine_header(
-        &mut self,
-    ) -> Result<
-        (
-            bool,
-            Abi,
-            InterruptPreserve,
-            bool,
-            bool,
-            RoutineDeclKind,
-            String,
-            Vec<VarDecl>,
-        ),
-        FrontendError,
-    > {
+    fn parse_routine_header(&mut self) -> Result<RoutineHeader, FrontendError> {
         let export = self.take_keyword("export");
         let mut abi = Abi::Internal;
-        let mut interrupt_preserve = InterruptPreserve::NONE;
-        let mut interrupt_raw = false;
-        let mut interrupt_cop = false;
+        let mut interrupt = InterruptAttr {
+            preserve: InterruptPreserve::NONE,
+            raw: false,
+            cop: false,
+        };
         if self.take_keyword("far") {
             abi = Abi::Far;
         } else if self.take_keyword("interrupt") {
             abi = Abi::Interrupt;
-            let interrupt_attr = self.parse_interrupt_attr()?;
-            interrupt_preserve = interrupt_attr.preserve;
-            interrupt_raw = interrupt_attr.raw;
-            interrupt_cop = interrupt_attr.cop;
+            interrupt = self.parse_interrupt_attr()?;
         } else if self.take_keyword("reentrant") {
             abi = Abi::Reentrant;
         }
 
-        let kind = if self.take_keyword("procedure") {
-            RoutineDeclKind::Procedure
+        let is_function = if self.take_keyword("procedure") {
+            false
         } else if self.take_keyword("function") {
-            RoutineDeclKind::Function { result: Type::U8 }
+            true
         } else {
             return Err(self.parse_error("expected procedure or function"));
         };
 
         let name = self.expect_ident()?;
         let params = self.parse_params()?;
-        let kind = match kind {
-            RoutineDeclKind::Procedure => RoutineDeclKind::Procedure,
-            RoutineDeclKind::Function { .. } => {
-                self.expect(TokenKind::Colon)?;
-                RoutineDeclKind::Function {
-                    result: self.parse_type()?,
-                }
+        let kind = if is_function {
+            self.expect(TokenKind::Colon)?;
+            RoutineDeclKind::Function {
+                result: self.parse_type()?,
             }
+        } else {
+            RoutineDeclKind::Procedure
         };
 
-        Ok((
+        Ok(RoutineHeader {
             export,
             abi,
-            interrupt_preserve,
-            interrupt_raw,
-            interrupt_cop,
+            interrupt,
             kind,
             name,
             params,
-        ))
+        })
     }
 
     fn parse_interrupt_attr(&mut self) -> Result<InterruptAttr, FrontendError> {
@@ -1002,6 +1012,12 @@ impl Parser {
                 kind: PointerKind::Direct,
             });
         }
+        if self.is_keyword_at(0, "reentrant")
+            || self.is_keyword_at(0, "procedure")
+            || self.is_keyword_at(0, "function")
+        {
+            return self.parse_routine_type();
+        }
 
         let name = self.expect_ident()?;
         match name.as_str() {
@@ -1010,12 +1026,70 @@ impl Parser {
             "u16" => Ok(Type::U16),
             "i16" => Ok(Type::I16),
             "u24" => Ok(Type::U24),
+            "u32" => Ok(Type::U32),
+            "i32" => Ok(Type::I32),
             _ => self
                 .types
                 .get(&name)
                 .cloned()
                 .ok_or_else(|| FrontendError::Parse(format!("unknown type {name}"))),
         }
+    }
+
+    /// `[reentrant] procedure(params)` or `[reentrant] function(params): T`,
+    /// where each parameter is a type, optionally named (`count: u16`).
+    fn parse_routine_type(&mut self) -> Result<Type, FrontendError> {
+        let abi = if self.take_keyword("reentrant") {
+            Abi::Reentrant
+        } else {
+            Abi::Internal
+        };
+        let is_function = if self.take_keyword("function") {
+            true
+        } else {
+            self.expect_keyword("procedure")?;
+            false
+        };
+        self.expect(TokenKind::LParen)?;
+        let mut params = Vec::new();
+        if !self.take(TokenKind::RParen) {
+            loop {
+                if matches!(
+                    self.tokens.get(self.pos + 1).map(|token| &token.kind),
+                    Some(TokenKind::Colon)
+                ) {
+                    self.expect_ident()?;
+                    self.expect(TokenKind::Colon)?;
+                }
+                params.push(self.parse_type()?);
+                if self.take(TokenKind::RParen) {
+                    break;
+                }
+                self.expect(TokenKind::Comma)?;
+            }
+        }
+        let result = if is_function {
+            self.expect(TokenKind::Colon)?;
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        let routine = RoutineType {
+            // Without parameters the two conventions are the same call.
+            abi: if params.is_empty() {
+                Abi::Internal
+            } else {
+                abi
+            },
+            params,
+            result,
+        };
+        if !routine.params.is_empty() && !matches!(routine.abi, Abi::Reentrant) {
+            return Err(self.parse_error(
+                "routine types with parameters must be reentrant (arguments on the stack)",
+            ));
+        }
+        Ok(Type::Routine(Box::new(routine)))
     }
 
     fn parse_record_type(&mut self) -> Result<Type, FrontendError> {
@@ -1187,12 +1261,22 @@ impl Parser {
         Ok(Cond::Compare(CondCompare { lhs, op, rhs }))
     }
 
-    /// Binary operator precedence follows C: `|` < `&` < shifts < `+`/`-`.
+    /// Binary operator precedence follows C: `|` < `xor` < `&` < shifts <
+    /// `+`/`-` < `*`/`/`/`%` < unary `-`.
     fn parse_expr(&mut self) -> Result<Expr, FrontendError> {
-        let mut expr = self.parse_bit_and()?;
+        let mut expr = self.parse_bit_xor()?;
         while self.take(TokenKind::Pipe) {
-            let rhs = self.parse_bit_and()?;
+            let rhs = self.parse_bit_xor()?;
             expr = Expr::BitOr(Box::new(expr), Box::new(rhs));
+        }
+        Ok(expr)
+    }
+
+    fn parse_bit_xor(&mut self) -> Result<Expr, FrontendError> {
+        let mut expr = self.parse_bit_and()?;
+        while self.take_keyword("xor") {
+            let rhs = self.parse_bit_and()?;
+            expr = Expr::BitXor(Box::new(expr), Box::new(rhs));
         }
         Ok(expr)
     }
@@ -1223,19 +1307,44 @@ impl Parser {
     }
 
     fn parse_add(&mut self) -> Result<Expr, FrontendError> {
-        let mut expr = self.parse_postfix()?;
+        let mut expr = self.parse_mul()?;
         loop {
             if self.take(TokenKind::Plus) {
-                let rhs = self.parse_postfix()?;
+                let rhs = self.parse_mul()?;
                 expr = Expr::Add(Box::new(expr), Box::new(rhs));
             } else if self.take(TokenKind::Minus) {
-                let rhs = self.parse_postfix()?;
+                let rhs = self.parse_mul()?;
                 expr = Expr::Sub(Box::new(expr), Box::new(rhs));
             } else {
                 break;
             }
         }
         Ok(expr)
+    }
+
+    fn parse_mul(&mut self) -> Result<Expr, FrontendError> {
+        let mut expr = self.parse_unary()?;
+        loop {
+            let make: fn(Box<Expr>, Box<Expr>) -> Expr = if self.take(TokenKind::Star) {
+                Expr::Mul
+            } else if self.take(TokenKind::Slash) {
+                Expr::Div
+            } else if self.take(TokenKind::Percent) {
+                Expr::Rem
+            } else {
+                break;
+            };
+            let rhs = self.parse_unary()?;
+            expr = make(Box::new(expr), Box::new(rhs));
+        }
+        Ok(expr)
+    }
+
+    fn parse_unary(&mut self) -> Result<Expr, FrontendError> {
+        if self.take(TokenKind::Minus) {
+            return Ok(Expr::Neg(Box::new(self.parse_unary()?)));
+        }
+        self.parse_postfix()
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, FrontendError> {
@@ -1456,9 +1565,24 @@ fn cop_register_builtin(name: &str) -> Option<CopRegister> {
 fn integer_cast_builtin(name: &str) -> Option<Type> {
     match name {
         "u8" => Some(Type::U8),
+        "i8" => Some(Type::I8),
         "u16" => Some(Type::U16),
+        "i16" => Some(Type::I16),
+        "u24" => Some(Type::U24),
+        "u32" => Some(Type::U32),
+        "i32" => Some(Type::I32),
         _ => None,
     }
+}
+
+/// Everything before a routine's body.
+struct RoutineHeader {
+    export: bool,
+    abi: Abi,
+    interrupt: InterruptAttr,
+    kind: RoutineDeclKind,
+    name: String,
+    params: Vec<VarDecl>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1555,6 +1679,12 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
         kind: entry.kind,
         routine: entry.routine.clone(),
     });
+    for global in &source.globals {
+        check_symbol_name("global", &global.name)?;
+    }
+    for routine in &source.routines {
+        check_symbol_name("routine", &routine.name)?;
+    }
     module.globals = source
         .globals
         .iter()
@@ -1715,10 +1845,11 @@ impl Lowerer {
                     | Type::I8
                     | Type::U16
                     | Type::I16
-                    | Type::Pointer {
-                        kind: PointerKind::Near | PointerKind::Direct | PointerKind::Code,
-                        ..
-                    }
+                    | Type::U24
+                    | Type::U32
+                    | Type::I32
+                    | Type::Pointer { .. }
+                    | Type::Routine(_)
             )
         }) {
             return Err(FrontendError::Type(format!(
@@ -1864,13 +1995,17 @@ impl<'a> RoutineLowerer<'a> {
             }
             Stmt::Assign { target, value } => self.lower_assign(target, value),
             Stmt::Call { name, args } => {
+                if let Some(routine) = self.routine_pointer(name) {
+                    return self.lower_indirect_call(name, &routine, args, None);
+                }
                 let sig = self.check_call(name, args, true)?;
-                self.lower_call_args(name, args, &sig.params)?;
+                let params: Vec<Type> = sig.params.iter().map(|param| param.ty.clone()).collect();
+                self.lower_call_args(name, sig.abi, args, &sig.params)?;
                 self.body.push(IrInst::CallProcedure {
                     name: name.clone(),
                     abi: sig.abi,
                 });
-                self.cleanup_call_args(name, &sig.params)?;
+                self.cleanup_call_args(sig.abi, &params);
                 Ok(())
             }
             Stmt::If {
@@ -2044,9 +2179,17 @@ impl<'a> RoutineLowerer<'a> {
         target: Label,
         branch_when_true: bool,
     ) -> Result<(), FrontendError> {
-        let lhs_ty = self.infer_expr(&cond.lhs)?;
+        let mut lhs_ty = self.infer_expr(&cond.lhs)?;
         let rhs_ty = self.infer_expr(&cond.rhs)?;
+        // `0 < x` compares at the width (and signedness) of `x`.
+        if self.is_const_expr(&cond.lhs)? && !self.is_const_expr(&cond.rhs)? {
+            compatible_expr_width(&rhs_ty, &lhs_ty, true)?;
+            lhs_ty = rhs_ty.clone();
+        }
         let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(&cond.rhs)?)?;
+        // Equality does not depend on signedness.
+        let signed = (lhs_ty.is_signed() || rhs_ty.is_signed())
+            && !matches!(cond.op, CondOp::Eq | CondOp::Ne);
         // The left side may stay in the accumulator only if evaluating the
         // right side cannot disturb it.
         let rhs_is_simple = matches!(cond.rhs, Expr::Number(_) | Expr::Name(_));
@@ -2059,7 +2202,12 @@ impl<'a> RoutineLowerer<'a> {
             Value::Accumulator
         };
         let rhs = self.expr_value(&cond.rhs, &lhs_ty)?;
-        self.body.push(IrInst::Compare { width, lhs, rhs });
+        self.body.push(IrInst::Compare {
+            width,
+            signed,
+            lhs,
+            rhs,
+        });
         self.lower_compare_result_branch(cond.op, target, branch_when_true);
         Ok(())
     }
@@ -2104,11 +2252,19 @@ impl<'a> RoutineLowerer<'a> {
         expected: &Type,
         dst: Value,
     ) -> Result<(), FrontendError> {
+        if !matches!(expr, Expr::Number(_) | Expr::Name(_)) && self.is_const_expr(expr)? {
+            let value = self.const_expr_value(expr)?;
+            self.body.push(IrInst::LoadConst {
+                dst,
+                value: const_for_type(value, expected)?,
+            });
+            return Ok(());
+        }
         match expr {
             Expr::Number(value) => {
                 self.body.push(IrInst::LoadConst {
                     dst,
-                    value: const_for_type(*value, expected)?,
+                    value: const_for_type(i64::from(*value), expected)?,
                 });
                 Ok(())
             }
@@ -2123,11 +2279,20 @@ impl<'a> RoutineLowerer<'a> {
                 Ok(())
             }
             Expr::Name(name) => {
+                if let Some(routine) = self.routine_address(name)? {
+                    ensure_assignable(expected, &Type::Routine(Box::new(routine)))?;
+                    self.body.push(IrInst::LoadAddress {
+                        dst,
+                        symbol: name.clone(),
+                        width: Width::Word,
+                    });
+                    return Ok(());
+                }
                 let binding = self.binding(name)?.clone();
                 if let Value::Const(value) = binding.value {
                     self.body.push(IrInst::LoadConst {
                         dst,
-                        value: coerce_const(value, expected)?,
+                        value: const_for_type(const_value(value, &binding.ty), expected)?,
                     });
                     return Ok(());
                 }
@@ -2170,10 +2335,14 @@ impl<'a> RoutineLowerer<'a> {
                     self.lower_cop_call(args, expected, dst)?;
                     return Ok(());
                 }
+                if let Some(routine) = self.routine_pointer(name) {
+                    return self.lower_indirect_call(name, &routine, args, Some((expected, dst)));
+                }
                 let sig = self.check_call(name, args, false)?;
                 let result = sig.result_type(name)?;
                 ensure_assignable(expected, &result)?;
-                self.lower_call_args(name, args, &sig.params)?;
+                let params: Vec<Type> = sig.params.iter().map(|param| param.ty.clone()).collect();
+                self.lower_call_args(name, sig.abi, args, &sig.params)?;
                 let capture_before_cleanup = matches!(sig.abi, Abi::Reentrant)
                     && !sig.params.is_empty()
                     && (matches!(dst, Value::Accumulator | Value::Stack { .. })
@@ -2190,7 +2359,7 @@ impl<'a> RoutineLowerer<'a> {
                     width: width_for_type(&result)?,
                     dst: call_dst.clone(),
                 });
-                self.cleanup_call_args(name, &sig.params)?;
+                self.cleanup_call_args(sig.abi, &params);
                 if capture_before_cleanup {
                     self.body.push(IrInst::Move {
                         width: width_for_type(&result)?,
@@ -2227,9 +2396,7 @@ impl<'a> RoutineLowerer<'a> {
                 Ok(())
             }
             Expr::Add(lhs, rhs) => {
-                let lhs_ty = self.infer_expr(lhs)?;
-                let rhs_ty = self.infer_expr(rhs)?;
-                let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
+                let (lhs_ty, width) = self.operand_type(lhs, rhs)?;
                 ensure_assignable(expected, &lhs_ty)?;
                 let lhs = self.expr_value(lhs, &lhs_ty)?;
                 let rhs = self.expr_value(rhs, &lhs_ty)?;
@@ -2242,9 +2409,7 @@ impl<'a> RoutineLowerer<'a> {
                 Ok(())
             }
             Expr::Sub(lhs, rhs) => {
-                let lhs_ty = self.infer_expr(lhs)?;
-                let rhs_ty = self.infer_expr(rhs)?;
-                let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
+                let (lhs_ty, width) = self.operand_type(lhs, rhs)?;
                 ensure_assignable(expected, &lhs_ty)?;
                 let lhs = self.expr_value(lhs, &lhs_ty)?;
                 let rhs = self.expr_value(rhs, &lhs_ty)?;
@@ -2256,10 +2421,25 @@ impl<'a> RoutineLowerer<'a> {
                 });
                 Ok(())
             }
+            Expr::Mul(lhs, rhs)
+            | Expr::Div(lhs, rhs)
+            | Expr::Rem(lhs, rhs)
+            | Expr::BitXor(lhs, rhs) => self.lower_binary(expr, lhs, rhs, expected, dst),
+            Expr::Neg(value) => {
+                let ty = self.infer_expr(value)?;
+                let width = width_for_type(&ty)?;
+                ensure_assignable(expected, &ty)?;
+                let value = self.expr_value(value, &ty)?;
+                self.body.push(IrInst::Sub {
+                    width,
+                    dst,
+                    lhs: Value::Const(wrap_const(0, width)),
+                    rhs: value,
+                });
+                Ok(())
+            }
             Expr::BitAnd(lhs, rhs) => {
-                let lhs_ty = self.infer_expr(lhs)?;
-                let rhs_ty = self.infer_expr(rhs)?;
-                let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
+                let (lhs_ty, width) = self.operand_type(lhs, rhs)?;
                 ensure_assignable(expected, &lhs_ty)?;
                 let lhs = self.expr_value(lhs, &lhs_ty)?;
                 let rhs = self.expr_value(rhs, &lhs_ty)?;
@@ -2272,9 +2452,7 @@ impl<'a> RoutineLowerer<'a> {
                 Ok(())
             }
             Expr::BitOr(lhs, rhs) => {
-                let lhs_ty = self.infer_expr(lhs)?;
-                let rhs_ty = self.infer_expr(rhs)?;
-                let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
+                let (lhs_ty, width) = self.operand_type(lhs, rhs)?;
                 ensure_assignable(expected, &lhs_ty)?;
                 let lhs = self.expr_value(lhs, &lhs_ty)?;
                 let rhs = self.expr_value(rhs, &lhs_ty)?;
@@ -2291,10 +2469,19 @@ impl<'a> RoutineLowerer<'a> {
                 let count = self.shift_count(&lhs_ty, rhs)?;
                 let width = width_for_type(&lhs_ty)?;
                 ensure_assignable(expected, &lhs_ty)?;
+                let signed = lhs_ty.is_signed();
                 let lhs = self.expr_value(lhs, &lhs_ty)?;
                 let rhs = Value::Const(Const::U8(count));
                 self.body.push(if matches!(expr, Expr::ShiftLeft(..)) {
                     IrInst::ShiftLeft {
+                        width,
+                        dst,
+                        lhs,
+                        rhs,
+                    }
+                } else if signed {
+                    IrInst::Binary {
+                        op: BinaryOp::ShiftRightSigned,
                         width,
                         dst,
                         lhs,
@@ -2344,8 +2531,14 @@ impl<'a> RoutineLowerer<'a> {
     }
 
     fn expr_value(&mut self, expr: &Expr, expected: &Type) -> Result<Value, FrontendError> {
+        if integer_width(expected).is_some() && self.is_const_expr(expr)? {
+            return Ok(Value::Const(const_for_type(
+                self.const_expr_value(expr)?,
+                expected,
+            )?));
+        }
         match expr {
-            Expr::Number(value) => Ok(Value::Const(const_for_type(*value, expected)?)),
+            Expr::Number(value) => Ok(Value::Const(const_for_type(i64::from(*value), expected)?)),
             Expr::String(value) => {
                 ensure_assignable(expected, &string_literal_type())?;
                 let symbol = self.parent.intern_string(value);
@@ -2357,10 +2550,13 @@ impl<'a> RoutineLowerer<'a> {
                 });
                 Ok(temp)
             }
-            Expr::Name(name) => {
+            Expr::Name(name) if self.bindings.contains_key(name) => {
                 let binding = self.binding(name)?;
                 if let Value::Const(value) = binding.value {
-                    return Ok(Value::Const(coerce_const(value, expected)?));
+                    return Ok(Value::Const(const_for_type(
+                        const_value(value, &binding.ty),
+                        expected,
+                    )?));
                 }
                 ensure_assignable(expected, &binding.ty)?;
                 Ok(binding.value.clone())
@@ -2476,7 +2672,7 @@ impl<'a> RoutineLowerer<'a> {
             return Ok(index);
         }
         if let Value::Const(value) = index {
-            let offset = u32::from(const_to_u32(value)? as u16) * u32::from(element_size);
+            let offset = u32::from(value.bits() as u16) * u32::from(element_size);
             return Ok(Value::Const(Const::U16(offset as u16)));
         }
         let source = if matches!(index, Value::Accumulator) {
@@ -2556,11 +2752,21 @@ impl<'a> RoutineLowerer<'a> {
 
     fn infer_expr(&self, expr: &Expr) -> Result<Type, FrontendError> {
         match expr {
-            Expr::Number(value) if *value <= 0xff => Ok(Type::U8),
-            Expr::Number(value) if *value <= 0xffff => Ok(Type::U16),
-            Expr::Number(_) => Ok(Type::U24),
+            Expr::Number(value) => Ok(const_type(i64::from(*value))),
             Expr::String(_) => Ok(string_literal_type()),
-            Expr::Name(name) => Ok(self.binding(name)?.ty.clone()),
+            Expr::Name(name) => match self.routine_address(name)? {
+                Some(routine) => Ok(Type::Routine(Box::new(routine))),
+                None => Ok(self.binding(name)?.ty.clone()),
+            },
+            Expr::Neg(value) if self.is_const_expr(value)? => {
+                Ok(const_type(-self.const_expr_value(value)?))
+            }
+            Expr::Neg(value) => self.infer_expr(value),
+            Expr::Call { name, args } if self.routine_pointer(name).is_some() => {
+                let routine = self.routine_pointer(name).expect("checked above");
+                self.check_indirect_call(name, &routine, args, false)?;
+                Ok(routine.result.clone().expect("checked: a function"))
+            }
             Expr::Call { name, args } if name == "addr" => {
                 self.addr_builtin_symbol(args)?;
                 Ok(addr_builtin_type())
@@ -2590,18 +2796,13 @@ impl<'a> RoutineLowerer<'a> {
                 ok: Box::new(Type::U8),
                 err: Box::new(self.infer_expr(value)?),
             }),
-            Expr::Add(lhs, rhs) | Expr::Sub(lhs, rhs) => {
-                let lhs_ty = self.infer_expr(lhs)?;
-                let rhs_ty = self.infer_expr(rhs)?;
-                compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
-                Ok(lhs_ty)
-            }
-            Expr::BitAnd(lhs, rhs) | Expr::BitOr(lhs, rhs) => {
-                let lhs_ty = self.infer_expr(lhs)?;
-                let rhs_ty = self.infer_expr(rhs)?;
-                compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
-                Ok(lhs_ty)
-            }
+            Expr::Add(lhs, rhs) | Expr::Sub(lhs, rhs) => Ok(self.operand_type(lhs, rhs)?.0),
+            Expr::BitAnd(lhs, rhs)
+            | Expr::BitOr(lhs, rhs)
+            | Expr::BitXor(lhs, rhs)
+            | Expr::Mul(lhs, rhs)
+            | Expr::Div(lhs, rhs)
+            | Expr::Rem(lhs, rhs) => Ok(self.operand_type(lhs, rhs)?.0),
             Expr::ShiftLeft(lhs, rhs) | Expr::ShiftRight(lhs, rhs) => {
                 let lhs_ty = self.infer_expr(lhs)?;
                 self.shift_count(&lhs_ty, rhs)?;
@@ -2747,25 +2948,42 @@ impl<'a> RoutineLowerer<'a> {
     ) -> Result<(), FrontendError> {
         self.check_integer_cast(name, args)?;
         ensure_assignable(expected, target)?;
-        let source_ty = self.infer_expr(&args[0])?;
-        let value = self.expr_value(&args[0], &source_ty)?;
-        if matches!(target, Type::U16) && matches!(source_ty, Type::U8) {
+        let width = width_for_type(target)?;
+        // Casts of constants truncate (or sign-extend) at compile time.
+        if self.is_const_expr(&args[0])? {
             self.body.push(IrInst::LoadConst {
-                dst: dst.clone(),
-                value: Const::U16(0),
-            });
-            self.body.push(IrInst::Move {
-                width: Width::Byte,
                 dst,
-                src: value,
+                value: wrap_const(self.const_expr_value(&args[0])?, width),
             });
             return Ok(());
         }
-        self.body.push(IrInst::Move {
-            width: width_for_type(target)?,
-            dst,
-            src: value,
-        });
+        let source_ty = self.infer_expr(&args[0])?;
+        let source_width = width_for_type(&source_ty)?;
+        let value = self.expr_value(&args[0], &source_ty)?;
+        if width.size_bytes() <= source_width.size_bytes() {
+            self.body.push(IrInst::Move {
+                width,
+                dst,
+                src: value,
+            });
+        } else if source_ty.is_signed() {
+            self.body.push(IrInst::SignExtend {
+                width,
+                src_width: source_width,
+                dst,
+                src: value,
+            });
+        } else {
+            self.body.push(IrInst::LoadConst {
+                dst: dst.clone(),
+                value: wrap_const(0, width),
+            });
+            self.body.push(IrInst::Move {
+                width: source_width,
+                dst,
+                src: value,
+            });
+        }
         Ok(())
     }
 
@@ -2777,7 +2995,7 @@ impl<'a> RoutineLowerer<'a> {
             )));
         }
         let family = self.const_expr_value(&args[0])?;
-        if family > u8::MAX as u32 {
+        if !(0..=i64::from(u8::MAX)).contains(&family) {
             return Err(FrontendError::Type(format!(
                 "COP family ${family:x} does not fit in one byte"
             )));
@@ -2818,25 +3036,13 @@ impl<'a> RoutineLowerer<'a> {
     fn lower_call_args(
         &mut self,
         routine: &str,
+        abi: Abi,
         args: &[Expr],
         params: &[ParamSig],
     ) -> Result<(), FrontendError> {
-        let abi = self
-            .parent
-            .routines
-            .get(routine)
-            .map(|sig| sig.abi)
-            .ok_or_else(|| FrontendError::Type(format!("unknown routine {routine}")))?;
-
         if matches!(abi, Abi::Reentrant) {
-            for (arg, param) in args.iter().zip(params).rev() {
-                let value = self.expr_value(arg, &param.ty)?;
-                self.body.push(IrInst::Push {
-                    width: width_for_type(&param.ty)?,
-                    value,
-                });
-            }
-            return Ok(());
+            let types: Vec<Type> = params.iter().map(|param| param.ty.clone()).collect();
+            return self.push_call_args(args, &types);
         }
 
         for (arg, param) in args.iter().zip(params) {
@@ -2849,22 +3055,222 @@ impl<'a> RoutineLowerer<'a> {
         Ok(())
     }
 
-    fn cleanup_call_args(
-        &mut self,
-        routine: &str,
-        params: &[ParamSig],
-    ) -> Result<(), FrontendError> {
-        let abi = self
-            .parent
-            .routines
-            .get(routine)
-            .map(|sig| sig.abi)
-            .ok_or_else(|| FrontendError::Type(format!("unknown routine {routine}")))?;
-        if matches!(abi, Abi::Reentrant) {
-            self.body.push(IrInst::CleanupStack {
-                bytes: params.iter().map(|param| param.ty.size_bytes()).sum(),
+    /// Pushes reentrant-call arguments, last first.
+    fn push_call_args(&mut self, args: &[Expr], params: &[Type]) -> Result<(), FrontendError> {
+        for (arg, param) in args.iter().zip(params).rev() {
+            let value = self.expr_value(arg, param)?;
+            self.body.push(IrInst::Push {
+                width: width_for_type(param)?,
+                value,
             });
         }
+        Ok(())
+    }
+
+    fn cleanup_call_args(&mut self, abi: Abi, params: &[Type]) {
+        if matches!(abi, Abi::Reentrant) {
+            self.body.push(IrInst::CleanupStack {
+                bytes: params.iter().map(Type::size_bytes).sum(),
+            });
+        }
+    }
+
+    /// The type and width a binary operation works at: the left operand's,
+    /// unless only the right one has a type of its own (`100 - x`).
+    fn operand_type(&self, lhs: &Expr, rhs: &Expr) -> Result<(Type, Width), FrontendError> {
+        let lhs_ty = self.infer_expr(lhs)?;
+        let rhs_ty = self.infer_expr(rhs)?;
+        if self.is_const_expr(lhs)? && !self.is_const_expr(rhs)? {
+            let width = compatible_expr_width(&rhs_ty, &lhs_ty, true)?;
+            return Ok((rhs_ty, width));
+        }
+        let width = compatible_expr_width(&lhs_ty, &rhs_ty, self.is_const_expr(rhs)?)?;
+        Ok((lhs_ty, width))
+    }
+
+    /// The signature of the routine pointer variable `name`, if it is one.
+    fn routine_pointer(&self, name: &str) -> Option<RoutineType> {
+        match &self.bindings.get(name)?.ty {
+            Type::Routine(routine) => Some((**routine).clone()),
+            _ => None,
+        }
+    }
+
+    /// For a routine named as a value (not called), the pointer type it has.
+    fn routine_address(&self, name: &str) -> Result<Option<RoutineType>, FrontendError> {
+        if self.bindings.contains_key(name) {
+            return Ok(None);
+        }
+        match self.parent.routines.get(name) {
+            Some(sig) => Ok(Some(routine_type_of(name, sig)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn check_indirect_call(
+        &self,
+        name: &str,
+        routine: &RoutineType,
+        args: &[Expr],
+        statement: bool,
+    ) -> Result<(), FrontendError> {
+        if args.len() != routine.params.len() {
+            return Err(FrontendError::Type(format!(
+                "routine pointer {name} expected {} arguments, got {}",
+                routine.params.len(),
+                args.len()
+            )));
+        }
+        for (arg, param) in args.iter().zip(&routine.params) {
+            if self.is_const_expr(arg)? && integer_width(param).is_some() {
+                const_for_type(self.const_expr_value(arg)?, param)?;
+            } else {
+                ensure_assignable(param, &self.infer_expr(arg)?)?;
+            }
+        }
+        match (&routine.result, statement) {
+            (None, false) => Err(FrontendError::Type(format!(
+                "procedure pointer {name} cannot be used as an expression"
+            ))),
+            (Some(_), true) => Err(FrontendError::Type(format!(
+                "function pointer {name} result cannot be discarded"
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// Calls through the routine pointer variable `name`. `result` is the
+    /// expected type and destination of a function's result.
+    fn lower_indirect_call(
+        &mut self,
+        name: &str,
+        routine: &RoutineType,
+        args: &[Expr],
+        result: Option<(&Type, Value)>,
+    ) -> Result<(), FrontendError> {
+        self.check_indirect_call(name, routine, args, result.is_none())?;
+        let target = self.binding(name)?.value.clone();
+        if matches!(routine.abi, Abi::Reentrant) {
+            self.push_call_args(args, &routine.params)?;
+        }
+        let Some((expected, dst)) = result else {
+            self.body.push(IrInst::CallIndirect {
+                target,
+                abi: routine.abi,
+                result: None,
+            });
+            self.cleanup_call_args(routine.abi, &routine.params);
+            return Ok(());
+        };
+        let result_ty = routine.result.clone().expect("checked: a function");
+        ensure_assignable(expected, &result_ty)?;
+        let width = width_for_type(&result_ty)?;
+        // As for direct calls: the 65816 cleanup clobbers A, so a reentrant
+        // result is parked in X across it.
+        let capture_before_cleanup = matches!(routine.abi, Abi::Reentrant)
+            && (matches!(dst, Value::Accumulator | Value::Stack { .. })
+                || (matches!(self.routine.abi, Abi::Reentrant)
+                    && matches!(dst, Value::Temp(_) | Value::Local(_) | Value::Param(_))));
+        let call_dst = if capture_before_cleanup {
+            Value::IndexX
+        } else {
+            dst.clone()
+        };
+        self.body.push(IrInst::CallIndirect {
+            target,
+            abi: routine.abi,
+            result: Some((width, call_dst.clone())),
+        });
+        self.cleanup_call_args(routine.abi, &routine.params);
+        if capture_before_cleanup {
+            self.body.push(IrInst::Move {
+                width,
+                dst,
+                src: call_dst,
+            });
+        }
+        Ok(())
+    }
+
+    /// `*`, `/`, `%` and `xor`. Multiplying and dividing by powers of two
+    /// becomes shifts and masks.
+    fn lower_binary(
+        &mut self,
+        expr: &Expr,
+        lhs: &Expr,
+        rhs: &Expr,
+        expected: &Type,
+        dst: Value,
+    ) -> Result<(), FrontendError> {
+        let (lhs_ty, width) = self.operand_type(lhs, rhs)?;
+        ensure_assignable(expected, &lhs_ty)?;
+        let signed = lhs_ty.is_signed();
+        let constant = if self.is_const_expr(rhs)? {
+            Some(self.const_expr_value(rhs)?)
+        } else {
+            None
+        };
+        let lhs = self.expr_value(lhs, &lhs_ty)?;
+        let shift = constant.and_then(is_power_of_two);
+        let op = match expr {
+            Expr::Mul(..) => BinaryOp::Mul,
+            Expr::Div(..) => BinaryOp::Div { signed },
+            Expr::Rem(..) => BinaryOp::Rem { signed },
+            Expr::BitXor(..) => BinaryOp::Xor,
+            _ => unreachable!("lower_binary handles multiplicative operators"),
+        };
+        if constant == Some(0) && matches!(op, BinaryOp::Div { .. } | BinaryOp::Rem { .. }) {
+            return Err(FrontendError::Type("division by constant zero".to_owned()));
+        }
+        match (op, shift) {
+            (BinaryOp::Mul, Some(0)) | (BinaryOp::Div { .. }, Some(0)) => {
+                self.body.push(IrInst::Move {
+                    width,
+                    dst,
+                    src: lhs,
+                });
+                return Ok(());
+            }
+            (BinaryOp::Mul, Some(count)) if u16::from(count) < width.size_bytes() * 8 => {
+                self.body.push(IrInst::ShiftLeft {
+                    width,
+                    dst,
+                    lhs,
+                    rhs: Value::Const(Const::U8(count)),
+                });
+                return Ok(());
+            }
+            (BinaryOp::Div { signed: false }, Some(count))
+                if u16::from(count) < width.size_bytes() * 8 =>
+            {
+                self.body.push(IrInst::ShiftRight {
+                    width,
+                    dst,
+                    lhs,
+                    rhs: Value::Const(Const::U8(count)),
+                });
+                return Ok(());
+            }
+            (BinaryOp::Rem { signed: false }, Some(_)) => {
+                let mask = constant.expect("power of two") - 1;
+                self.body.push(IrInst::BitAnd {
+                    width,
+                    dst,
+                    lhs,
+                    rhs: Value::Const(wrap_const(mask, width)),
+                });
+                return Ok(());
+            }
+            _ => {}
+        }
+        let rhs = self.expr_value(rhs, &lhs_ty)?;
+        self.body.push(IrInst::Binary {
+            op,
+            width,
+            dst,
+            lhs,
+            rhs,
+        });
         Ok(())
     }
 
@@ -2921,7 +3327,7 @@ impl<'a> RoutineLowerer<'a> {
         let count = self
             .const_expr_value(rhs)
             .map_err(|_| FrontendError::Type("shift counts must be constants".to_owned()))?;
-        if count >= u32::from(bytes) * 8 {
+        if count < 0 || count >= i64::from(bytes) * 8 {
             return Err(FrontendError::Type(format!(
                 "shift count {count} is not smaller than the {}-bit operand",
                 bytes * 8
@@ -2930,32 +3336,114 @@ impl<'a> RoutineLowerer<'a> {
         Ok(count as u8)
     }
 
+    /// Whether `expr` is a compile-time constant: numbers, named constants,
+    /// and arithmetic on them.
     fn is_const_expr(&self, expr: &Expr) -> Result<bool, FrontendError> {
         match expr {
             Expr::Number(_) => Ok(true),
-            Expr::String(_) => Ok(false),
-            Expr::Name(name) => Ok(matches!(self.binding(name)?.value, Value::Const(_))),
+            Expr::Name(name) => Ok(self
+                .bindings
+                .get(name)
+                .is_some_and(|binding| matches!(binding.value, Value::Const(_)))),
+            Expr::Neg(value) => self.is_const_expr(value),
+            Expr::Add(lhs, rhs)
+            | Expr::Sub(lhs, rhs)
+            | Expr::Mul(lhs, rhs)
+            | Expr::Div(lhs, rhs)
+            | Expr::Rem(lhs, rhs)
+            | Expr::BitAnd(lhs, rhs)
+            | Expr::BitOr(lhs, rhs)
+            | Expr::BitXor(lhs, rhs)
+            | Expr::ShiftLeft(lhs, rhs)
+            | Expr::ShiftRight(lhs, rhs) => {
+                Ok(self.is_const_expr(lhs)? && self.is_const_expr(rhs)?)
+            }
             _ => Ok(false),
         }
     }
 
-    fn const_expr_value(&self, expr: &Expr) -> Result<u32, FrontendError> {
-        match expr {
-            Expr::Number(value) => Ok(*value),
-            Expr::String(_) => Err(FrontendError::Type(
-                "string literal is not a numeric constant".to_owned(),
-            )),
+    /// Evaluates a constant expression (with 64-bit intermediate results).
+    fn const_expr_value(&self, expr: &Expr) -> Result<i64, FrontendError> {
+        let pair = |lhs: &Expr, rhs: &Expr| -> Result<(i64, i64), FrontendError> {
+            Ok((self.const_expr_value(lhs)?, self.const_expr_value(rhs)?))
+        };
+        let value = match expr {
+            Expr::Number(value) => i64::from(*value),
+            Expr::String(_) => {
+                return Err(FrontendError::Type(
+                    "string literal is not a numeric constant".to_owned(),
+                ))
+            }
             Expr::Name(name) => {
                 let binding = self.binding(name)?;
                 match binding.value {
-                    Value::Const(value) => const_to_u32(value),
-                    _ => Err(FrontendError::Type(format!("{name} is not a constant"))),
+                    Value::Const(value) => const_value(value, &binding.ty),
+                    _ => return Err(FrontendError::Type(format!("{name} is not a constant"))),
                 }
             }
-            _ => Err(FrontendError::Type(
-                "expected constant expression".to_owned(),
-            )),
+            Expr::Neg(value) => -self.const_expr_value(value)?,
+            Expr::Add(lhs, rhs) => {
+                let (lhs, rhs) = pair(lhs, rhs)?;
+                lhs + rhs
+            }
+            Expr::Sub(lhs, rhs) => {
+                let (lhs, rhs) = pair(lhs, rhs)?;
+                lhs - rhs
+            }
+            Expr::Mul(lhs, rhs) => {
+                let (lhs, rhs) = pair(lhs, rhs)?;
+                lhs.checked_mul(rhs).ok_or_else(|| {
+                    FrontendError::Type("constant multiplication overflows".to_owned())
+                })?
+            }
+            Expr::Div(lhs, rhs) | Expr::Rem(lhs, rhs) => {
+                let (lhs, rhs) = pair(lhs, rhs)?;
+                if rhs == 0 {
+                    return Err(FrontendError::Type("division by constant zero".to_owned()));
+                }
+                if matches!(expr, Expr::Div(..)) {
+                    lhs / rhs
+                } else {
+                    lhs % rhs
+                }
+            }
+            Expr::BitAnd(lhs, rhs) => {
+                let (lhs, rhs) = pair(lhs, rhs)?;
+                lhs & rhs
+            }
+            Expr::BitOr(lhs, rhs) => {
+                let (lhs, rhs) = pair(lhs, rhs)?;
+                lhs | rhs
+            }
+            Expr::BitXor(lhs, rhs) => {
+                let (lhs, rhs) = pair(lhs, rhs)?;
+                lhs ^ rhs
+            }
+            Expr::ShiftLeft(lhs, rhs) | Expr::ShiftRight(lhs, rhs) => {
+                let (lhs, rhs) = pair(lhs, rhs)?;
+                if !(0..32).contains(&rhs) {
+                    return Err(FrontendError::Type(format!(
+                        "constant shift count {rhs} is out of range"
+                    )));
+                }
+                if matches!(expr, Expr::ShiftLeft(..)) {
+                    lhs << rhs
+                } else {
+                    lhs >> rhs
+                }
+            }
+            _ => {
+                return Err(FrontendError::Type(
+                    "expected constant expression".to_owned(),
+                ))
+            }
+        };
+        if !(-(1i64 << 40)..(1i64 << 40)).contains(&value) {
+            return Err(FrontendError::Type(format!(
+                "constant expression value {value} is out of range"
+            )));
         }
+        Ok(value)
     }
 }
 
@@ -2967,6 +3455,20 @@ impl RoutineSig {
             ))),
             RoutineDeclKind::Function { result } => Ok(result.clone()),
         }
+    }
+}
+
+/// Names ca65 reads as registers (65816 and 45GS02), which cannot be
+/// module-level symbols.
+const ASSEMBLER_RESERVED: [&str; 7] = ["a", "x", "y", "z", "s", "q", "sp"];
+
+fn check_symbol_name(kind: &str, name: &str) -> Result<(), FrontendError> {
+    if ASSEMBLER_RESERVED.contains(&name.to_ascii_lowercase().as_str()) {
+        Err(FrontendError::Type(format!(
+            "{kind} name `{name}` is reserved by the assembler (a register name)"
+        )))
+    } else {
+        Ok(())
     }
 }
 
@@ -2983,6 +3485,11 @@ fn insert_binding(
 }
 
 fn ensure_assignable(expected: &Type, actual: &Type) -> Result<(), FrontendError> {
+    if matches!((expected, actual), (Type::Routine(_), Type::Routine(_))) && expected != actual {
+        return Err(FrontendError::Type(format!(
+            "cannot assign {actual:?} to {expected:?}: the routine signatures differ"
+        )));
+    }
     if expected == actual
         || (integer_width(expected).is_some() && integer_width(expected) == integer_width(actual))
         || result_constructor_matches(expected, actual)
@@ -3075,11 +3582,12 @@ fn integer_width(ty: &Type) -> Option<u16> {
         Type::U8 | Type::I8 => Some(1),
         Type::U16 | Type::I16 => Some(2),
         Type::U24 => Some(3),
+        Type::U32 | Type::I32 => Some(4),
         Type::Pointer {
             kind: PointerKind::Far,
             ..
-        } => Some(3),
-        Type::Pointer { .. } => Some(2),
+        } => Some(4),
+        Type::Pointer { .. } | Type::Routine(_) => Some(2),
         Type::Slice { .. } => Some(4),
         Type::Result { ok, err } if ok.size_bytes().max(err.size_bytes()) <= 1 => Some(2),
         Type::Result { ok, err } => Some(ok.size_bytes().max(err.size_bytes()) + 1),
@@ -3088,52 +3596,101 @@ fn integer_width(ty: &Type) -> Option<u16> {
 }
 
 fn width_for_type(ty: &Type) -> Result<Width, FrontendError> {
-    match integer_width(ty) {
-        Some(1) => Ok(Width::Byte),
-        Some(2) => Ok(Width::Word),
-        Some(3) => Ok(Width::Long),
-        Some(4) => Err(FrontendError::Type(format!(
-            "type {ty:?} is wider than current scalar operations"
-        ))),
-        _ => Err(FrontendError::Type(format!("unsupported type {ty:?}"))),
-    }
+    integer_width(ty)
+        .and_then(Width::from_bytes)
+        .ok_or_else(|| FrontendError::Type(format!("unsupported type {ty:?}")))
 }
 
 fn string_literal_type() -> Type {
     Type::near_ptr(Type::U8)
 }
 
-fn const_type(value: u32) -> Type {
-    if value <= 0xff {
-        Type::U8
-    } else if value <= 0xffff {
-        Type::U16
+/// The narrowest type for a constant: unsigned unless it is negative.
+fn const_type(value: i64) -> Type {
+    match value {
+        -0x80..=-1 => Type::I8,
+        -0x8000..=-0x81 => Type::I16,
+        _ if value < 0 => Type::I32,
+        0..=0xff => Type::U8,
+        0x100..=0xffff => Type::U16,
+        0x1_0000..=0xff_ffff => Type::U24,
+        _ => Type::U32,
+    }
+}
+
+/// Encodes `value` in `ty`'s width. Negative values are stored in two's
+/// complement; anything from the most negative signed value to the largest
+/// unsigned value of the width fits.
+fn const_for_type(value: i64, ty: &Type) -> Result<Const, FrontendError> {
+    let width = width_for_type(ty)?;
+    let bits = u32::from(width.size_bytes()) * 8;
+    let fits = value >= -(1i64 << (bits - 1)) && value < (1i64 << bits);
+    if !fits {
+        return Err(FrontendError::Type(if value < 0 {
+            format!("constant {value} does not fit in {ty:?}")
+        } else {
+            format!("constant ${value:x} does not fit in {ty:?}")
+        }));
+    }
+    Ok(wrap_const(value, width))
+}
+
+/// `value` truncated to `width` (an explicit cast).
+fn wrap_const(value: i64, width: Width) -> Const {
+    let raw = value as u64 as u32;
+    match width {
+        Width::Byte => Const::U8(raw as u8),
+        Width::Word => Const::U16(raw as u16),
+        Width::Long => Const::U24(raw & 0x00ff_ffff),
+        Width::Quad => Const::U32(raw),
+    }
+}
+
+/// The numeric value of a constant of type `ty`.
+fn const_value(value: Const, ty: &Type) -> i64 {
+    let bits = value.bits();
+    let size = u32::from(value.width().size_bytes()) * 8;
+    if ty.is_signed() && size < 64 && bits >> (size - 1) & 1 == 1 {
+        i64::from(bits) - (1i64 << size)
     } else {
-        Type::U24
+        i64::from(bits)
     }
 }
 
-fn const_for_type(value: u32, ty: &Type) -> Result<Const, FrontendError> {
-    match width_for_type(ty)? {
-        Width::Byte if value <= 0xff => Ok(Const::U8(value as u8)),
-        Width::Word if value <= 0xffff => Ok(Const::U16(value as u16)),
-        Width::Long if value <= 0x00ff_ffff => Ok(Const::U24(value)),
-        _ => Err(FrontendError::Type(format!(
-            "constant ${value:x} does not fit in {ty:?}"
-        ))),
+/// The routine-pointer type that can point at a routine with `sig`, or why
+/// it cannot be called indirectly.
+fn routine_type_of(name: &str, sig: &RoutineSig) -> Result<RoutineType, FrontendError> {
+    match sig.abi {
+        Abi::Reentrant => {}
+        Abi::Internal | Abi::Exported if sig.params.is_empty() => {}
+        Abi::Internal | Abi::Exported => {
+            return Err(FrontendError::Type(format!(
+                "routine {name} cannot be called through a pointer: its parameters live in its own storage (declare it reentrant)"
+            )))
+        }
+        Abi::Far | Abi::Interrupt => {
+            return Err(FrontendError::Type(format!(
+                "{:?} routine {name} cannot be called through a pointer",
+                sig.abi
+            )))
+        }
     }
-}
-
-fn coerce_const(value: Const, ty: &Type) -> Result<Const, FrontendError> {
-    const_for_type(const_to_u32(value)?, ty)
-}
-
-fn const_to_u32(value: Const) -> Result<u32, FrontendError> {
-    Ok(match value {
-        Const::U8(value) => u32::from(value),
-        Const::U16(value) => u32::from(value),
-        Const::U24(value) => value,
+    Ok(RoutineType {
+        abi: if sig.params.is_empty() {
+            Abi::Internal
+        } else {
+            Abi::Reentrant
+        },
+        params: sig.params.iter().map(|param| param.ty.clone()).collect(),
+        result: match &sig.kind {
+            RoutineDeclKind::Procedure => None,
+            RoutineDeclKind::Function { result } => Some(result.clone()),
+        },
     })
+}
+
+fn is_power_of_two(value: i64) -> Option<u8> {
+    (value > 0 && value & (value - 1) == 0).then(|| value.trailing_zeros() as u8)
 }
 
 #[cfg(test)]
@@ -3357,12 +3914,11 @@ mod tests {
         let module = compile_source(source).unwrap();
         let body = &module.routines[0].body;
 
-        assert!(body.iter().any(|inst| matches!(inst, IrInst::BitAnd {
-            dst: Value::Local(name),
-            lhs: Value::Const(Const::U8(b'H')),
-            rhs: Value::Const(Const::U8(0xff)),
-            ..
-        } if name == "letter")));
+        // Constant expressions fold at compile time.
+        assert!(body.contains(&IrInst::LoadConst {
+            dst: Value::Local("letter".to_owned()),
+            value: Const::U8(b'H'),
+        }));
         assert!(body.contains(&IrInst::LoadConst {
             dst: Value::Local("letter".to_owned()),
             value: Const::U8(b'\n'),
@@ -3471,7 +4027,8 @@ mod tests {
     fn rejects_unsupported_parameter_types() {
         let source = "
             module Params
-            procedure store(value: u24)
+            type Pair = record(a: u8, b: u8)
+            procedure store(value: Pair)
                 return
             end
         ";
@@ -3787,7 +4344,7 @@ mod tests {
 
         assert!(asm.contains("__str_0:\n"));
         assert!(asm.contains("\t.byte $4f, $4b, $0d, $0a, $1b, $00\n"));
-        assert!(asm.contains("\tlda #__str_0\n"));
+        assert!(asm.contains("\tlda #.loword(__str_0)\n"));
         assert!(asm.contains("\tsta __dp_write_text_param_text\n"));
     }
 
@@ -4041,5 +4598,198 @@ mod tests {
         ";
 
         assert!(compile_source(source).is_err());
+    }
+
+    fn compile_error(source: &str) -> String {
+        compile_source(source)
+            .expect_err("source should be rejected")
+            .to_string()
+    }
+
+    #[test]
+    fn folds_negative_and_compound_constants() {
+        let source = "
+            module Consts
+            const NEG = -2
+            const SIZE = 3
+            export procedure main()
+                var value: i16
+                var count: u16
+                value = NEG * 100 + 1
+                count = SIZE * 8 - 1
+                return
+            end
+        ";
+        let module = compile_source(source).unwrap();
+        let body = &module.routines[0].body;
+        assert!(body.contains(&IrInst::LoadConst {
+            dst: Value::Local("value".to_owned()),
+            value: Const::U16((-199i16) as u16),
+        }));
+        assert!(body.contains(&IrInst::LoadConst {
+            dst: Value::Local("count".to_owned()),
+            value: Const::U16(23),
+        }));
+    }
+
+    #[test]
+    fn strength_reduces_power_of_two_multiplication_and_division() {
+        let source = "
+            module Reduce
+            export procedure main()
+                var x: u16
+                var y: u16
+                y = x * 16
+                y = x / 4
+                y = x % 8
+                y = x * 3
+                return
+            end
+        ";
+        let module = compile_source(source).unwrap();
+        let body = &module.routines[0].body;
+        assert!(body.iter().any(|inst| matches!(
+            inst,
+            IrInst::ShiftLeft {
+                rhs: Value::Const(Const::U8(4)),
+                ..
+            }
+        )));
+        assert!(body.iter().any(|inst| matches!(
+            inst,
+            IrInst::ShiftRight {
+                rhs: Value::Const(Const::U8(2)),
+                ..
+            }
+        )));
+        assert!(body.iter().any(|inst| matches!(
+            inst,
+            IrInst::BitAnd {
+                rhs: Value::Const(Const::U16(7)),
+                ..
+            }
+        )));
+        assert!(body.iter().any(|inst| matches!(
+            inst,
+            IrInst::Binary {
+                op: BinaryOp::Mul,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn signed_operands_select_signed_compares_and_shifts() {
+        let source = "
+            module Signed
+            export procedure main()
+                var x: i16
+                var u: u16
+                if x < -1
+                    x = x >> 1
+                end
+                if u < 1
+                    u = u >> 1
+                end
+                if x == 0
+                    return
+                end
+                return
+            end
+        ";
+        let module = compile_source(source).unwrap();
+        let compares: Vec<bool> = module.routines[0]
+            .body
+            .iter()
+            .filter_map(|inst| match inst {
+                IrInst::Compare { signed, .. } => Some(*signed),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(compares, vec![true, false, false]);
+        assert!(module.routines[0].body.iter().any(|inst| matches!(
+            inst,
+            IrInst::Binary {
+                op: BinaryOp::ShiftRightSigned,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn rejects_routine_pointers_to_storage_parameter_routines() {
+        let error = compile_error(
+            "
+            module Pointers
+            type Handler = reentrant procedure(value: u8)
+            procedure direct_params(value: u8)
+                return
+            end
+            export procedure main()
+                var handler: Handler
+                handler = direct_params
+                return
+            end
+            ",
+        );
+        assert!(error.contains("declare it reentrant"), "{error}");
+    }
+
+    #[test]
+    fn rejects_routine_pointers_with_a_different_signature() {
+        let error = compile_error(
+            "
+            module Pointers
+            type Handler = reentrant procedure(value: u8)
+            reentrant procedure wide(value: u16)
+                return
+            end
+            export procedure main()
+                var handler: Handler
+                handler = wide
+                return
+            end
+            ",
+        );
+        assert!(error.contains("signatures differ"), "{error}");
+    }
+
+    #[test]
+    fn rejects_parameterized_routine_types_that_are_not_reentrant() {
+        let error = compile_error(
+            "
+            module Pointers
+            type Handler = procedure(value: u8)
+            export procedure main()
+                return
+            end
+            ",
+        );
+        assert!(error.contains("must be reentrant"), "{error}");
+    }
+
+    #[test]
+    fn rejects_division_by_constant_zero_and_register_names() {
+        let error = compile_error(
+            "
+            module Zero
+            export procedure main()
+                var x: u16
+                x = x / 0
+                return
+            end
+            ",
+        );
+        assert!(error.contains("division by constant zero"), "{error}");
+        let error = compile_error(
+            "
+            module Names
+            var q: u16
+            export procedure main()
+                return
+            end
+            ",
+        );
+        assert!(error.contains("reserved by the assembler"), "{error}");
     }
 }

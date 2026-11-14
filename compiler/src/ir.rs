@@ -304,11 +304,40 @@ pub enum Type {
     U16,
     I16,
     U24,
-    Pointer { to: Box<Type>, kind: PointerKind },
-    Record { fields: Vec<Field> },
-    Array { len: u16, element: Box<Type> },
-    Slice { element: Box<Type> },
-    Result { ok: Box<Type>, err: Box<Type> },
+    U32,
+    I32,
+    Pointer {
+        to: Box<Type>,
+        kind: PointerKind,
+    },
+    /// A pointer to a routine with this signature (a 16-bit code address).
+    Routine(Box<RoutineType>),
+    Record {
+        fields: Vec<Field>,
+    },
+    Array {
+        len: u16,
+        element: Box<Type>,
+    },
+    Slice {
+        element: Box<Type>,
+    },
+    Result {
+        ok: Box<Type>,
+        err: Box<Type>,
+    },
+}
+
+/// The signature a routine pointer calls through. Only two calling
+/// conventions can be called indirectly: routines without parameters
+/// ([`Abi::Internal`]), and reentrant routines, whose arguments go on the
+/// stack. Other routines take their arguments in storage named after the
+/// routine, which an indirect caller cannot know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineType {
+    pub abi: Abi,
+    pub params: Vec<Type>,
+    pub result: Option<Type>,
 }
 
 impl Type {
@@ -316,17 +345,26 @@ impl Type {
         match self {
             Self::U8 | Self::I8 => 1,
             Self::U16 | Self::I16 => 2,
-            Self::U24
+            Self::U24 => 3,
+            // Far pointers are 32-bit flat addresses: the MEGA65 has a 28-bit
+            // address space; the 65816 uses the low three bytes.
+            Self::U32
+            | Self::I32
             | Self::Pointer {
                 kind: PointerKind::Far,
                 ..
-            } => 3,
-            Self::Pointer { .. } => 2,
+            } => 4,
+            Self::Pointer { .. } | Self::Routine(_) => 2,
             Self::Record { fields } => fields.iter().map(|field| field.ty.size_bytes()).sum(),
             Self::Array { len, element } => len.saturating_mul(element.size_bytes()),
             Self::Slice { .. } => 4,
             Self::Result { ok, err } => ok.size_bytes().max(err.size_bytes()) + 1,
         }
+    }
+
+    /// Whether arithmetic on this type is two's-complement signed.
+    pub fn is_signed(&self) -> bool {
+        matches!(self, Self::I8 | Self::I16 | Self::I32)
     }
 
     pub fn near_ptr(to: Type) -> Self {
@@ -436,6 +474,22 @@ pub enum IrInst {
         lhs: Value,
         rhs: Value,
     },
+    /// The arithmetic the CPUs have no single instruction for.
+    Binary {
+        op: BinaryOp,
+        width: Width,
+        dst: Value,
+        lhs: Value,
+        rhs: Value,
+    },
+    /// `dst = src` widened from `src_width` to `width`, copying the sign bit
+    /// into the new bytes.
+    SignExtend {
+        width: Width,
+        src_width: Width,
+        dst: Value,
+        src: Value,
+    },
     Dec {
         width: Width,
         value: Value,
@@ -444,8 +498,11 @@ pub enum IrInst {
         width: Width,
         value: Value,
     },
+    /// Sets the flags for the branches below: Z when `lhs == rhs`, carry
+    /// when `lhs >= rhs` (as two's-complement numbers when `signed`).
     Compare {
         width: Width,
+        signed: bool,
         lhs: Value,
         rhs: Value,
     },
@@ -484,6 +541,13 @@ pub enum IrInst {
         width: Width,
         dst: Value,
     },
+    /// Calls the routine whose address is in `target` (a routine pointer).
+    /// `result` is the width and destination of a function's result.
+    CallIndirect {
+        target: Value,
+        abi: Abi,
+        result: Option<(Width, Value)>,
+    },
     CleanupStack {
         bytes: u16,
     },
@@ -513,10 +577,26 @@ pub enum CopRegister {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOp {
+    Mul,
+    /// Division truncates toward zero; the remainder has the dividend's sign.
+    Div {
+        signed: bool,
+    },
+    Rem {
+        signed: bool,
+    },
+    Xor,
+    /// Arithmetic `lhs >> rhs`; `rhs` is always a constant bit count.
+    ShiftRightSigned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Width {
     Byte,
     Word,
     Long,
+    Quad,
 }
 
 impl Width {
@@ -525,6 +605,17 @@ impl Width {
             Self::Byte => 1,
             Self::Word => 2,
             Self::Long => 3,
+            Self::Quad => 4,
+        }
+    }
+
+    pub fn from_bytes(bytes: u16) -> Option<Self> {
+        match bytes {
+            1 => Some(Self::Byte),
+            2 => Some(Self::Word),
+            3 => Some(Self::Long),
+            4 => Some(Self::Quad),
+            _ => None,
         }
     }
 }
@@ -569,6 +660,32 @@ pub enum Const {
     U8(u8),
     U16(u16),
     U24(u32),
+    U32(u32),
+}
+
+impl Const {
+    /// The constant's bits, zero-extended.
+    pub fn bits(self) -> u32 {
+        match self {
+            Self::U8(value) => u32::from(value),
+            Self::U16(value) => u32::from(value),
+            Self::U24(value) | Self::U32(value) => value,
+        }
+    }
+
+    pub fn width(self) -> Width {
+        match self {
+            Self::U8(_) => Width::Byte,
+            Self::U16(_) => Width::Word,
+            Self::U24(_) => Width::Long,
+            Self::U32(_) => Width::Quad,
+        }
+    }
+
+    /// Byte `i` of the constant (zero above its width).
+    pub fn byte(self, i: u16) -> u8 {
+        self.bits().checked_shr(u32::from(i) * 8).unwrap_or(0) as u8
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
