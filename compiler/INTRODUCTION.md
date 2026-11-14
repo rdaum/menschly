@@ -285,11 +285,13 @@ has three, and you pick per routine:
 ```text
 procedure draw_cell(x: u8, y: u8)              # plain
 stack function read_block(lba: u16): u16        # callable through a pointer
-reentrant function sum_to(n: u16): u16         # recursive
-    if not n
+type Node = record(value: u16, next: near ^Node)
+
+reentrant function total(node: near ^Node): u16 # recursive
+    if not node
         return 0
     end
-    return n + sum_to(n - 1)
+    return node^.value + total(node^.next)
 end
 ```
 
@@ -424,8 +426,7 @@ const COMMANDS: parallel [3]Command = [
 
 for i = 0 to 2
     if name_is(COMMANDS[i].name)
-        handler = COMMANDS[i].run
-        handler(argument)
+        COMMANDS[i].run(argument)
         return
     end
 end

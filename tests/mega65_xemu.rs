@@ -2147,3 +2147,75 @@ fn register_arguments_and_carry_results() {
         &[35, 51, 0x5a, 0x13, 1, 0, 1, 1]
     );
 }
+
+#[test]
+fn self_referential_records_field_calls_and_element_addresses() {
+    let Some(run) = run_source(
+        "language-gaps",
+        "
+        module Gaps
+        fixed($0e10) volatile var out: [8]u8
+
+        type Node = record(value: u8, next: near ^Node)
+        var nodes: [4]Node
+
+        type Handler = stack function(arg: u8): u8
+        type Command = record(name: [4]u8, run: Handler)
+        var commands: [2]Command
+
+        stack function double(arg: u8): u8
+            return arg + arg
+        end
+
+        stack function negate(arg: u8): u8
+            return 0 - arg
+        end
+
+        reentrant function total(node: near ^Node): u8
+            if not node
+                return 0
+            end
+            return node^.value + total(node^.next)
+        end
+
+        function first_letter(name: near ^u8): u8
+            return name^
+        end
+
+        export function main(): u8
+            var i: u8
+            var p: near ^Node
+            for i = 0 to 3
+                nodes[i].value = i * 10 + 1
+                nodes[i].next = 0
+            end
+            nodes[0].next = addr(nodes[2])
+            nodes[2].next = addr(nodes[3])
+            out[0] = total(addr(nodes[0]))
+            p = addr(nodes[1])
+            p^.next = addr(nodes[3])
+            out[1] = p^.next^.value
+
+            commands[0].name[0] = 'D'
+            commands[0].run = double
+            commands[1].name[0] = 'N'
+            commands[1].run = negate
+            i = 1
+            out[2] = commands[0].run(7)
+            out[3] = commands[i].run(5)
+            out[4] = first_letter(addr(commands[i].name))
+            out[5] = first_letter(addr(commands[0].name[0]))
+            out[6] = commands[i - 1].run(commands[i].run(2))
+            return 0
+        end
+        ",
+    ) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 0);
+    // 1 + 21 + 31 = 53; node 1 -> node 3; 14; -5; 'N'; 'D'; -4.
+    assert_eq!(
+        &run.memory[0x0e10..0x0e17],
+        &[53, 31, 14, 251, b'N', b'D', 252]
+    );
+}

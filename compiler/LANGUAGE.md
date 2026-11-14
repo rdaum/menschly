@@ -79,6 +79,20 @@ Element and field accesses compose, and can be read or assigned:
 Arrays indexed by a variable must be global (or reached through a pointer).
 Pointer arithmetic counts bytes: `p = p + size(Actor)`.
 
+`addr(x)` is the 16-bit address of a global, or of an element or field of
+one or of memory reached through a near pointer: `addr(nodes[i])`,
+`addr(actors[i].name)`, `addr(p^.items[2])`. Locals and parameters have no
+address.
+
+A record can point at its own type, for linked structures:
+
+```text
+type Node = record(value: u16, next: near ^Node)
+total = total + head.next^.value
+```
+
+It cannot contain itself other than through a pointer.
+
 A `parallel` array of records stores each field as its own column (all the
 `x` fields, then all the `y` fields, ...), the layout 65xx code favours:
 `actors[i].x` is then indexed by `i` times the field's size, not the
@@ -150,6 +164,8 @@ var on_event: Handler
 
 on_event = handle_key          # a routine named without arguments
 on_event(42)                   # an indirect call
+HANDLERS[i](42)                # through an element or field
+COMMANDS[i].run(argument)
 ```
 
 A routine type with parameters must be `stack` (or, equivalently,

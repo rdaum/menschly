@@ -378,6 +378,9 @@ impl Local {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
+    /// A declared type referred to by name: what a record's pointer to its
+    /// own type points at (`type Node = record(next: near ^Node)`).
+    Named(String),
     U8,
     I8,
     U16,
@@ -438,6 +441,8 @@ impl Type {
                 ..
             } => 4,
             Self::Pointer { .. } | Self::Routine(_) => 2,
+            // Only ever behind a pointer.
+            Self::Named(_) => 0,
             Self::Record { fields } => fields.iter().map(|field| field.ty.size_bytes()).sum(),
             Self::Array { len, element, .. } => len.saturating_mul(element.size_bytes()),
             Self::Slice { .. } => 4,

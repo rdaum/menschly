@@ -1404,3 +1404,67 @@ fn generated_frontend_register_arguments_and_carry_results_run() {
     let got: Vec<u8> = (0..8).map(|i| memory.byte(0x040010 + i)).collect();
     assert_eq!(got, [35, 51, 0x5a, 0x13, 1, 0, 1, 1]);
 }
+
+#[test]
+fn generated_frontend_field_calls_and_element_addresses_run() {
+    let binary = assemble_source_fixture(
+        "frontend-field-calls",
+        "
+        module FieldCalls
+        fixed($040010) volatile var out: [6]u8
+        fixed($040020) var argument: u16
+        type Node = record(value: u16, next: near ^Node)
+        fixed($004030) var nodes: [3]Node
+        type Handler = stack procedure(arg: u16)
+        type Command = record(name: near ^u8, run: Handler)
+
+        const COMMANDS: parallel [3]Command = [
+            (\"DIR\", run_dir),
+            (\"TYPE\", run_type),
+            (\"COPY\", run_copy),
+        ]
+
+        export far procedure main()
+            var i: u8
+            var p: near ^Node
+            var names: near ^near ^u8
+            var name: near ^u8
+            argument = 7
+            for i = 0 to 2
+                COMMANDS[i].run(argument + u16(i))
+            end
+            # The name column of a parallel table, element 1.
+            names = addr(COMMANDS[1].name)
+            name = names^
+            out[3] = name^
+            nodes[0].value = 5
+            nodes[0].next = addr(nodes[2])
+            nodes[2].value = 9
+            nodes[2].next = 0
+            p = addr(nodes[0])
+            out[4] = u8(p^.next^.value)
+            return
+        end
+
+        stack procedure run_dir(arg: u16)
+            out[0] = u8(arg)
+            return
+        end
+
+        stack procedure run_type(arg: u16)
+            out[1] = u8(arg)
+            return
+        end
+
+        stack procedure run_copy(arg: u16)
+            out[2] = u8(arg)
+            return
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    let got: Vec<u8> = (0..5).map(|i| memory.byte(0x040010 + i)).collect();
+    assert_eq!(got, [7, 8, 9, b'T', 9]);
+}

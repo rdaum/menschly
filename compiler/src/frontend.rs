@@ -147,6 +147,11 @@ pub enum Stmt {
         name: String,
         args: Vec<Expr>,
     },
+    /// A call through a routine pointer reached by an expression.
+    CallValue {
+        callee: Expr,
+        args: Vec<Expr>,
+    },
     If {
         cond: Cond,
         body: Vec<Stmt>,
@@ -224,6 +229,12 @@ pub enum Expr {
     Deref(Box<Expr>),
     Index(Box<Expr>, Box<Expr>),
     Field(Box<Expr>, String),
+    /// A call through a routine pointer that is not a plain name
+    /// (`COMMANDS[i].run(arg)`).
+    CallValue {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -601,6 +612,8 @@ struct Parser {
     types: BTreeMap<String, Type>,
     /// Scalar constants declared so far, for constant expressions.
     consts: BTreeMap<String, i64>,
+    /// The type declaration being parsed, which may point at itself.
+    defining: Option<String>,
 }
 
 impl Parser {
@@ -610,6 +623,7 @@ impl Parser {
             pos: 0,
             types: BTreeMap::new(),
             consts: BTreeMap::new(),
+            defining: None,
         })
     }
 
@@ -716,7 +730,15 @@ impl Parser {
     fn parse_type_decl(&mut self) -> Result<TypeDecl, FrontendError> {
         let name = self.expect_ident()?;
         self.expect(TokenKind::Equal)?;
-        let ty = self.parse_type()?;
+        self.defining = Some(name.clone());
+        let ty = self.parse_type();
+        self.defining = None;
+        let ty = ty?;
+        if contains_itself(&ty, &name) {
+            return Err(FrontendError::Type(format!(
+                "type {name} contains itself (only a pointer can refer to it)"
+            )));
+        }
         if self.types.insert(name.clone(), ty.clone()).is_some() {
             return Err(FrontendError::Parse(format!("duplicate type {name}")));
         }
@@ -1175,6 +1197,7 @@ impl Parser {
             "u24" => Ok(Type::U24),
             "u32" => Ok(Type::U32),
             "i32" => Ok(Type::I32),
+            _ if self.defining.as_deref() == Some(name.as_str()) => Ok(Type::Named(name)),
             _ => self
                 .types
                 .get(&name)
@@ -1342,6 +1365,11 @@ impl Parser {
 
         if let Expr::Call { name, args } = expr {
             Ok(Stmt::Call { name, args })
+        } else if let Expr::CallValue { callee, args } = expr {
+            Ok(Stmt::CallValue {
+                callee: *callee,
+                args,
+            })
         } else {
             Err(self.parse_error("expected assignment or call statement"))
         }
@@ -1571,6 +1599,21 @@ impl Parser {
         self.parse_postfix()
     }
 
+    /// The arguments of a call, after its `(`.
+    fn parse_call_args(&mut self) -> Result<Vec<Expr>, FrontendError> {
+        let mut args = Vec::new();
+        if self.take(TokenKind::RParen) {
+            return Ok(args);
+        }
+        loop {
+            args.push(self.parse_expr()?);
+            if self.take(TokenKind::RParen) {
+                return Ok(args);
+            }
+            self.expect(TokenKind::Comma)?;
+        }
+    }
+
     fn parse_postfix(&mut self) -> Result<Expr, FrontendError> {
         let mut expr = self.parse_primary()?;
         loop {
@@ -1583,6 +1626,14 @@ impl Parser {
             } else if self.take(TokenKind::Dot) {
                 let field = self.expect_ident()?;
                 expr = Expr::Field(Box::new(expr), field);
+            } else if !matches!(expr, Expr::Call { .. } | Expr::CallValue { .. })
+                && self.take(TokenKind::LParen)
+            {
+                let args = self.parse_call_args()?;
+                expr = Expr::CallValue {
+                    callee: Box::new(expr),
+                    args,
+                };
             } else {
                 break;
             }
@@ -1863,6 +1914,8 @@ struct Binding {
 
 struct Lowerer {
     routines: BTreeMap<String, RoutineSig>,
+    /// Declared types, for pointers to `Named` types.
+    types: BTreeMap<String, Type>,
     labels: usize,
     temps: usize,
     strings: Vec<StaticData>,
@@ -1875,9 +1928,28 @@ struct RoutineLowerer<'a> {
     body: Vec<IrInst>,
 }
 
+impl Lowerer {
+    /// The type a `Named` pointer target stands for.
+    fn resolve(&self, ty: Type) -> Result<Type, FrontendError> {
+        match ty {
+            Type::Named(name) => self
+                .types
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| FrontendError::Type(format!("unknown type {name}"))),
+            other => Ok(other),
+        }
+    }
+}
+
 fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
     let mut lowerer = Lowerer {
         routines: routine_sigs(&source)?,
+        types: source
+            .types
+            .iter()
+            .map(|decl| (decl.name.clone(), decl.ty.clone()))
+            .collect(),
         labels: 0,
         temps: 0,
         strings: Vec::new(),
@@ -2421,6 +2493,12 @@ impl<'a> RoutineLowerer<'a> {
                 Ok(())
             }
             Stmt::Assign { target, value } => self.lower_assign(target, value),
+            Stmt::CallValue { callee, args } => {
+                let (name, routine) = self.bind_callee(callee)?;
+                let lowered = self.lower_indirect_call(&name, &routine, args, None);
+                self.bindings.remove(&name);
+                lowered
+            }
             Stmt::Call { name, args } => {
                 if let Some(routine) = self.routine_pointer(name) {
                     return self.lower_indirect_call(name, &routine, args, None);
@@ -2767,6 +2845,15 @@ impl<'a> RoutineLowerer<'a> {
             return Ok(());
         }
         match expr {
+            Expr::CallValue { callee, args } => {
+                // Reports a procedure pointer used as a value.
+                self.infer_expr(expr)?;
+                let (name, routine) = self.bind_callee(callee)?;
+                let lowered =
+                    self.lower_indirect_call(&name, &routine, args, Some((expected, dst)));
+                self.bindings.remove(&name);
+                lowered
+            }
             Expr::Number(value) => {
                 self.body.push(IrInst::LoadConst {
                     dst,
@@ -2811,6 +2898,10 @@ impl<'a> RoutineLowerer<'a> {
                 Ok(())
             }
             Expr::Call { name, args } => {
+                if name == "addr" && !matches!(args.as_slice(), [Expr::Name(_)]) {
+                    ensure_assignable(expected, &addr_builtin_type())?;
+                    return self.lower_place_address(args, dst);
+                }
                 if name == "addr" {
                     let symbol = self.addr_builtin_symbol(args)?;
                     ensure_assignable(expected, &addr_builtin_type())?;
@@ -3163,7 +3254,7 @@ impl<'a> RoutineLowerer<'a> {
                         offset: 0,
                         index: None,
                     },
-                    *to,
+                    self.parent.resolve(*to)?,
                 ))
             }
             _ => Err(FrontendError::Type(
@@ -3480,6 +3571,16 @@ impl<'a> RoutineLowerer<'a> {
 
     fn infer_expr(&self, expr: &Expr) -> Result<Type, FrontendError> {
         match expr {
+            Expr::CallValue { callee, .. } => match self.infer_expr(callee)? {
+                Type::Routine(routine) => routine.result.clone().ok_or_else(|| {
+                    FrontendError::Type(format!(
+                        "{callee:?} points at a procedure: it has no value"
+                    ))
+                }),
+                _ => Err(FrontendError::Type(format!(
+                    "{callee:?} is not a routine pointer"
+                ))),
+            },
             Expr::Number(value) => Ok(const_type(i64::from(*value))),
             Expr::String(_) => Ok(string_literal_type()),
             Expr::Name(name) => match self.routine_address(name)? {
@@ -3496,7 +3597,17 @@ impl<'a> RoutineLowerer<'a> {
                 Ok(routine.result.clone().expect("checked: a function"))
             }
             Expr::Call { name, args } if name == "addr" => {
-                self.addr_builtin_symbol(args)?;
+                match args.as_slice() {
+                    [Expr::Name(_)] => {
+                        self.addr_builtin_symbol(args)?;
+                    }
+                    [_] => {}
+                    _ => {
+                        return Err(FrontendError::Type(
+                            "addr expects one variable, element or field".to_owned(),
+                        ))
+                    }
+                }
                 Ok(addr_builtin_type())
             }
             Expr::Call { name, args } if integer_cast_builtin(name).is_some() => {
@@ -3539,7 +3650,7 @@ impl<'a> RoutineLowerer<'a> {
             Expr::Deref(ptr) => {
                 let ty = self.infer_expr(ptr)?;
                 match ty {
-                    Type::Pointer { to, .. } => Ok(*to),
+                    Type::Pointer { to, .. } => self.parent.resolve(*to),
                     _ => Err(FrontendError::Type(
                         "dereference needs a pointer".to_owned(),
                     )),
@@ -3852,6 +3963,138 @@ impl<'a> RoutineLowerer<'a> {
     }
 
     /// The signature of the routine pointer variable `name`, if it is one.
+    /// `addr(place)` for an element or field: the place's 16-bit address.
+    fn lower_place_address(&mut self, args: &[Expr], dst: Value) -> Result<(), FrontendError> {
+        let [expr] = args else {
+            return Err(FrontendError::Type(
+                "addr expects one variable, element or field".to_owned(),
+            ));
+        };
+        let (place, _) = self.place(expr)?;
+        if place.pending_parallel() {
+            return Err(parallel_element_error());
+        }
+        let index_width = place.offset_width();
+        let mut place = place;
+        // Forming the base address uses the registers.
+        if let Place::Global {
+            index: Some(index), ..
+        }
+        | Place::Pointer {
+            index: Some(index), ..
+        } = &mut place
+        {
+            if matches!(index, Value::Accumulator | Value::IndexX | Value::IndexY) {
+                let saved = self.parent.temp();
+                self.body.push(IrInst::Move {
+                    width: index_width,
+                    dst: saved.clone(),
+                    src: index.clone(),
+                });
+                *index = saved;
+            }
+        }
+        let (base, offset, index) = match place {
+            Place::Global {
+                symbol,
+                offset,
+                index,
+                ..
+            } => {
+                let base = self.parent.temp();
+                self.body.push(IrInst::LoadAddress {
+                    dst: base.clone(),
+                    symbol,
+                    width: Width::Word,
+                });
+                (base, offset, index)
+            }
+            Place::Pointer {
+                pointer,
+                far: false,
+                offset,
+                index,
+            } => (pointer, offset, index),
+            Place::Pointer { far: true, .. } => {
+                return Err(FrontendError::Type(
+                    "addr of something behind a far pointer has no 16-bit address".to_owned(),
+                ))
+            }
+            Place::Value { .. } => {
+                return Err(FrontendError::Type(
+                    "addr needs a global, or memory reached through a pointer".to_owned(),
+                ))
+            }
+        };
+        let mut address = base;
+        if offset != 0 {
+            let sum = self.parent.temp();
+            self.body.push(IrInst::Add {
+                width: Width::Word,
+                dst: sum.clone(),
+                lhs: address,
+                rhs: Value::Const(Const::U16(offset)),
+            });
+            address = sum;
+        }
+        if let Some(index) = index {
+            let index = if index_width == Width::Byte {
+                // Zero-extend the one-byte offset.
+                let wide = self.parent.temp();
+                self.body.push(IrInst::LoadConst {
+                    dst: wide.clone(),
+                    value: Const::U16(0),
+                });
+                self.body.push(IrInst::Move {
+                    width: Width::Byte,
+                    dst: wide.clone(),
+                    src: index,
+                });
+                wide
+            } else {
+                index
+            };
+            let sum = self.parent.temp();
+            self.body.push(IrInst::Add {
+                width: Width::Word,
+                dst: sum.clone(),
+                lhs: address,
+                rhs: index,
+            });
+            address = sum;
+        }
+        self.body.push(IrInst::Move {
+            width: Width::Word,
+            dst,
+            src: address,
+        });
+        Ok(())
+    }
+
+    /// Evaluates the routine pointer an indirect call goes through into a
+    /// temporary, bound to a fresh name for the call.
+    fn bind_callee(&mut self, callee: &Expr) -> Result<(String, RoutineType), FrontendError> {
+        let ty = self.infer_expr(callee)?;
+        let Type::Routine(routine) = &ty else {
+            return Err(FrontendError::Type(format!(
+                "{callee:?} is not a routine pointer"
+            )));
+        };
+        let routine = (**routine).clone();
+        let temp = self.parent.temp();
+        self.lower_expr_to(callee, &ty, temp.clone())?;
+        let name = format!("__callee{}", self.parent.temps);
+        self.bindings.insert(
+            name.clone(),
+            Binding {
+                ty,
+                value: temp,
+                readonly: false,
+            },
+        );
+        Ok((name, routine))
+    }
+
     fn routine_pointer(&self, name: &str) -> Option<RoutineType> {
         match &self.bindings.get(name)?.ty {
             Type::Routine(routine) => Some((**routine).clone()),
@@ -4263,7 +4506,7 @@ fn integer_width(ty: &Type) -> Option<u16> {
         Type::Slice { .. } => Some(4),
         Type::Result { ok, err } if ok.size_bytes().max(err.size_bytes()) <= 1 => Some(2),
         Type::Result { ok, err } => Some(ok.size_bytes().max(err.size_bytes()) + 1),
-        Type::Record { .. } | Type::Array { .. } => None,
+        Type::Record { .. } | Type::Array { .. } | Type::Named(_) => None,
     }
 }
 
@@ -4584,6 +4827,17 @@ fn check_register_interface(name: &str, sig: &RoutineSig) -> Result<(), Frontend
     Ok(())
 }
 
+/// Whether `ty` holds a `Named(name)` other than behind a pointer.
+fn contains_itself(ty: &Type, name: &str) -> bool {
+    match ty {
+        Type::Named(named) => named == name,
+        Type::Record { fields } => fields.iter().any(|field| contains_itself(&field.ty, name)),
+        Type::Array { element, .. } => contains_itself(element, name),
+        Type::Result { ok, err } => contains_itself(ok, name) || contains_itself(err, name),
+        _ => false,
+    }
+}
+
 /// Whether evaluating `expr` calls a routine (casts and other builtins do
 /// not).
 fn contains_call(expr: &Expr) -> bool {
@@ -4600,6 +4854,7 @@ fn contains_call(expr: &Expr) -> bool {
             contains_call(value)
         }
         Expr::Field(base, _) => contains_call(base),
+        Expr::CallValue { .. } => true,
         Expr::Add(lhs, rhs)
         | Expr::Sub(lhs, rhs)
         | Expr::Mul(lhs, rhs)
@@ -5773,5 +6028,58 @@ mod tests {
         // Only the end-of-pass test, versus that plus the one before the loop.
         assert_eq!(compares(constant), 1);
         assert_eq!(compares(variable), 2);
+    }
+
+    #[test]
+    fn a_record_can_point_at_itself_but_not_contain_itself() {
+        let err = compile_source(
+            "
+            module Bad
+            type Node = record(value: u8, inner: Node)
+            ",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("contains itself"), "{err}");
+
+        compile_source(
+            "
+            module Good
+            type Node = record(value: u8, next: near ^Node)
+            var head: Node
+            export function second(): u8
+                return head.next^.next^.value
+            end
+            ",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn addr_of_a_local_or_a_procedure_call_value_is_rejected() {
+        let err = compile_source(
+            "
+            module Bad
+            type Pair = record(a: u8, b: u8)
+            export function f(): u16
+                var pair: Pair
+                return u16(addr(pair.b))
+            end
+            ",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("addr needs a global"), "{err}");
+
+        let err = compile_source(
+            "
+            module Bad
+            type Thunk = procedure()
+            var thunks: [2]Thunk
+            export function f(): u8
+                return thunks[0]()
+            end
+            ",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("has no value"), "{err}");
     }
 }
