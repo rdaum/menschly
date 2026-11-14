@@ -1750,3 +1750,193 @@ fn hellord_runs_programs_in_their_own_bank() {
         "the file's bytes should be in the program bank"
     );
 }
+
+const DATA_AND_PLACES: &str = "
+module DataAndPlaces
+fixed($0c00) volatile var out: [32]u8
+fixed($0c40) volatile var wout: [8]u16
+
+type Point = record(x: u8, y: u8)
+type Actor = record(pos: Point, speed: i8, name: near ^u8)
+type Op = function(): u8
+
+const COUNT = 3
+const LAST = COUNT - 1
+const SQUARES: [6]u8 = [0, 1, 4, 9, 16, 25]
+const WIDE: [3]u16 = [$1234, -2, LAST * 1000]
+const GRID: [2][3]u8 = [[1, 2, 3], [4, 5, 6]]
+const NAMES: [2]near ^u8 = [\"alpha\", \"beta\"]
+const TITLE: [8]u8 = \"MENSCH\"
+const OPS: [2]Op = [seven, nine]
+
+var actors: [3]Actor = [
+    ((1, 2), 1, \"ant\"),
+    ((10, 20), -1, \"bee\"),
+    ((100, 200), 2, \"cat\"),
+]
+var counter: u16 = 500
+
+function seven(): u8
+    return 7
+end
+
+function nine(): u8
+    return 9
+end
+
+procedure nudge(actor: near ^Actor)
+    actor^.pos.x = actor^.pos.x + u8(actor^.speed)
+    return
+end
+
+export function main(): u8
+    var i: u8
+    var j: u16
+    var k: u8
+    var sum: u16
+    var p: near ^Actor
+    var op: Op
+    var name: near ^u8
+
+    # Constant tables, indexed by u8 and u16 variables.
+    i = 4
+    out[0] = SQUARES[i]
+    j = 5
+    out[1] = SQUARES[j]
+    wout[0] = WIDE[1]
+    wout[1] = WIDE[LAST]
+    i = 1
+    k = 2
+    out[2] = GRID[i][k]
+    name = NAMES[i]
+    out[3] = name^
+    out[4] = TITLE[5]
+    out[5] = TITLE[6]
+    i = 1
+    op = OPS[i]
+    out[6] = op()
+
+    # Arrays of records: element fields, through pointers too.
+    i = 2
+    out[7] = actors[i].pos.y
+    actors[i].pos.y = 77
+    out[8] = actors[2].pos.y
+    p = addr(actors)
+    nudge(p)
+    out[9] = actors[0].pos.x
+    p = p + size(Actor)
+    nudge(p)
+    out[10] = actors[1].pos.x
+    name = actors[1].name
+    out[11] = name^
+
+    out[20] = size(Actor)
+    out[21] = size([4]Point)
+
+    # for loops (inclusive, and to the type's limit).
+    sum = 0
+    for i = 1 to 10
+        sum = sum + u16(i)
+    end
+    wout[2] = sum
+    sum = 0
+    for i = 250 to 255
+        sum = sum + 1
+    end
+    wout[3] = sum
+    k = 0
+    for i = 3 downto 0
+        out[12 + u16(k)] = i
+        k = k + 1
+    end
+    sum = 0
+    for i = 5 to 4
+        sum = sum + 1
+    end
+    wout[4] = sum
+
+    # Conditions: not, grouping, bare values.
+    out[16] = 0
+    out[17] = 0
+    out[18] = 0
+    i = 3
+    if not (i == 2 or i == 4)
+        out[16] = 1
+    end
+    if (i > 1 and i < 5) and not i == 9
+        out[17] = 1
+    end
+    if i
+        out[18] = 1
+    end
+    if (i + 1) == 4
+        out[19] = 1
+    else
+        out[19] = 0
+    end
+
+    counter = counter + 1
+    wout[5] = counter
+    return 0
+end
+";
+
+#[test]
+fn data_tables_record_elements_for_loops_and_conditions() {
+    let Some(run) = run_source("data-and-places", DATA_AND_PLACES) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 0);
+    let words: Vec<u16> = (0..6)
+        .map(|i| u16::from_le_bytes([run.memory[0x0c40 + 2 * i], run.memory[0x0c41 + 2 * i]]))
+        .collect();
+    assert_eq!(words, vec![0xfffe, 2000, 55, 6, 0, 501]);
+    assert_eq!(
+        &run.memory[0x0c00..0x0c16],
+        &[16, 25, 6, b'b', b'H', 0, 9, 200, 77, 2, 9, b'b', 3, 2, 1, 0, 1, 1, 1, 1, 5, 8]
+    );
+}
+
+#[test]
+fn constant_tables_reject_assignment_and_bad_initialisers() {
+    let compile = |source: &str| {
+        driver::compile_source(source, Target::Mega65, driver::DEFAULT_DIRECT_PAGE_BUDGET)
+            .err()
+            .unwrap_or_default()
+    };
+    let error = compile(
+        "
+        module Bad
+        const TABLE: [2]u8 = [1, 2]
+        export function main(): u8
+            TABLE[0] = 3
+            return 0
+        end
+        ",
+    );
+    assert!(error.contains("cannot be assigned"), "{error}");
+    let error = compile(
+        "
+        module Bad
+        const TABLE: [3]u8 = [1, 2]
+        export function main(): u8
+            return 0
+        end
+        ",
+    );
+    assert!(
+        error.contains("2 elements for a 3-element array"),
+        "{error}"
+    );
+    let error = compile(
+        "
+        module Bad
+        var table: [2]u8
+        export function main(): u8
+            table[2] = 1
+            return 0
+        end
+        ",
+    );
+    assert!(error.contains("outside the 2-element array"), "{error}");
+}

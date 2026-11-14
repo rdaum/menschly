@@ -1214,3 +1214,81 @@ fn generated_frontend_math_signed_and_routine_pointers_run() {
     let flags: Vec<u8> = (0..4).map(|i| memory.byte(0x040090 + i)).collect();
     assert_eq!(flags, vec![1, 1, 0, 1]);
 }
+
+#[test]
+fn generated_frontend_data_tables_record_elements_and_for_loops_run() {
+    let binary = assemble_source_fixture(
+        "frontend-data",
+        "
+        module DataDemo
+        fixed($040100) volatile var out: [16]u8
+        fixed($040120) volatile var wout: [4]u16
+
+        type Point = record(x: u8, y: u8)
+        type Op = function(): u8
+
+        const SQUARES: [6]u8 = [0, 1, 4, 9, 16, 25]
+        const WIDE: [3]u16 = [$1234, -2, 2000]
+        const GRID: [2][3]u8 = [[1, 2, 3], [4, 5, 6]]
+        const OPS: [2]Op = [seven, nine]
+        var points: [3]Point = [(1, 2), (10, 20), (100, 200)]
+
+        export far procedure main()
+            var i: u8
+            var j: u16
+            var k: u8
+            var sum: u16
+            var op: Op
+            var p: near ^Point
+            i = 4
+            out[0] = SQUARES[i]
+            j = 5
+            out[1] = SQUARES[j]
+            wout[0] = WIDE[1]
+            i = 1
+            k = 2
+            out[2] = GRID[i][k]
+            op = OPS[i]
+            out[3] = op()
+            i = 2
+            out[4] = points[i].y
+            points[i].y = 77
+            out[5] = points[2].y
+            p = addr(points) + size(Point)
+            p^.x = p^.x + 5
+            out[6] = points[1].x
+            sum = 0
+            for i = 1 to 10
+                sum = sum + u16(i)
+            end
+            wout[1] = sum
+            k = 0
+            for i = 2 downto 0
+                out[7 + u16(k)] = i
+                k = k + 1
+            end
+            out[10] = 0
+            if not (i == 2 or i == 4) and (k > 1)
+                out[10] = 1
+            end
+            return
+        end
+
+        function seven(): u8
+            return 7
+        end
+
+        function nine(): u8
+            return 9
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_long_generated_routine(&binary);
+
+    let out: Vec<u8> = (0..11).map(|i| memory.byte(0x040100 + i)).collect();
+    assert_eq!(out, vec![16, 25, 6, 9, 200, 77, 15, 2, 1, 0, 1]);
+    let word = |at: usize| u16::from_le_bytes([memory.byte(at), memory.byte(at + 1)]);
+    assert_eq!(word(0x040120), 0xfffe);
+    assert_eq!(word(0x040122), 55);
+}

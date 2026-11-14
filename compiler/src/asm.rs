@@ -56,8 +56,17 @@ impl<I> AsmModule<I> {
     /// Builds a module carrying every declaration from `module` but no routines.
     pub fn declarations_from(module: &Module) -> Self {
         let mut out = Self::new(module.name.clone());
+        out.static_data = module.static_data.clone();
         for global in &module.globals {
             let size = global.ty.size_bytes();
+            if let (Some(items), GlobalPlacement::Static) = (&global.init, &global.placement) {
+                out.static_data.push(StaticData {
+                    name: global.name.clone(),
+                    items: items.clone(),
+                    export: global.export,
+                });
+                continue;
+            }
             match global.placement {
                 GlobalPlacement::Static => out.static_symbols.push(StaticSymbol {
                     name: global.name.clone(),
@@ -77,14 +86,6 @@ impl<I> AsmModule<I> {
                 }),
             }
         }
-        out.static_data = module
-            .static_data
-            .iter()
-            .map(|data| StaticData {
-                name: data.name.clone(),
-                bytes: data.bytes.clone(),
-            })
-            .collect();
         out.vectors = module
             .vectors
             .iter()
@@ -180,11 +181,7 @@ impl<I> AsmModule<I> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StaticData {
-    pub name: String,
-    pub bytes: Vec<u8>,
-}
+pub use crate::ir::{DataItem, StaticData};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectSymbol {

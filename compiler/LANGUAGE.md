@@ -36,17 +36,60 @@ From loosest to tightest binding:
 | `*` `/` `%` | division truncates toward zero; `%` takes the dividend's sign |
 | unary `-` | |
 
-Conditions (`if`, `while`, `until`) compare with `==` `!=` `<` `<=` `>` `>=`
-and combine with `and` / `or`. Ordering compares are signed when either side
-has a signed type.
+Conditions (`if`, `while`, `until`) compare with `==` `!=` `<` `<=` `>` `>=`,
+combine with `and` / `or`, negate with `not`, and group with parentheses. A
+bare value means "is not zero" (`if ready`). Ordering compares are signed
+when either side has a signed type.
 
 An operation works at the width and signedness of its left operand, or of the
 right one when the left is a constant (`100 - x`).
 
 Arithmetic on constants is folded at compile time: `const`s, numbers and
 expressions built from them (`WIDTH * 2 - 1`, `-5`). Constants may be
-negative (`const DOWN = -1`). A constant must fit its destination, either as a
-signed or as an unsigned value.
+negative (`const DOWN = -1`), be defined from earlier ones
+(`const LAST = COUNT - 1`), and have a declared type (`const MASK: u16 = $ff`).
+A constant must fit its destination, either as a signed or as an unsigned
+value. `size(T)` is the size of a type in bytes.
+
+## Data
+
+```text
+const SINE: [8]u8 = [0, 49, 90, 117, 127, 117, 90, 49]
+const GRID: [2][3]u8 = [[1, 2, 3], [4, 5, 6]]
+const TITLE: [8]u8 = "MENSCH"                 # NUL-padded
+const NAMES: [2]near ^u8 = ["alpha", "beta"]
+const HANDLERS: [2]Op = [on_fire, on_move]    # routine pointers
+
+var actors: [2]Actor = [((1, 2), 1, "ant"), ((10, 20), -1, "bee")]
+var score: u16 = 500
+```
+
+A `const` with an array or record type is a read-only table; a `var` with
+`= ...` starts with that value. Arrays are written `[...]` and records `(...)`,
+with every element or field given in order. Elements are constants, string
+literals and `addr(global)` (for pointers), or routine names (for routine
+pointers).
+
+## Elements, fields and pointers
+
+Element and field accesses compose, and can be read or assigned:
+`actors[i].pos.x`, `grid[y][x]`, `p^.speed`, `p^.items[i]`. Indexes are 8- or
+16-bit integers; a constant index is checked against the array's length.
+Arrays indexed by a variable must be global (or reached through a pointer).
+Pointer arithmetic counts bytes: `p = p + size(Actor)`.
+
+## Statements
+
+```text
+if cond ... elsif cond ... else ... end
+while cond ... end
+repeat ... until cond
+for i = 0 to 9 ... end          # inclusive; `downto` counts down
+```
+
+A `for` loop runs zero times when the start is already past the end, and
+stops after the pass where the variable equals the end, so it works up to a
+type's largest value. The end is evaluated on every pass.
 
 ## Routine pointers
 

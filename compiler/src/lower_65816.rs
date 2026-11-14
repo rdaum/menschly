@@ -1127,6 +1127,19 @@ fn load_operand_for_address(
                     .ok_or(LowerError::UnsupportedStackOffset(*offset))?,
             )?))
         }
+        // A pointer in ordinary memory: X holds it, and `$0000,x` reads
+        // through it (16-bit X indexes the data bank).
+        Address::NearPtr(
+            pointer @ (Value::Temp(_) | Value::Local(_) | Value::Param(_) | Value::Global(_)),
+        ) => {
+            out.push(AsmInst::Ldx(operand_for_value(
+                pointer,
+                outgoing_stack_bytes,
+            )?));
+            Ok(Operand::AbsoluteIndexedX(Symbol::Named(
+                "a:$0000".to_owned(),
+            )))
+        }
         other => operand_for_address(other, outgoing_stack_bytes),
     }
 }
@@ -1150,6 +1163,19 @@ fn store_operand_for_address(
                     .checked_add(outgoing_stack_bytes)
                     .ok_or(LowerError::UnsupportedStackOffset(*offset))?,
             )?))
+        }
+        // A pointer in ordinary memory: X holds it, and `$0000,x` reads
+        // through it (16-bit X indexes the data bank).
+        Address::NearPtr(
+            pointer @ (Value::Temp(_) | Value::Local(_) | Value::Param(_) | Value::Global(_)),
+        ) => {
+            out.push(AsmInst::Ldx(operand_for_value(
+                pointer,
+                outgoing_stack_bytes,
+            )?));
+            Ok(Operand::AbsoluteIndexedX(Symbol::Named(
+                "a:$0000".to_owned(),
+            )))
         }
         other => operand_for_address(other, outgoing_stack_bytes),
     }

@@ -97,16 +97,6 @@ pub fn emit<I: Ca65Inst>(module: &crate::asm::AsmModule<I>) -> String {
     let code_segment = code_segment(module);
     let data_segment = data_segment(module).unwrap_or(code_segment);
 
-    if !module.static_data.is_empty() {
-        emit_code_segment(&mut out, data_segment);
-        for data in &module.static_data {
-            out.push_str(&data.name);
-            out.push_str(":\n");
-            emit_bytes(&mut out, &data.bytes);
-        }
-        out.push('\n');
-    }
-
     for symbol in &module.banked_symbols {
         out.push_str(".segment \"BANK");
         out.push_str(&symbol.bank.to_string());
@@ -152,6 +142,36 @@ pub fn emit<I: Ca65Inst>(module: &crate::asm::AsmModule<I>) -> String {
         emit_routine(&mut out, routine);
         if routine.segment.is_some() {
             emit_code_segment(&mut out, code_segment);
+        }
+        out.push('\n');
+    }
+
+    // Data after the code, so a module's first routine starts its segment.
+    if !module.static_data.is_empty() {
+        emit_code_segment(&mut out, data_segment);
+        for data in &module.static_data {
+            if data.export {
+                out.push_str(".export ");
+                out.push_str(&data.name);
+                out.push('\n');
+            }
+            out.push_str(&data.name);
+            out.push_str(":\n");
+            for item in &data.items {
+                match item {
+                    crate::ir::DataItem::Bytes(bytes) => emit_bytes(&mut out, bytes),
+                    crate::ir::DataItem::Address { symbol, bytes: 4 } => {
+                        out.push_str("\t.dword ");
+                        out.push_str(symbol);
+                        out.push('\n');
+                    }
+                    crate::ir::DataItem::Address { symbol, .. } => {
+                        out.push_str("\t.word .loword(");
+                        out.push_str(symbol);
+                        out.push_str(")\n");
+                    }
+                }
+            }
         }
         out.push('\n');
     }

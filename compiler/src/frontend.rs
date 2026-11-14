@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, BinaryOp, Const, CopRegister, Entry, EntryKind, Field, Global, GlobalPlacement,
-    Import, InterruptPreserve, IrInst, Label, Library, Local, Metadata, Module, Param, PointerKind,
-    Routine, RoutineKind, RoutineType, StaticData, Storage, Type, Value, Vector, Width,
+    Abi, Address, BinaryOp, Const, CopRegister, DataItem, Entry, EntryKind, Field, Global,
+    GlobalPlacement, Import, InterruptPreserve, IrInst, Label, Library, Local, Metadata, Module,
+    Param, PointerKind, Routine, RoutineKind, RoutineType, StaticData, Storage, Type, Value,
+    Vector, Width,
 };
 
 pub fn parse_source(source: &str) -> Result<SourceModule, FrontendError> {
@@ -68,6 +69,18 @@ pub struct GlobalDecl {
     pub volatile: bool,
     pub export: bool,
     pub arena: bool,
+    /// Initial contents (`var t: T = ...`, or a `const` table).
+    pub init: Option<Init>,
+    /// A `const` table: reads only.
+    pub readonly: bool,
+}
+
+/// An initialiser: an expression, or the elements of an array (`[...]`) or
+/// the fields of a record (`(...)`), in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Init {
+    Expr(Expr),
+    List(Vec<Init>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +156,15 @@ pub enum Stmt {
         body: Vec<Stmt>,
         until: Cond,
     },
+    /// `for var = start to end` (or `downto`): the bounds are inclusive,
+    /// and `end` is evaluated on every pass.
+    For {
+        var: String,
+        start: Expr,
+        end: Expr,
+        down: bool,
+        body: Vec<Stmt>,
+    },
     Return(Option<Expr>),
     InlineAsm(String),
 }
@@ -152,6 +174,7 @@ pub enum Cond {
     Compare(CondCompare),
     And(Box<Cond>, Box<Cond>),
     Or(Box<Cond>, Box<Cond>),
+    Not(Box<Cond>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -572,6 +595,8 @@ struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     types: BTreeMap<String, Type>,
+    /// Scalar constants declared so far, for constant expressions.
+    consts: BTreeMap<String, i64>,
 }
 
 impl Parser {
@@ -580,6 +605,7 @@ impl Parser {
             tokens,
             pos: 0,
             types: BTreeMap::new(),
+            consts: BTreeMap::new(),
         })
     }
 
@@ -619,7 +645,10 @@ impl Parser {
             } else if self.take_keyword("type") {
                 types.push(self.parse_type_decl()?);
             } else if self.take_keyword("const") {
-                consts.push(self.parse_const_decl()?);
+                match self.parse_const_decl()? {
+                    ConstOrTable::Const(decl) => consts.push(decl),
+                    ConstOrTable::Table(decl) => globals.push(decl),
+                }
             } else if self.take_keyword("external") {
                 externals.push(self.parse_external_decl()?);
             } else if self.starts_global_decl() {
@@ -690,25 +719,77 @@ impl Parser {
         Ok(TypeDecl { name, ty })
     }
 
-    fn parse_const_decl(&mut self) -> Result<ConstDecl, FrontendError> {
+    /// `const NAME = expr`, `const NAME: scalar = expr`, or a table:
+    /// `const NAME: [N]T = [...]` / `const NAME: Record = (...)`.
+    fn parse_const_decl(&mut self) -> Result<ConstOrTable, FrontendError> {
         let name = self.expect_ident()?;
+        let declared = if self.take(TokenKind::Colon) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
         self.expect(TokenKind::Equal)?;
-        let negative = self.take(TokenKind::Minus);
-        let magnitude = i64::from(
-            self.take_number()
-                .ok_or_else(|| self.parse_error("expected constant value"))?,
-        );
-        let value = if negative { -magnitude } else { magnitude };
-        if value < -0x8000_0000 {
+        if let Some(ty) = declared.as_ref().filter(|ty| integer_width(ty).is_none()) {
+            let init = self.parse_init(ty)?;
+            return Ok(ConstOrTable::Table(GlobalDecl {
+                name,
+                ty: ty.clone(),
+                placement: GlobalPlacement::Static,
+                volatile: false,
+                export: false,
+                arena: false,
+                init: Some(init),
+                readonly: true,
+            }));
+        }
+        let expr = self.parse_expr()?;
+        let consts = &self.consts;
+        let value = const_eval(&expr, &|name| consts.get(name).copied())
+            .map_err(|error| FrontendError::Parse(format!("constant {name}: {error}")))?;
+        if !(-0x8000_0000..=0xffff_ffff).contains(&value) {
             return Err(FrontendError::Parse(format!(
                 "constant {name} = {value} does not fit in 32 bits"
             )));
         }
-        Ok(ConstDecl {
-            name,
-            value,
-            ty: const_type(value),
-        })
+        let ty = match declared {
+            Some(ty) => {
+                const_for_type(value, &ty)?;
+                ty
+            }
+            None => const_type(value),
+        };
+        self.consts.insert(name.clone(), value);
+        Ok(ConstOrTable::Const(ConstDecl { name, value, ty }))
+    }
+
+    /// An initialiser for a value of type `ty`.
+    fn parse_init(&mut self, ty: &Type) -> Result<Init, FrontendError> {
+        let (close, elements): (TokenKind, Vec<Type>) = match ty {
+            Type::Array { len, element } if self.take(TokenKind::LBracket) => (
+                TokenKind::RBracket,
+                vec![(**element).clone(); usize::from(*len)],
+            ),
+            Type::Record { fields } if self.take(TokenKind::LParen) => (
+                TokenKind::RParen,
+                fields.iter().map(|field| field.ty.clone()).collect(),
+            ),
+            _ => return Ok(Init::Expr(self.parse_expr()?)),
+        };
+        let mut items = Vec::new();
+        while !self.take(close.clone()) {
+            let element = elements.get(items.len()).ok_or_else(|| {
+                self.parse_error(&format!(
+                    "too many initialisers (expected {})",
+                    elements.len()
+                ))
+            })?;
+            items.push(self.parse_init(&element.clone())?);
+            if !self.take(TokenKind::Comma) {
+                self.expect(close.clone())?;
+                break;
+            }
+        }
+        Ok(Init::List(items))
     }
 
     fn parse_external_decl(&mut self) -> Result<ExternalDecl, FrontendError> {
@@ -733,6 +814,14 @@ impl Parser {
         let name = self.expect_ident()?;
         self.expect(TokenKind::Colon)?;
         let ty = self.parse_type()?;
+        let init = if self.take(TokenKind::Equal) {
+            if !matches!(placement, GlobalPlacement::Static) || volatile {
+                return Err(self.parse_error("only plain variables can be initialised"));
+            }
+            Some(self.parse_init(&ty)?)
+        } else {
+            None
+        };
         Ok(GlobalDecl {
             name,
             ty,
@@ -740,6 +829,8 @@ impl Parser {
             volatile,
             export: export || arena,
             arena,
+            init,
+            readonly: false,
         })
     }
 
@@ -1144,6 +1235,26 @@ impl Parser {
             let body = self.parse_block()?;
             return Ok(Stmt::While { cond, body });
         }
+        if self.take_keyword("for") {
+            let var = self.expect_ident()?;
+            self.expect(TokenKind::Equal)?;
+            let start = self.parse_expr()?;
+            let down = if self.take_keyword("downto") {
+                true
+            } else {
+                self.expect_keyword("to")?;
+                false
+            };
+            let end = self.parse_expr()?;
+            let body = self.parse_block()?;
+            return Ok(Stmt::For {
+                var,
+                start,
+                end,
+                down,
+                body,
+            });
+        }
         if self.take_keyword("repeat") {
             let (body, _terminator) = self.parse_block_until(&["until"])?;
             let until = self.parse_cond()?;
@@ -1232,12 +1343,63 @@ impl Parser {
     }
 
     fn parse_cond_and(&mut self) -> Result<Cond, FrontendError> {
-        let mut cond = self.parse_cond_compare()?;
+        let mut cond = self.parse_cond_unary()?;
         while self.take_keyword("and") {
-            let rhs = self.parse_cond_compare()?;
+            let rhs = self.parse_cond_unary()?;
             cond = Cond::And(Box::new(cond), Box::new(rhs));
         }
         Ok(cond)
+    }
+
+    /// `not c`, a parenthesised condition, or a comparison.
+    fn parse_cond_unary(&mut self) -> Result<Cond, FrontendError> {
+        if self.take_keyword("not") {
+            return Ok(Cond::Not(Box::new(self.parse_cond_unary()?)));
+        }
+        if matches!(self.peek(), Some(TokenKind::LParen)) {
+            // `(a + b) == c` starts like a grouped condition: back off if
+            // what follows the parentheses continues an expression.
+            let start = self.pos;
+            self.pos += 1;
+            if let Ok(cond) = self.parse_cond() {
+                if self.take(TokenKind::RParen) && !self.continues_expression() {
+                    return Ok(cond);
+                }
+            }
+            self.pos = start;
+        }
+        self.parse_cond_compare()
+    }
+
+    fn peek(&self) -> Option<&TokenKind> {
+        self.tokens.get(self.pos).map(|token| &token.kind)
+    }
+
+    /// Whether the next token extends an expression or compares it.
+    fn continues_expression(&self) -> bool {
+        matches!(
+            self.peek(),
+            Some(
+                TokenKind::EqualEqual
+                    | TokenKind::BangEqual
+                    | TokenKind::Less
+                    | TokenKind::LessEqual
+                    | TokenKind::Greater
+                    | TokenKind::GreaterEqual
+                    | TokenKind::Plus
+                    | TokenKind::Minus
+                    | TokenKind::Star
+                    | TokenKind::Slash
+                    | TokenKind::Percent
+                    | TokenKind::Amp
+                    | TokenKind::Pipe
+                    | TokenKind::ShiftLeft
+                    | TokenKind::ShiftRight
+                    | TokenKind::Caret
+                    | TokenKind::LBracket
+                    | TokenKind::Dot
+            )
+        ) || self.is_keyword_at(0, "xor")
     }
 
     fn parse_cond_compare(&mut self) -> Result<Cond, FrontendError> {
@@ -1255,7 +1417,12 @@ impl Parser {
         } else if self.take(TokenKind::Greater) {
             CondOp::Gt
         } else {
-            return Err(self.parse_error("expected comparison operator"));
+            // A bare value is true when it is not zero.
+            return Ok(Cond::Compare(CondCompare {
+                lhs,
+                op: CondOp::Ne,
+                rhs: Expr::Number(0),
+            }));
         };
         let rhs = self.parse_expr()?;
         Ok(Cond::Compare(CondCompare { lhs, op, rhs }))
@@ -1380,6 +1547,12 @@ impl Parser {
         }
 
         let name = self.expect_ident()?;
+        // `size(T)`: the size of a type in bytes, as a constant.
+        if name == "size" && self.take(TokenKind::LParen) {
+            let ty = self.parse_type()?;
+            self.expect(TokenKind::RParen)?;
+            return Ok(Expr::Number(u32::from(ty.size_bytes())));
+        }
         if self.take(TokenKind::LParen) {
             let mut args = Vec::new();
             if self.take(TokenKind::RParen) {
@@ -1585,6 +1758,11 @@ struct RoutineHeader {
     params: Vec<VarDecl>,
 }
 
+enum ConstOrTable {
+    Const(ConstDecl),
+    Table(GlobalDecl),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InterruptAttr {
     preserve: InterruptPreserve,
@@ -1619,6 +1797,8 @@ struct ParamSig {
 struct Binding {
     ty: Type,
     value: Value,
+    /// A `const` table.
+    readonly: bool,
 }
 
 struct Lowerer {
@@ -1685,17 +1865,40 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
     for routine in &source.routines {
         check_symbol_name("routine", &routine.name)?;
     }
-    module.globals = source
+    let consts: BTreeMap<String, i64> = source
+        .consts
+        .iter()
+        .map(|decl| (decl.name.clone(), decl.value))
+        .collect();
+    let global_names: Vec<&str> = source
         .globals
         .iter()
-        .map(|global| Global {
+        .map(|global| global.name.as_str())
+        .collect();
+    let mut globals = Vec::new();
+    for global in &source.globals {
+        let init = match &global.init {
+            Some(init) => {
+                let mut items = Vec::new();
+                lowerer
+                    .encode_init(&global.ty, init, &consts, &global_names, &mut items)
+                    .map_err(|error| {
+                        FrontendError::Type(format!("initialiser of {}: {error}", global.name))
+                    })?;
+                Some(items)
+            }
+            None => None,
+        };
+        globals.push(Global {
             name: global.name.clone(),
             ty: global.ty.clone(),
             placement: global.placement.clone(),
             volatile: global.volatile,
             export: global.export,
-        })
-        .collect();
+            init,
+        });
+    }
+    module.globals = globals;
     module.vectors = source
         .vectors
         .iter()
@@ -1918,15 +2121,111 @@ impl Lowerer {
         Value::Temp(format!("__tmp{id}"))
     }
 
+    /// Appends the data for `init`, a value of type `ty`, to `out`.
+    fn encode_init(
+        &mut self,
+        ty: &Type,
+        init: &Init,
+        consts: &BTreeMap<String, i64>,
+        globals: &[&str],
+        out: &mut Vec<DataItem>,
+    ) -> Result<(), FrontendError> {
+        match (ty, init) {
+            (Type::Array { len, element }, Init::List(items)) => {
+                if items.len() != usize::from(*len) {
+                    return Err(FrontendError::Type(format!(
+                        "{} elements for a {len}-element array",
+                        items.len()
+                    )));
+                }
+                for item in items {
+                    self.encode_init(element, item, consts, globals, out)?;
+                }
+                Ok(())
+            }
+            (Type::Array { len, element }, Init::Expr(Expr::String(text)))
+                if element.size_bytes() == 1 =>
+            {
+                let mut bytes = text.as_bytes().to_vec();
+                bytes.push(0);
+                if bytes.len() > usize::from(*len) {
+                    return Err(FrontendError::Type(format!(
+                        "the string needs {} bytes; the array has {len}",
+                        bytes.len()
+                    )));
+                }
+                bytes.resize(usize::from(*len), 0);
+                push_data_bytes(out, &bytes);
+                Ok(())
+            }
+            (Type::Record { fields }, Init::List(items)) => {
+                if items.len() != fields.len() {
+                    return Err(FrontendError::Type(format!(
+                        "{} values for a {}-field record",
+                        items.len(),
+                        fields.len()
+                    )));
+                }
+                for (field, item) in fields.iter().zip(items) {
+                    self.encode_init(&field.ty, item, consts, globals, out)?;
+                }
+                Ok(())
+            }
+            (_, Init::Expr(expr)) if integer_width(ty).is_some() => {
+                let lookup = |name: &str| consts.get(name).copied();
+                if is_const(expr, &lookup) {
+                    let value = const_for_type(const_eval(expr, &lookup)?, ty)?;
+                    let bytes: Vec<u8> = (0..ty.size_bytes()).map(|i| value.byte(i)).collect();
+                    push_data_bytes(out, &bytes);
+                    return Ok(());
+                }
+                let bytes = ty.size_bytes();
+                if !matches!(ty, Type::Pointer { .. } | Type::Routine(_)) || bytes == 3 {
+                    return Err(FrontendError::Type(format!(
+                        "{expr:?} is not a constant {ty:?}"
+                    )));
+                }
+                let symbol = match expr {
+                    Expr::String(text) if matches!(ty, Type::Pointer { .. }) => {
+                        self.intern_string(text)
+                    }
+                    Expr::Call { name, args } if name == "addr" => match args.as_slice() {
+                        [Expr::Name(global)] if globals.contains(&global.as_str()) => {
+                            global.clone()
+                        }
+                        _ => {
+                            return Err(FrontendError::Type(
+                                "addr expects one global variable name".to_owned(),
+                            ))
+                        }
+                    },
+                    Expr::Name(routine) if self.routines.contains_key(routine) => {
+                        let sig = &self.routines[routine];
+                        let pointer = Type::Routine(Box::new(routine_type_of(routine, sig)?));
+                        ensure_assignable(ty, &pointer)?;
+                        routine.clone()
+                    }
+                    _ => {
+                        return Err(FrontendError::Type(format!(
+                            "{expr:?} is not a constant {ty:?}"
+                        )))
+                    }
+                };
+                out.push(DataItem::Address { symbol, bytes });
+                Ok(())
+            }
+            _ => Err(FrontendError::Type(format!(
+                "initialiser does not match type {ty:?}"
+            ))),
+        }
+    }
+
     fn intern_string(&mut self, value: &str) -> String {
         let id = self.strings.len();
         let name = format!("__str_{id}");
         let mut bytes = value.as_bytes().to_vec();
         bytes.push(0);
-        self.strings.push(StaticData {
-            name: name.clone(),
-            bytes,
-        });
+        self.strings.push(StaticData::bytes(name.clone(), bytes));
         name
     }
 }
@@ -1946,6 +2245,7 @@ impl<'a> RoutineLowerer<'a> {
                 Binding {
                     ty: const_decl.ty.clone(),
                     value: Value::Const(const_for_type(const_decl.value, &const_decl.ty)?),
+                    readonly: true,
                 },
             )?;
         }
@@ -1956,6 +2256,7 @@ impl<'a> RoutineLowerer<'a> {
                 Binding {
                     ty: global.ty.clone(),
                     value: Value::Global(global.name.clone()),
+                    readonly: global.readonly,
                 },
             )?;
         }
@@ -1966,6 +2267,7 @@ impl<'a> RoutineLowerer<'a> {
                 Binding {
                     ty: param.ty.clone(),
                     value: Value::Param(param.name.clone()),
+                    readonly: false,
                 },
             )?;
         }
@@ -1976,6 +2278,7 @@ impl<'a> RoutineLowerer<'a> {
                 Binding {
                     ty: local.ty.clone(),
                     value: Value::Local(local.name.clone()),
+                    readonly: false,
                 },
             )?;
         }
@@ -2057,6 +2360,13 @@ impl<'a> RoutineLowerer<'a> {
                 self.lower_branch_if_false(until, start)?;
                 Ok(())
             }
+            Stmt::For {
+                var,
+                start,
+                end,
+                down,
+                body,
+            } => self.lower_for(var, start, end, *down, body),
             Stmt::Return(value) => self.lower_return(value.as_ref()),
         }
     }
@@ -2067,33 +2377,21 @@ impl<'a> RoutineLowerer<'a> {
                 let binding = self.binding(name)?.clone();
                 self.lower_expr_to(value, &binding.ty, binding.value)
             }
-            Expr::Deref(ptr) => {
-                let (addr, pointee) = self.address_for_pointer(ptr)?;
-                self.lower_expr_to(value, &pointee, Value::Accumulator)?;
+            Expr::Deref(_) | Expr::Index(..) | Expr::Field(..) => {
+                if let Some(root) = place_root(target) {
+                    if self.binding(root)?.readonly {
+                        return Err(FrontendError::Type(format!(
+                            "{root} is a constant table and cannot be assigned"
+                        )));
+                    }
+                }
+                let ty = self.infer_expr(target)?;
+                // The value first: computing the address may use the accumulator.
+                let value = self.expr_value(value, &ty)?;
+                let (place, ty) = self.place(target)?;
+                let addr = self.place_address(place)?;
                 self.body.push(IrInst::Store {
-                    width: width_for_type(&pointee)?,
-                    addr,
-                    src: Value::Accumulator,
-                });
-                Ok(())
-            }
-            Expr::Index(base, index) => {
-                let target = Expr::Index(base.clone(), index.clone());
-                let element = self.infer_expr(&target)?;
-                let value = self.expr_value(value, &element)?;
-                let (addr, element) = self.address_for_index(base, index)?;
-                self.body.push(IrInst::Store {
-                    width: width_for_type(&element)?,
-                    addr,
-                    src: value,
-                });
-                Ok(())
-            }
-            Expr::Field(base, field) => {
-                let (addr, field_ty) = self.address_for_field(base, field)?;
-                let value = self.expr_value(value, &field_ty)?;
-                self.body.push(IrInst::Store {
-                    width: width_for_type(&field_ty)?,
+                    width: width_for_type(&ty)?,
                     addr,
                     src: value,
                 });
@@ -2103,6 +2401,53 @@ impl<'a> RoutineLowerer<'a> {
                 "assignment target is not assignable".to_owned(),
             )),
         }
+    }
+
+    /// `for var = start to end`: skips the body when start is already past
+    /// end, and stops after the pass where var equals end, so a loop up to a
+    /// type's largest value ends.
+    fn lower_for(
+        &mut self,
+        var: &str,
+        start: &Expr,
+        end: &Expr,
+        down: bool,
+        body: &[Stmt],
+    ) -> Result<(), FrontendError> {
+        let counter = Expr::Name(var.to_owned());
+        if integer_width(&self.binding(var)?.ty).is_none() {
+            return Err(FrontendError::Type(format!(
+                "for loop variable {var} needs an integer type"
+            )));
+        }
+        let top = self.parent.label("for_top");
+        let done = self.parent.label("for_done");
+        self.lower_assign(&counter, start)?;
+        let compare = |op| {
+            Cond::Compare(CondCompare {
+                lhs: counter.clone(),
+                op,
+                rhs: end.clone(),
+            })
+        };
+        self.lower_branch_if_true(
+            &compare(if down { CondOp::Lt } else { CondOp::Gt }),
+            done.clone(),
+        )?;
+        self.body.push(IrInst::Label(top.clone()));
+        for stmt in body {
+            self.lower_stmt(stmt)?;
+        }
+        self.lower_branch_if_true(&compare(CondOp::Eq), done.clone())?;
+        let step = if down {
+            Expr::Sub(Box::new(counter.clone()), Box::new(Expr::Number(1)))
+        } else {
+            Expr::Add(Box::new(counter.clone()), Box::new(Expr::Number(1)))
+        };
+        self.lower_assign(&counter, &step)?;
+        self.body.push(IrInst::Branch { target: top });
+        self.body.push(IrInst::Label(done));
+        Ok(())
     }
 
     fn lower_return(&mut self, value: Option<&Expr>) -> Result<(), FrontendError> {
@@ -2149,6 +2494,7 @@ impl<'a> RoutineLowerer<'a> {
                 self.body.push(IrInst::Label(true_target));
                 Ok(())
             }
+            Cond::Not(cond) => self.lower_branch_if_true(cond, false_target),
         }
     }
 
@@ -2170,6 +2516,7 @@ impl<'a> RoutineLowerer<'a> {
                 self.lower_branch_if_true(lhs, true_target.clone())?;
                 self.lower_branch_if_true(rhs, true_target)
             }
+            Cond::Not(cond) => self.lower_branch_if_false(cond, true_target),
         }
     }
 
@@ -2497,31 +2844,12 @@ impl<'a> RoutineLowerer<'a> {
                 });
                 Ok(())
             }
-            Expr::Deref(ptr) => {
-                let (addr, pointee) = self.address_for_pointer(ptr)?;
-                ensure_assignable(expected, &pointee)?;
+            Expr::Deref(_) | Expr::Index(..) | Expr::Field(..) => {
+                let (place, ty) = self.place(expr)?;
+                ensure_assignable(expected, &ty)?;
+                let addr = self.place_address(place)?;
                 self.body.push(IrInst::Load {
-                    width: width_for_type(&pointee)?,
-                    dst,
-                    addr,
-                });
-                Ok(())
-            }
-            Expr::Index(base, index) => {
-                let (addr, element) = self.address_for_index(base, index)?;
-                ensure_assignable(expected, &element)?;
-                self.body.push(IrInst::Load {
-                    width: width_for_type(&element)?,
-                    dst,
-                    addr,
-                });
-                Ok(())
-            }
-            Expr::Field(base, field) => {
-                let (addr, field_ty) = self.address_for_field(base, field)?;
-                ensure_assignable(expected, &field_ty)?;
-                self.body.push(IrInst::Load {
-                    width: width_for_type(&field_ty)?,
+                    width: width_for_type(&ty)?,
                     dst,
                     addr,
                 });
@@ -2572,99 +2900,274 @@ impl<'a> RoutineLowerer<'a> {
         }
     }
 
-    fn address_for_pointer(&mut self, expr: &Expr) -> Result<(Address, Type), FrontendError> {
-        let ty = self.infer_expr(expr)?;
-        let Type::Pointer { to, kind } = ty else {
-            return Err(FrontendError::Type(
-                "dereference needs a pointer".to_owned(),
-            ));
-        };
-        let value = self.expr_value(
-            expr,
-            &Type::Pointer {
-                to: to.clone(),
-                kind,
-            },
-        )?;
-        let value = if matches!(
-            value,
-            Value::Direct(_)
-                | Value::Stack { .. }
-                | Value::Temp(_)
-                | Value::Local(_)
-                | Value::Param(_)
-        ) {
-            value
-        } else {
-            let temp = self.parent.temp();
-            self.body.push(IrInst::Move {
-                width: width_for_type(&Type::Pointer {
-                    to: to.clone(),
-                    kind,
-                })?,
-                dst: temp.clone(),
-                src: value,
-            });
-            temp
-        };
-        let addr = match kind {
-            PointerKind::Near | PointerKind::Direct | PointerKind::Code => Address::NearPtr(value),
-            PointerKind::Far => Address::FarPtr(value),
-        };
-        Ok((addr, *to))
+    /// Where an element, field or pointer target lives (see [`Place`]).
+    fn place(&mut self, expr: &Expr) -> Result<(Place, Type), FrontendError> {
+        match expr {
+            Expr::Name(name) => {
+                let binding = self.binding(name)?.clone();
+                match binding.value {
+                    Value::Global(symbol) => Ok((
+                        Place::Global {
+                            symbol,
+                            offset: 0,
+                            index: None,
+                            whole: binding.ty.size_bytes(),
+                        },
+                        binding.ty,
+                    )),
+                    Value::Const(_) => Err(FrontendError::Type(format!(
+                        "constant {name} has no address"
+                    ))),
+                    base => Ok((Place::Value { base, offset: 0 }, binding.ty)),
+                }
+            }
+            Expr::Field(base, name) => {
+                let (mut place, ty) = self.place(base)?;
+                let field = record_field(&ty, name)?.clone();
+                place.add_offset(field.offset)?;
+                Ok((place, field.ty))
+            }
+            Expr::Index(base, index) => {
+                let (mut place, ty) = self.place(base)?;
+                let Type::Array { len, element } = ty else {
+                    return Err(FrontendError::Type(
+                        "indexed access needs an array".to_owned(),
+                    ));
+                };
+                let size = element.size_bytes();
+                if self.is_const_expr(index)? {
+                    let at = self.const_expr_value(index)?;
+                    if !(0..i64::from(len)).contains(&at) {
+                        return Err(FrontendError::Type(format!(
+                            "index {at} is outside the {len}-element array"
+                        )));
+                    }
+                    place.add_offset(at as u16 * size)?;
+                    return Ok((place, *element));
+                }
+                // Evaluating the index may need the accumulator.
+                self.spill_place_index(&mut place);
+                let offset = self.index_offset(index, size)?;
+                self.add_place_index(&mut place, offset)?;
+                Ok((place, *element))
+            }
+            Expr::Deref(pointer) => {
+                let ty = self.infer_expr(pointer)?;
+                let Type::Pointer { to, kind } = ty.clone() else {
+                    return Err(FrontendError::Type(
+                        "dereference needs a pointer".to_owned(),
+                    ));
+                };
+                let value = self.expr_value(pointer, &ty)?;
+                let pointer = if matches!(
+                    value,
+                    Value::Direct(_)
+                        | Value::Stack { .. }
+                        | Value::Temp(_)
+                        | Value::Local(_)
+                        | Value::Param(_)
+                ) {
+                    value
+                } else {
+                    let temp = self.parent.temp();
+                    self.body.push(IrInst::Move {
+                        width: width_for_type(&ty)?,
+                        dst: temp.clone(),
+                        src: value,
+                    });
+                    temp
+                };
+                Ok((
+                    Place::Pointer {
+                        pointer,
+                        far: matches!(kind, PointerKind::Far),
+                        offset: 0,
+                        index: None,
+                    },
+                    *to,
+                ))
+            }
+            _ => Err(FrontendError::Type(
+                "this expression has no address".to_owned(),
+            )),
+        }
     }
 
-    fn address_for_index(
-        &mut self,
-        base: &Expr,
-        index: &Expr,
-    ) -> Result<(Address, Type), FrontendError> {
-        let Expr::Name(name) = base else {
-            return Err(FrontendError::Type(
-                "indexed access currently requires a named array".to_owned(),
-            ));
+    /// The byte offset of element `index` (a 1- or 2-byte integer) in
+    /// elements of `size` bytes, as a 16-bit value.
+    fn index_offset(&mut self, index: &Expr, size: u16) -> Result<Value, FrontendError> {
+        let ty = self.infer_expr(index)?;
+        let value = match integer_width(&ty) {
+            Some(2) if matches!(index, Expr::Name(_)) => self.expr_value(index, &ty)?,
+            Some(2) => {
+                self.lower_expr_to(index, &ty, Value::Accumulator)?;
+                Value::Accumulator
+            }
+            Some(1) => {
+                let byte = self.expr_value(index, &ty)?;
+                self.body.push(IrInst::LoadConst {
+                    dst: Value::Accumulator,
+                    value: Const::U16(0),
+                });
+                self.body.push(IrInst::Move {
+                    width: Width::Byte,
+                    dst: Value::Accumulator,
+                    src: byte,
+                });
+                Value::Accumulator
+            }
+            _ => {
+                return Err(FrontendError::Type(
+                    "array indexes need an 8- or 16-bit integer".to_owned(),
+                ))
+            }
         };
-        let binding = self.binding(name)?.clone();
-        let small = binding.ty.size_bytes() <= 0x100;
-        let Type::Array { element, .. } = binding.ty else {
-            return Err(FrontendError::Type(
-                "indexed access needs an array".to_owned(),
-            ));
-        };
+        self.scale_index(value, size)
+    }
 
-        let index_ty = if matches!(index, Expr::Number(_)) || self.is_const_expr(index)? {
-            Type::U16
-        } else {
-            self.infer_expr(index)?
-        };
-        if integer_width(&index_ty) != Some(2) {
-            return Err(FrontendError::Type(
-                "array indexes currently need a 16-bit scalar".to_owned(),
-            ));
+    /// Moves a place's index out of the accumulator.
+    fn spill_place_index(&mut self, place: &mut Place) {
+        if let Place::Global { index, .. } | Place::Pointer { index, .. } = place {
+            if *index == Some(Value::Accumulator) {
+                let temp = self.parent.temp();
+                self.body.push(IrInst::Move {
+                    width: Width::Word,
+                    dst: temp.clone(),
+                    src: Value::Accumulator,
+                });
+                *index = Some(temp);
+            }
         }
-        // Names and constants are used in place; computed indexes are left in
-        // the accumulator, which every backend can index from directly.
-        let index = if matches!(index, Expr::Name(_) | Expr::Number(_)) {
-            self.expr_value(index, &index_ty)?
-        } else {
-            self.lower_expr_to(index, &index_ty, Value::Accumulator)?;
-            Value::Accumulator
-        };
-        let index = self.scale_index(index, element.size_bytes())?;
+    }
 
-        match binding.value {
-            Value::Global(symbol) => Ok((
-                Address::Indexed {
-                    base: symbol,
-                    index,
-                    small,
+    fn add_place_index(&mut self, place: &mut Place, offset: Value) -> Result<(), FrontendError> {
+        let index = match place {
+            Place::Global { index, .. } | Place::Pointer { index, .. } => index,
+            Place::Value { .. } => {
+                return Err(FrontendError::Type(
+                    "indexing a local array needs a constant index (make the array global)"
+                        .to_owned(),
+                ))
+            }
+        };
+        *index = Some(match index.take() {
+            None => offset,
+            // The accumulator, if used, must be the left side.
+            Some(previous) => {
+                let (lhs, rhs) = if offset == Value::Accumulator {
+                    (offset, previous)
+                } else {
+                    (previous, offset)
+                };
+                self.body.push(IrInst::Add {
+                    width: Width::Word,
+                    dst: Value::Accumulator,
+                    lhs,
+                    rhs,
+                });
+                Value::Accumulator
+            }
+        });
+        Ok(())
+    }
+
+    /// The IR address of a place.
+    fn place_address(&mut self, place: Place) -> Result<Address, FrontendError> {
+        Ok(match place {
+            Place::Global {
+                symbol,
+                offset,
+                index: None,
+                ..
+            } => Address::ValueOffset {
+                base: Value::Global(symbol),
+                offset,
+            },
+            Place::Global {
+                symbol,
+                offset,
+                index: Some(index),
+                whole,
+            } => Address::Indexed {
+                base: if offset == 0 {
+                    symbol
+                } else {
+                    format!("{symbol}+{offset}")
                 },
-                *element,
-            )),
-            other => Err(FrontendError::Type(format!(
-                "indexed access currently requires a global array, got {other:?}"
-            ))),
-        }
+                index,
+                small: whole <= 0x100,
+            },
+            Place::Value { base, offset } => Address::ValueOffset { base, offset },
+            Place::Pointer {
+                pointer,
+                far,
+                offset: 0,
+                index: None,
+            } => {
+                if far {
+                    Address::FarPtr(pointer)
+                } else {
+                    Address::NearPtr(pointer)
+                }
+            }
+            Place::Pointer {
+                pointer,
+                far,
+                offset,
+                index,
+            } => {
+                // Form pointer + index + offset in a temporary.
+                let (width, offset_value) = if far {
+                    (Width::Quad, Const::U32(u32::from(offset)))
+                } else {
+                    (Width::Word, Const::U16(offset))
+                };
+                let temp = self.parent.temp();
+                match index {
+                    Some(index) if far => {
+                        self.body.push(IrInst::LoadConst {
+                            dst: temp.clone(),
+                            value: Const::U32(0),
+                        });
+                        self.body.push(IrInst::Move {
+                            width: Width::Word,
+                            dst: temp.clone(),
+                            src: index,
+                        });
+                        self.body.push(IrInst::Add {
+                            width,
+                            dst: temp.clone(),
+                            lhs: temp.clone(),
+                            rhs: pointer,
+                        });
+                    }
+                    Some(index) => self.body.push(IrInst::Add {
+                        width,
+                        dst: temp.clone(),
+                        lhs: index,
+                        rhs: pointer,
+                    }),
+                    None => self.body.push(IrInst::Move {
+                        width,
+                        dst: temp.clone(),
+                        src: pointer,
+                    }),
+                }
+                if offset != 0 {
+                    self.body.push(IrInst::Add {
+                        width,
+                        dst: temp.clone(),
+                        lhs: temp.clone(),
+                        rhs: Value::Const(offset_value),
+                    });
+                }
+                if far {
+                    Address::FarPtr(temp)
+                } else {
+                    Address::NearPtr(temp)
+                }
+            }
+        })
     }
 
     /// Turns an element index into a byte offset: `index * element_size`,
@@ -2728,28 +3231,6 @@ impl<'a> RoutineLowerer<'a> {
             }
         }
         Ok(Value::Accumulator)
-    }
-
-    fn address_for_field(
-        &mut self,
-        base: &Expr,
-        field_name: &str,
-    ) -> Result<(Address, Type), FrontendError> {
-        let base_ty = self.infer_expr(base)?;
-        let field = record_field(&base_ty, field_name)?.clone();
-        let Expr::Name(name) = base else {
-            return Err(FrontendError::Type(
-                "field access currently requires a named record value".to_owned(),
-            ));
-        };
-        let binding = self.binding(name)?.clone();
-        Ok((
-            Address::ValueOffset {
-                base: binding.value,
-                offset: field.offset,
-            },
-            field.ty,
-        ))
     }
 
     fn infer_expr(&self, expr: &Expr) -> Result<Type, FrontendError> {
@@ -2821,15 +3302,11 @@ impl<'a> RoutineLowerer<'a> {
             }
             Expr::Index(base, index) => {
                 let base_ty = self.infer_expr(base)?;
-                let index_ty =
-                    if matches!(index.as_ref(), Expr::Number(_)) || self.is_const_expr(index)? {
-                        Type::U16
-                    } else {
-                        self.infer_expr(index)?
-                    };
-                if integer_width(&index_ty) != Some(2) {
+                if !self.is_const_expr(index)?
+                    && !matches!(integer_width(&self.infer_expr(index)?), Some(1 | 2))
+                {
                     return Err(FrontendError::Type(
-                        "array indexes currently need a 16-bit scalar".to_owned(),
+                        "array indexes need an 8- or 16-bit integer".to_owned(),
                     ));
                 }
                 match base_ty {
@@ -3341,111 +3818,20 @@ impl<'a> RoutineLowerer<'a> {
     /// Whether `expr` is a compile-time constant: numbers, named constants,
     /// and arithmetic on them.
     fn is_const_expr(&self, expr: &Expr) -> Result<bool, FrontendError> {
-        match expr {
-            Expr::Number(_) => Ok(true),
-            Expr::Name(name) => Ok(self
-                .bindings
-                .get(name)
-                .is_some_and(|binding| matches!(binding.value, Value::Const(_)))),
-            Expr::Neg(value) => self.is_const_expr(value),
-            Expr::Add(lhs, rhs)
-            | Expr::Sub(lhs, rhs)
-            | Expr::Mul(lhs, rhs)
-            | Expr::Div(lhs, rhs)
-            | Expr::Rem(lhs, rhs)
-            | Expr::BitAnd(lhs, rhs)
-            | Expr::BitOr(lhs, rhs)
-            | Expr::BitXor(lhs, rhs)
-            | Expr::ShiftLeft(lhs, rhs)
-            | Expr::ShiftRight(lhs, rhs) => {
-                Ok(self.is_const_expr(lhs)? && self.is_const_expr(rhs)?)
-            }
-            _ => Ok(false),
-        }
+        Ok(is_const(expr, &|name| self.const_binding(name)))
     }
 
     /// Evaluates a constant expression (with 64-bit intermediate results).
     fn const_expr_value(&self, expr: &Expr) -> Result<i64, FrontendError> {
-        let pair = |lhs: &Expr, rhs: &Expr| -> Result<(i64, i64), FrontendError> {
-            Ok((self.const_expr_value(lhs)?, self.const_expr_value(rhs)?))
-        };
-        let value = match expr {
-            Expr::Number(value) => i64::from(*value),
-            Expr::String(_) => {
-                return Err(FrontendError::Type(
-                    "string literal is not a numeric constant".to_owned(),
-                ))
-            }
-            Expr::Name(name) => {
-                let binding = self.binding(name)?;
-                match binding.value {
-                    Value::Const(value) => const_value(value, &binding.ty),
-                    _ => return Err(FrontendError::Type(format!("{name} is not a constant"))),
-                }
-            }
-            Expr::Neg(value) => -self.const_expr_value(value)?,
-            Expr::Add(lhs, rhs) => {
-                let (lhs, rhs) = pair(lhs, rhs)?;
-                lhs + rhs
-            }
-            Expr::Sub(lhs, rhs) => {
-                let (lhs, rhs) = pair(lhs, rhs)?;
-                lhs - rhs
-            }
-            Expr::Mul(lhs, rhs) => {
-                let (lhs, rhs) = pair(lhs, rhs)?;
-                lhs.checked_mul(rhs).ok_or_else(|| {
-                    FrontendError::Type("constant multiplication overflows".to_owned())
-                })?
-            }
-            Expr::Div(lhs, rhs) | Expr::Rem(lhs, rhs) => {
-                let (lhs, rhs) = pair(lhs, rhs)?;
-                if rhs == 0 {
-                    return Err(FrontendError::Type("division by constant zero".to_owned()));
-                }
-                if matches!(expr, Expr::Div(..)) {
-                    lhs / rhs
-                } else {
-                    lhs % rhs
-                }
-            }
-            Expr::BitAnd(lhs, rhs) => {
-                let (lhs, rhs) = pair(lhs, rhs)?;
-                lhs & rhs
-            }
-            Expr::BitOr(lhs, rhs) => {
-                let (lhs, rhs) = pair(lhs, rhs)?;
-                lhs | rhs
-            }
-            Expr::BitXor(lhs, rhs) => {
-                let (lhs, rhs) = pair(lhs, rhs)?;
-                lhs ^ rhs
-            }
-            Expr::ShiftLeft(lhs, rhs) | Expr::ShiftRight(lhs, rhs) => {
-                let (lhs, rhs) = pair(lhs, rhs)?;
-                if !(0..32).contains(&rhs) {
-                    return Err(FrontendError::Type(format!(
-                        "constant shift count {rhs} is out of range"
-                    )));
-                }
-                if matches!(expr, Expr::ShiftLeft(..)) {
-                    lhs << rhs
-                } else {
-                    lhs >> rhs
-                }
-            }
-            _ => {
-                return Err(FrontendError::Type(
-                    "expected constant expression".to_owned(),
-                ))
-            }
-        };
-        if !(-(1i64 << 40)..(1i64 << 40)).contains(&value) {
-            return Err(FrontendError::Type(format!(
-                "constant expression value {value} is out of range"
-            )));
+        const_eval(expr, &|name| self.const_binding(name))
+    }
+
+    fn const_binding(&self, name: &str) -> Option<i64> {
+        let binding = self.bindings.get(name)?;
+        match binding.value {
+            Value::Const(value) => Some(const_value(value, &binding.ty)),
+            _ => None,
         }
-        Ok(value)
     }
 }
 
@@ -3607,6 +3993,106 @@ fn string_literal_type() -> Type {
     Type::near_ptr(Type::U8)
 }
 
+/// Whether `expr` is a constant, given the named constants `lookup` knows.
+fn is_const(expr: &Expr, lookup: &dyn Fn(&str) -> Option<i64>) -> bool {
+    match expr {
+        Expr::Number(_) => true,
+        Expr::Name(name) => lookup(name).is_some(),
+        Expr::Neg(value) => is_const(value, lookup),
+        Expr::Add(lhs, rhs)
+        | Expr::Sub(lhs, rhs)
+        | Expr::Mul(lhs, rhs)
+        | Expr::Div(lhs, rhs)
+        | Expr::Rem(lhs, rhs)
+        | Expr::BitAnd(lhs, rhs)
+        | Expr::BitOr(lhs, rhs)
+        | Expr::BitXor(lhs, rhs)
+        | Expr::ShiftLeft(lhs, rhs)
+        | Expr::ShiftRight(lhs, rhs) => is_const(lhs, lookup) && is_const(rhs, lookup),
+        _ => false,
+    }
+}
+
+/// Evaluates a constant expression with 64-bit intermediate results.
+fn const_eval(expr: &Expr, lookup: &dyn Fn(&str) -> Option<i64>) -> Result<i64, FrontendError> {
+    let pair = |lhs: &Expr, rhs: &Expr| -> Result<(i64, i64), FrontendError> {
+        Ok((const_eval(lhs, lookup)?, const_eval(rhs, lookup)?))
+    };
+    let value = match expr {
+        Expr::Number(value) => i64::from(*value),
+        Expr::String(_) => {
+            return Err(FrontendError::Type(
+                "string literal is not a numeric constant".to_owned(),
+            ))
+        }
+        Expr::Name(name) => {
+            lookup(name).ok_or_else(|| FrontendError::Type(format!("{name} is not a constant")))?
+        }
+        Expr::Neg(value) => -const_eval(value, lookup)?,
+        Expr::Add(lhs, rhs) => {
+            let (lhs, rhs) = pair(lhs, rhs)?;
+            lhs + rhs
+        }
+        Expr::Sub(lhs, rhs) => {
+            let (lhs, rhs) = pair(lhs, rhs)?;
+            lhs - rhs
+        }
+        Expr::Mul(lhs, rhs) => {
+            let (lhs, rhs) = pair(lhs, rhs)?;
+            lhs.checked_mul(rhs).ok_or_else(|| {
+                FrontendError::Type("constant multiplication overflows".to_owned())
+            })?
+        }
+        Expr::Div(lhs, rhs) | Expr::Rem(lhs, rhs) => {
+            let (lhs, rhs) = pair(lhs, rhs)?;
+            if rhs == 0 {
+                return Err(FrontendError::Type("division by constant zero".to_owned()));
+            }
+            if matches!(expr, Expr::Div(..)) {
+                lhs / rhs
+            } else {
+                lhs % rhs
+            }
+        }
+        Expr::BitAnd(lhs, rhs) => {
+            let (lhs, rhs) = pair(lhs, rhs)?;
+            lhs & rhs
+        }
+        Expr::BitOr(lhs, rhs) => {
+            let (lhs, rhs) = pair(lhs, rhs)?;
+            lhs | rhs
+        }
+        Expr::BitXor(lhs, rhs) => {
+            let (lhs, rhs) = pair(lhs, rhs)?;
+            lhs ^ rhs
+        }
+        Expr::ShiftLeft(lhs, rhs) | Expr::ShiftRight(lhs, rhs) => {
+            let (lhs, rhs) = pair(lhs, rhs)?;
+            if !(0..32).contains(&rhs) {
+                return Err(FrontendError::Type(format!(
+                    "constant shift count {rhs} is out of range"
+                )));
+            }
+            if matches!(expr, Expr::ShiftLeft(..)) {
+                lhs << rhs
+            } else {
+                lhs >> rhs
+            }
+        }
+        _ => {
+            return Err(FrontendError::Type(
+                "expected constant expression".to_owned(),
+            ))
+        }
+    };
+    if !(-(1i64 << 40)..(1i64 << 40)).contains(&value) {
+        return Err(FrontendError::Type(format!(
+            "constant expression value {value} is out of range"
+        )));
+    }
+    Ok(value)
+}
+
 /// The narrowest type for a constant: unsigned unless it is negative.
 fn const_type(value: i64) -> Type {
     match value {
@@ -3689,6 +4175,61 @@ fn routine_type_of(name: &str, sig: &RoutineSig) -> Result<RoutineType, Frontend
             RoutineDeclKind::Function { result } => Some(result.clone()),
         },
     })
+}
+
+/// Where an element, field or pointer target lives, before it becomes an
+/// IR address: a constant offset into something, plus a dynamic 16-bit
+/// byte offset where there is one.
+enum Place {
+    /// Inside a global (`whole` bytes long).
+    Global {
+        symbol: String,
+        offset: u16,
+        index: Option<Value>,
+        whole: u16,
+    },
+    /// Inside a local or parameter (constant offsets only).
+    Value { base: Value, offset: u16 },
+    /// Through a near or far pointer.
+    Pointer {
+        pointer: Value,
+        far: bool,
+        offset: u16,
+        index: Option<Value>,
+    },
+}
+
+impl Place {
+    fn add_offset(&mut self, more: u16) -> Result<(), FrontendError> {
+        let offset = match self {
+            Place::Global { offset, .. }
+            | Place::Value { offset, .. }
+            | Place::Pointer { offset, .. } => offset,
+        };
+        *offset = offset
+            .checked_add(more)
+            .ok_or_else(|| FrontendError::Type("offset beyond 64 KiB".to_owned()))?;
+        Ok(())
+    }
+}
+
+/// The variable an element or field expression is part of (not through a
+/// pointer).
+fn place_root(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Name(name) => Some(name),
+        Expr::Field(base, _) | Expr::Index(base, _) => place_root(base),
+        _ => None,
+    }
+}
+
+/// Appends literal bytes, merging with a preceding run.
+fn push_data_bytes(out: &mut Vec<DataItem>, bytes: &[u8]) {
+    if let Some(DataItem::Bytes(run)) = out.last_mut() {
+        run.extend_from_slice(bytes);
+    } else {
+        out.push(DataItem::Bytes(bytes.to_vec()));
+    }
 }
 
 fn is_power_of_two(value: i64) -> Option<u8> {
@@ -4338,7 +4879,10 @@ mod tests {
         ";
 
         let module = compile_source(source).unwrap();
-        assert_eq!(module.static_data[0].bytes, b"OK\r\n\x1b\0");
+        assert_eq!(
+            module.static_data[0].items,
+            vec![crate::ir::DataItem::Bytes(b"OK\r\n\x1b\0".to_vec())]
+        );
 
         let (lowered, _assignment) =
             crate::lower_65816::lower_module_with_storage(&module).unwrap();

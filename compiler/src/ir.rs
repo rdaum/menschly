@@ -71,7 +71,29 @@ impl Module {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticData {
     pub name: String,
-    pub bytes: Vec<u8>,
+    pub items: Vec<DataItem>,
+    pub export: bool,
+}
+
+impl StaticData {
+    pub fn bytes(name: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self {
+            name: name.into(),
+            items: vec![DataItem::Bytes(bytes)],
+            export: false,
+        }
+    }
+}
+
+/// Initialised data: literal bytes, or the address of a symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataItem {
+    Bytes(Vec<u8>),
+    /// A 2-byte (bank-relative) or 4-byte (flat) address.
+    Address {
+        symbol: String,
+        bytes: u16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +103,9 @@ pub struct Global {
     pub placement: GlobalPlacement,
     pub volatile: bool,
     pub export: bool,
+    /// Initial contents (in the module's data), for an initialised variable
+    /// or a constant table; `None` leaves it in BSS.
+    pub init: Option<Vec<DataItem>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
