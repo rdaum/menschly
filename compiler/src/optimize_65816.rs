@@ -1556,6 +1556,7 @@ mod tests {
             name: "slot".to_owned(),
             size: 1,
             export: false,
+            alias: None,
         }];
 
         assert_eq!(

@@ -163,6 +163,8 @@ pub struct Routine {
     pub locals: Vec<Local>,
     pub stack_frame_bytes: u16,
     pub body: Vec<IrInst>,
+    /// A function whose (0/1) result is returned in the carry flag.
+    pub result_in_carry: bool,
 }
 
 impl Routine {
@@ -179,6 +181,7 @@ impl Routine {
             locals: Vec::new(),
             stack_frame_bytes: 0,
             body: Vec::new(),
+            result_in_carry: false,
         }
     }
 
@@ -195,6 +198,7 @@ impl Routine {
             locals: Vec::new(),
             stack_frame_bytes: 0,
             body: Vec::new(),
+            result_in_carry: false,
         }
     }
 
@@ -297,6 +301,42 @@ pub struct Param {
     pub name: String,
     pub ty: Type,
     pub storage: Storage,
+    /// Passed in CPU registers (`in a`, ...) rather than stored by the caller.
+    pub register: Option<ArgRegister>,
+}
+
+/// The CPU registers an argument can arrive in: a byte in A, X or Y, or a
+/// word in A (low) and X, or X (low) and Y.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgRegister {
+    A,
+    X,
+    Y,
+    AX,
+    XY,
+}
+
+impl ArgRegister {
+    pub fn bytes(self) -> u16 {
+        match self {
+            Self::A | Self::X | Self::Y => 1,
+            Self::AX | Self::XY => 2,
+        }
+    }
+
+    /// The register holding byte `i`.
+    pub fn byte(self, i: u16) -> ArgRegister {
+        match (self, i) {
+            (Self::AX, 0) => Self::A,
+            (Self::AX, _) | (Self::XY, 0) => Self::X,
+            (Self::XY, _) => Self::Y,
+            (register, _) => register,
+        }
+    }
+
+    pub fn uses_a(self) -> bool {
+        matches!(self, Self::A | Self::AX)
+    }
 }
 
 pub fn param_symbol(routine: &str, name: &str) -> String {
@@ -309,6 +349,7 @@ impl Param {
             name: name.into(),
             ty,
             storage: Storage::Default,
+            register: None,
         }
     }
 
@@ -590,6 +631,14 @@ pub enum IrInst {
         abi: Abi,
         result: Option<(Width, Value)>,
     },
+    /// Loads register arguments right before the call that follows.
+    LoadRegisters {
+        args: Vec<(ArgRegister, Value)>,
+    },
+    /// `dst` = 1 if the carry flag is set, else 0 (a carry result).
+    MoveCarry {
+        dst: Value,
+    },
     CleanupStack {
         bytes: u16,
     },
@@ -695,8 +744,13 @@ pub enum Value {
     Local(String),
     Param(String),
     Direct(String),
-    Stack { offset: u16, size: u16 },
+    Stack {
+        offset: u16,
+        size: u16,
+    },
     Global(String),
+    /// A register argument as it arrives (only read on entry).
+    Register(ArgRegister),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

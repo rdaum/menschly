@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, BinaryOp, Const, CopRegister, DataItem, Entry, EntryKind, Field, Global,
-    GlobalPlacement, Import, InterruptPreserve, IrInst, Label, Library, Local, Metadata, Module,
-    Param, PointerKind, Routine, RoutineKind, RoutineType, StaticData, Storage, Type, Value,
-    Vector, Width,
+    Abi, Address, ArgRegister, BinaryOp, Const, CopRegister, DataItem, Entry, EntryKind, Field,
+    Global, GlobalPlacement, Import, InterruptPreserve, IrInst, Label, Library, Local, Metadata,
+    Module, Param, PointerKind, Routine, RoutineKind, RoutineType, StaticData, Storage, Type,
+    Value, Vector, Width,
 };
 
 pub fn parse_source(source: &str) -> Result<SourceModule, FrontendError> {
@@ -99,6 +99,7 @@ pub struct MetadataDecl {
 pub struct ExternalDecl {
     pub name: String,
     pub kind: RoutineDeclKind,
+    pub result_in_carry: bool,
     pub abi: Abi,
     pub interrupt_preserve: InterruptPreserve,
     pub interrupt_raw: bool,
@@ -110,6 +111,7 @@ pub struct ExternalDecl {
 pub struct RoutineDecl {
     pub name: String,
     pub kind: RoutineDeclKind,
+    pub result_in_carry: bool,
     pub abi: Abi,
     pub interrupt_preserve: InterruptPreserve,
     pub interrupt_raw: bool,
@@ -131,6 +133,8 @@ pub struct VarDecl {
     pub name: String,
     pub ty: Type,
     pub storage: Storage,
+    /// A parameter passed in registers (`count: u8 in x`).
+    pub register: Option<ArgRegister>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -797,6 +801,7 @@ impl Parser {
         Ok(ExternalDecl {
             name: header.name,
             kind: header.kind,
+            result_in_carry: header.result_in_carry,
             abi: header.abi,
             interrupt_preserve: header.interrupt.preserve,
             interrupt_raw: header.interrupt.raw,
@@ -866,6 +871,7 @@ impl Parser {
             kind,
             name,
             params,
+            result_in_carry,
         } = self.parse_routine_header()?;
 
         let mut locals = Vec::new();
@@ -884,6 +890,7 @@ impl Parser {
         Ok(RoutineDecl {
             name,
             kind,
+            result_in_carry,
             abi,
             interrupt_preserve: interrupt.preserve,
             interrupt_raw: interrupt.raw,
@@ -932,6 +939,10 @@ impl Parser {
         } else {
             RoutineDeclKind::Procedure
         };
+        let result_in_carry = is_function && self.take_keyword("in");
+        if result_in_carry {
+            self.expect_keyword("carry")?;
+        }
 
         Ok(RoutineHeader {
             export,
@@ -940,6 +951,7 @@ impl Parser {
             kind,
             name,
             params,
+            result_in_carry,
         })
     }
 
@@ -1019,7 +1031,29 @@ impl Parser {
             let name = self.expect_ident()?;
             self.expect(TokenKind::Colon)?;
             let ty = self.parse_type()?;
-            params.push(VarDecl { name, ty, storage });
+            let register = if self.take_keyword("in") {
+                let name = self.expect_ident()?;
+                Some(match name.as_str() {
+                    "a" => ArgRegister::A,
+                    "x" => ArgRegister::X,
+                    "y" => ArgRegister::Y,
+                    "ax" => ArgRegister::AX,
+                    "xy" => ArgRegister::XY,
+                    other => {
+                        return Err(self.parse_error(&format!(
+                            "unknown argument register {other} (expected a, x, y, ax or xy)"
+                        )))
+                    }
+                })
+            } else {
+                None
+            };
+            params.push(VarDecl {
+                name,
+                ty,
+                storage,
+                register,
+            });
 
             if self.take(TokenKind::RParen) {
                 break;
@@ -1036,7 +1070,12 @@ impl Parser {
         let name = self.expect_ident()?;
         self.expect(TokenKind::Colon)?;
         let ty = self.parse_type()?;
-        Ok(VarDecl { name, ty, storage })
+        Ok(VarDecl {
+            name,
+            ty,
+            storage,
+            register: None,
+        })
     }
 
     fn parse_storage_prefix(&mut self) -> Storage {
@@ -1774,6 +1813,7 @@ struct RoutineHeader {
     kind: RoutineDeclKind,
     name: String,
     params: Vec<VarDecl>,
+    result_in_carry: bool,
 }
 
 enum ConstOrTable {
@@ -1803,12 +1843,14 @@ struct RoutineSig {
     kind: RoutineDeclKind,
     abi: Abi,
     params: Vec<ParamSig>,
+    result_in_carry: bool,
 }
 
 #[derive(Debug, Clone)]
 struct ParamSig {
     name: String,
     ty: Type,
+    register: Option<ArgRegister>,
 }
 
 #[derive(Debug, Clone)]
@@ -1870,6 +1912,7 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
             external
                 .params
                 .iter()
+                .filter(|param| param.register.is_none())
                 .map(|param| crate::ir::param_symbol(&external.name, &param.name))
         })
         .collect();
@@ -1970,12 +2013,23 @@ fn routine_sigs(source: &SourceModule) -> Result<BTreeMap<String, RoutineSig>, F
                     .map(|param| ParamSig {
                         name: param.name.clone(),
                         ty: param.ty.clone(),
+                        register: param.register,
                     })
                     .collect(),
+                result_in_carry: external.result_in_carry,
             },
         )?;
     }
     for routine in &source.routines {
+        if routine.export
+            && (routine.result_in_carry
+                || routine.params.iter().any(|param| param.register.is_some()))
+        {
+            return Err(FrontendError::Type(format!(
+                "routine {}: register arguments and carry results need a plain, unexported routine",
+                routine.name
+            )));
+        }
         insert_routine_sig(
             &mut out,
             &routine.name,
@@ -1988,8 +2042,10 @@ fn routine_sigs(source: &SourceModule) -> Result<BTreeMap<String, RoutineSig>, F
                     .map(|param| ParamSig {
                         name: param.name.clone(),
                         ty: param.ty.clone(),
+                        register: param.register,
                     })
                     .collect(),
+                result_in_carry: routine.result_in_carry,
             },
         )?;
     }
@@ -2001,6 +2057,7 @@ fn insert_routine_sig(
     name: &str,
     sig: RoutineSig,
 ) -> Result<(), FrontendError> {
+    check_register_interface(name, &sig)?;
     if out.insert(name.to_owned(), sig).is_some() {
         Err(FrontendError::Type(format!("duplicate routine {name}")))
     } else {
@@ -2043,6 +2100,7 @@ impl Lowerer {
                     name: param.name.clone(),
                     ty: param.ty.clone(),
                     storage: param.storage,
+                    register: param.register,
                 })
                 .collect(),
             locals: source
@@ -2056,9 +2114,26 @@ impl Lowerer {
                 .collect(),
             stack_frame_bytes: 0,
             body: Vec::new(),
+            result_in_carry: source.result_in_carry,
         };
 
         let mut lowerer = RoutineLowerer::new(self, source, globals, consts)?;
+        // Register arguments are stored first (A first: moving X or Y out
+        // goes through A). Backends keep these ahead of any frame setup.
+        let mut register_params: Vec<&VarDecl> = source
+            .params
+            .iter()
+            .filter(|param| param.register.is_some())
+            .collect();
+        register_params.sort_by_key(|param| !param.register.expect("filtered").uses_a());
+        for param in register_params {
+            let register = param.register.expect("filtered");
+            lowerer.body.push(IrInst::Move {
+                width: width_for_type(&param.ty)?,
+                dst: Value::Param(param.name.clone()),
+                src: Value::Register(register),
+            });
+        }
         if let Some(param) = source.params.iter().find(|param| {
             !matches!(
                 param.ty,
@@ -2585,6 +2660,31 @@ impl<'a> RoutineLowerer<'a> {
         target: Label,
         branch_when_true: bool,
     ) -> Result<(), FrontendError> {
+        // A carry result tested against zero is a branch on the carry.
+        if let (Expr::Call { name, args }, CondOp::Eq | CondOp::Ne) = (&cond.lhs, cond.op) {
+            let carry = self.routine_pointer(name).is_none()
+                && self
+                    .parent
+                    .routines
+                    .get(name)
+                    .is_some_and(|sig| sig.result_in_carry);
+            if carry && self.is_const_expr(&cond.rhs)? && self.const_expr_value(&cond.rhs)? == 0 {
+                let sig = self.check_call(name, args, false)?;
+                self.lower_call_args(name, sig.abi, args, &sig.params)?;
+                self.body.push(IrInst::CallProcedure {
+                    name: name.clone(),
+                    abi: sig.abi,
+                });
+                // `f() != 0` holds when the carry is set.
+                let when_set = (cond.op == CondOp::Ne) == branch_when_true;
+                self.body.push(if when_set {
+                    IrInst::BranchIfCarrySet { target }
+                } else {
+                    IrInst::BranchIfCarryClear { target }
+                });
+                return Ok(());
+            }
+        }
         let mut lhs_ty = self.infer_expr(&cond.lhs)?;
         let rhs_ty = self.infer_expr(&cond.rhs)?;
         // `0 < x` compares at the width (and signedness) of `x`.
@@ -2749,6 +2849,15 @@ impl<'a> RoutineLowerer<'a> {
                 ensure_assignable(expected, &result)?;
                 let params: Vec<Type> = sig.params.iter().map(|param| param.ty.clone()).collect();
                 self.lower_call_args(name, sig.abi, args, &sig.params)?;
+                if sig.result_in_carry {
+                    // The result is the carry flag: 0 or 1.
+                    self.body.push(IrInst::CallProcedure {
+                        name: name.clone(),
+                        abi: sig.abi,
+                    });
+                    self.body.push(IrInst::MoveCarry { dst });
+                    return Ok(());
+                }
                 let capture_before_cleanup = sig.abi.stack_arguments()
                     && !sig.params.is_empty()
                     && (matches!(dst, Value::Accumulator | Value::Stack { .. })
@@ -3660,12 +3769,51 @@ impl<'a> RoutineLowerer<'a> {
             return self.push_call_args(args, &types);
         }
 
-        for (arg, param) in args.iter().zip(params) {
-            self.lower_expr_to(
-                arg,
-                &param.ty,
-                Value::Direct(crate::ir::param_symbol(routine, &param.name)),
-            )?;
+        // A call inside an argument may run a routine whose storage shares
+        // slots with this callee's parameters, so arguments up to the last
+        // one containing a call are evaluated (left to right) into
+        // temporaries before any parameter is stored.
+        let staged = args
+            .iter()
+            .rposition(contains_call)
+            .map_or(0, |last| last + 1);
+        let mut values = Vec::new();
+        for (arg, param) in args.iter().zip(params).take(staged) {
+            // Constants cannot change; they are stored with the rest.
+            if self.is_const_expr(arg)? {
+                values.push(None);
+                continue;
+            }
+            let temp = self.parent.temp();
+            self.lower_expr_to(arg, &param.ty, temp.clone())?;
+            values.push(Some(temp));
+        }
+        // Register arguments are loaded together, right before the call.
+        let mut registers = Vec::new();
+        for ((arg, param), index) in args.iter().zip(params).zip(0..) {
+            if let Some(register) = param.register {
+                let value = match values.get(index) {
+                    Some(Some(temp)) => temp.clone(),
+                    _ => self.expr_value(arg, &param.ty)?,
+                };
+                registers.push((register, value));
+                continue;
+            }
+            let slot = Value::Direct(crate::ir::param_symbol(routine, &param.name));
+            if let Some(Some(temp)) = values.get(index) {
+                self.body.push(IrInst::Move {
+                    width: width_for_type(&param.ty)?,
+                    dst: slot,
+                    src: temp.clone(),
+                });
+            } else {
+                self.lower_expr_to(arg, &param.ty, slot)?;
+            }
+        }
+        if !registers.is_empty() {
+            // A computed value must not be left in the accumulator, which
+            // a later argument may reuse.
+            self.body.push(IrInst::LoadRegisters { args: registers });
         }
         Ok(())
     }
@@ -4381,6 +4529,88 @@ impl Place {
             .checked_add(more)
             .ok_or_else(|| FrontendError::Type("offset beyond 64 KiB".to_owned()))?;
         Ok(())
+    }
+}
+
+/// Register arguments and carry results belong to plain routines, and each
+/// register carries one argument.
+fn check_register_interface(name: &str, sig: &RoutineSig) -> Result<(), FrontendError> {
+    let registers: Vec<ArgRegister> = sig
+        .params
+        .iter()
+        .filter_map(|param| param.register)
+        .collect();
+    // Exported routines may be reached through a window bank's call stub,
+    // which uses the registers and flags itself.
+    if (!registers.is_empty() || sig.result_in_carry) && !matches!(sig.abi, Abi::Internal) {
+        return Err(FrontendError::Type(format!(
+            "routine {name}: register arguments and carry results need a plain, unexported routine"
+        )));
+    }
+    let mut used = [false; 3];
+    for param in &sig.params {
+        let Some(register) = param.register else {
+            continue;
+        };
+        if param.ty.size_bytes() != register.bytes() {
+            return Err(FrontendError::Type(format!(
+                "routine {name}: parameter {} is {} bytes but its registers hold {}",
+                param.name,
+                param.ty.size_bytes(),
+                register.bytes()
+            )));
+        }
+        for i in 0..register.bytes() {
+            let slot = match register.byte(i) {
+                ArgRegister::A => 0,
+                ArgRegister::X => 1,
+                _ => 2,
+            };
+            if used[slot] {
+                return Err(FrontendError::Type(format!(
+                    "routine {name}: two parameters share a register"
+                )));
+            }
+            used[slot] = true;
+        }
+    }
+    if sig.result_in_carry
+        && !matches!(&sig.kind, RoutineDeclKind::Function { result } if result.size_bytes() == 1)
+    {
+        return Err(FrontendError::Type(format!(
+            "routine {name}: a carry result needs a one-byte function"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether evaluating `expr` calls a routine (casts and other builtins do
+/// not).
+fn contains_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { name, args } => {
+            let builtin = name == "addr"
+                || integer_cast_builtin(name).is_some()
+                || name == "cop_signature"
+                || cop_register_builtin(name).is_some();
+            !builtin || args.iter().any(contains_call)
+        }
+        Expr::Number(_) | Expr::String(_) | Expr::Name(_) => false,
+        Expr::ResultOk(value) | Expr::ResultErr(value) | Expr::Neg(value) | Expr::Deref(value) => {
+            contains_call(value)
+        }
+        Expr::Field(base, _) => contains_call(base),
+        Expr::Add(lhs, rhs)
+        | Expr::Sub(lhs, rhs)
+        | Expr::Mul(lhs, rhs)
+        | Expr::Div(lhs, rhs)
+        | Expr::Rem(lhs, rhs)
+        | Expr::BitAnd(lhs, rhs)
+        | Expr::BitOr(lhs, rhs)
+        | Expr::BitXor(lhs, rhs)
+        | Expr::ShiftLeft(lhs, rhs)
+        | Expr::ShiftRight(lhs, rhs)
+        | Expr::Index(lhs, rhs) => contains_call(lhs) || contains_call(rhs),
     }
 }
 
@@ -5118,7 +5348,7 @@ mod tests {
             crate::lower_65816::lower_module_with_storage(&module).unwrap();
         let asm = crate::ca65::emit_module(&lowered);
 
-        assert!(asm.contains("__dp_arg_0: .res 1\n"));
+        assert!(asm.contains("__dp_arg_0 = __dp_overlay+0\n"));
         assert!(asm.contains("\tsta __dp_arg_0\n"));
         assert!(asm.contains("\tjsr store\n"));
         assert!(asm.contains("\tlda __dp_arg_0\n"));

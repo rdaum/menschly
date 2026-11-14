@@ -1341,3 +1341,66 @@ fn generated_frontend_stack_routines_run() {
         (1015 + 2021, 312, 42)
     );
 }
+
+#[test]
+fn generated_frontend_register_arguments_and_carry_results_run() {
+    let binary = assemble_source_fixture(
+        "frontend-register-arguments",
+        "
+        module Registers
+        fixed($040010) volatile var out: [8]u8
+        fixed($040020) var total: u16
+        const TABLE: [4]u8 = [10, 20, 30, 40]
+
+        export far procedure main()
+            var first: u8
+            first = pick(2, 5)
+            out[0] = first
+            out[1] = pick(first - 32, pick(0, 1))
+            total = 0
+            add($1234, 2)
+            add($0101, first)
+            out[2] = u8(total)
+            out[3] = u8(total >> 8)
+            out[4] = is_even(4)
+            out[5] = is_even(7)
+            if is_even(10) and not below(9, 3)
+                out[6] = 1
+            end
+            if below(3, 9)
+                out[7] = 1
+            end
+            return
+        end
+
+        function pick(index: u8 in x, bias: u8 in a): u8
+            return TABLE[index] + bias
+        end
+
+        procedure add(amount: u16 in xy, extra: u8)
+            total = total + amount + u16(extra)
+            return
+        end
+
+        function is_even(value: u8 in a): u8 in carry
+            if value & 1
+                return 0
+            end
+            return 1
+        end
+
+        function below(value: u8 in a, limit: u8 in y): u8 in carry
+            if value < limit
+                return 1
+            end
+            return 0
+        end
+
+        ",
+    );
+
+    let (_cpu, memory) = run_generated_routine(&binary);
+
+    let got: Vec<u8> = (0..8).map(|i| memory.byte(0x040010 + i)).collect();
+    assert_eq!(got, [35, 51, 0x5a, 0x13, 1, 0, 1, 1]);
+}

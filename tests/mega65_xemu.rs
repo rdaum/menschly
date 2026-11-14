@@ -2051,3 +2051,99 @@ fn stack_routines_take_stack_arguments_with_static_locals() {
     // weigh(a, b) = a + 3b.
     assert_eq!((word(0), word(1), word(2)), (1015 + 2021, 312, 42));
 }
+
+#[test]
+fn nested_calls_in_arguments_do_not_clobber_earlier_arguments() {
+    let Some(run) = run_source(
+        "argument-staging",
+        "
+        module Staging
+        fixed($0e10) volatile var out: [2]u8
+        var count: u8
+
+        function g(b: u8): u8
+            count = count + 1
+            return b + 1
+        end
+
+        function f(a: u8, c: u8): u8
+            return a * 10 + c
+        end
+
+        export function main(): u8
+            count = 4
+            out[0] = f(1, g(2))
+            out[1] = f(count, g(count))
+            return 0
+        end
+        ",
+    ) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 0);
+    // Arguments evaluate left to right: count (5 after the first line) is
+    // read before g(count) makes it 6.
+    assert_eq!(&run.memory[0x0e10..0x0e12], &[13, 56]);
+}
+
+#[test]
+fn register_arguments_and_carry_results() {
+    let source = "
+        module Registers
+        fixed($0e10) volatile var out: [8]u8
+        var table: [4]u8 = [10, 20, 30, 40]
+        var total: u16
+
+        # A byte in each register, and a word in X (low) and Y.
+        function pick(index: u8 in x, bias: u8 in a): u8
+            return table[index] + bias
+        end
+
+        procedure add(amount: u16 in xy, extra: u8)
+            total = total + amount + u16(extra)
+            return
+        end
+
+        function is_even(value: u8 in a): u8 in carry
+            if value & 1
+                return 0
+            end
+            return 1
+        end
+
+        function below(value: u8 in a, limit: u8 in y): u8 in carry
+            if value < limit
+                return 1
+            end
+            return 0
+        end
+
+        export function main(): u8
+            out[0] = pick(2, 5)
+            out[1] = pick(u8(out[0] - 32), pick(0, 1))
+            total = 0
+            add($1234, 2)
+            add($0101, out[0])
+            out[2] = u8(total)
+            out[3] = u8(total >> 8)
+            out[4] = is_even(4)
+            out[5] = is_even(7)
+            if is_even(10) and not below(9, 3)
+                out[6] = 1
+            end
+            if below(3, 9)
+                out[7] = 1
+            end
+            return 0
+        end
+        ";
+    let Some(run) = run_source("register-arguments", source) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 0);
+    // 30+5=35; table[3]+11 = 51; $1234+2+$0101+35 = $135a.
+    assert_eq!(
+        &run.memory[0x0e10..0x0e18],
+        &[35, 51, 0x5a, 0x13, 1, 0, 1, 1]
+    );
+}

@@ -1,8 +1,8 @@
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, BinaryOp, Const, CopRegister, InterruptPreserve, IrInst, Label, Module, Routine,
-    RoutineKind, Type, Value, Width,
+    Abi, Address, ArgRegister, BinaryOp, Const, CopRegister, InterruptPreserve, IrInst, Label,
+    Module, Routine, RoutineKind, Type, Value, Width,
 };
 use crate::optimize_65816::optimize_module;
 use crate::storage::{
@@ -294,6 +294,83 @@ fn lower_inst(
     match inst {
         IrInst::Label(label) => out.push(AsmInst::Label(label.to_string())),
         IrInst::InlineAsm(line) => out.push(AsmInst::Raw(line.clone())),
+        IrInst::Move {
+            width: Width::Word,
+            dst,
+            src: Value::Register(register),
+        } if register.bytes() == 2 => {
+            // A two-register argument arrives a byte in each.
+            for i in 0..2 {
+                out.push(AsmInst::Mode(Mode::Acc8Index16));
+                load_value_to_a(
+                    out,
+                    &Value::Register(register.byte(i)),
+                    outgoing_stack_bytes,
+                )?;
+                store_a_to_value(out, &byte_of(dst, i)?, outgoing_stack_bytes)?;
+            }
+        }
+        IrInst::LoadRegisters { args } => {
+            // X and Y first (through A, zero-extended), then A.
+            let mut bytes = Vec::new();
+            for (register, value) in args {
+                for i in 0..register.bytes() {
+                    bytes.push((register.byte(i), byte_of(value, i)?));
+                }
+            }
+            for (target, transfer) in [
+                (ArgRegister::X, AsmInst::Tax),
+                (ArgRegister::Y, AsmInst::Tay),
+            ] {
+                for (_, value) in bytes.iter().filter(|(register, _)| *register == target) {
+                    if let Value::Const(value) = value {
+                        out.push(AsmInst::Mode(Mode::Acc8Index16));
+                        let operand = Operand::Immediate(Immediate::Word(value.bits() as u16));
+                        out.push(if target == ArgRegister::X {
+                            AsmInst::Ldx(operand)
+                        } else {
+                            AsmInst::Ldy(operand)
+                        });
+                        continue;
+                    }
+                    out.push(AsmInst::Mode(Mode::Acc8Index16));
+                    load_value_to_a_as_width(out, value, Width::Byte, outgoing_stack_bytes)?;
+                    out.push(AsmInst::Mode(Mode::Acc16Index16));
+                    out.push(AsmInst::And(Operand::Immediate(Immediate::Word(0x00ff))));
+                    out.push(transfer.clone());
+                }
+            }
+            for (_, value) in bytes
+                .iter()
+                .filter(|(register, _)| *register == ArgRegister::A)
+            {
+                out.push(AsmInst::Mode(Mode::Acc8Index16));
+                load_value_to_a_as_width(out, value, Width::Byte, outgoing_stack_bytes)?;
+            }
+        }
+        IrInst::MoveCarry { dst } => {
+            out.push(AsmInst::Mode(Mode::Acc8Index16));
+            out.push(AsmInst::Lda(Operand::Immediate(Immediate::Byte(0))));
+            out.push(AsmInst::Raw("rol a".to_owned()));
+            store_a_to_value(out, dst, outgoing_stack_bytes)?;
+        }
+        IrInst::ReturnValue(value) if routine.result_in_carry => {
+            // The result is the carry: set for any non-zero value.
+            match value {
+                Value::Const(value) if value.bits() != 0 => out.push(AsmInst::Sec),
+                Value::Const(_) => out.push(AsmInst::Clc),
+                _ => {
+                    out.push(AsmInst::Mode(Mode::Acc8Index16));
+                    load_value_to_a_as_width(out, value, Width::Byte, outgoing_stack_bytes)?;
+                    out.push(AsmInst::Cmp(Operand::Immediate(Immediate::Byte(1))));
+                }
+            }
+            if routine.stack_frame_bytes != 0 {
+                // Releasing a frame would change the carry.
+                return Err(LowerError::UnsupportedValue(value.clone()));
+            }
+            emit_return_sequence(routine, out);
+        }
         IrInst::Move { width, dst, src } => {
             set_mode_for_width(out, *width);
             load_value_to_a_as_width(out, src, *width, outgoing_stack_bytes)?;
@@ -1226,15 +1303,16 @@ fn load_value_to_a(
     outgoing_stack_bytes: u16,
 ) -> Result<(), LowerError> {
     match value {
-        Value::Accumulator => Ok(()),
-        Value::IndexX => {
+        Value::Accumulator | Value::Register(ArgRegister::A) => Ok(()),
+        Value::IndexX | Value::Register(ArgRegister::X) => {
             out.push(AsmInst::Txa);
             Ok(())
         }
-        Value::IndexY => {
+        Value::IndexY | Value::Register(ArgRegister::Y) => {
             out.push(AsmInst::Tya);
             Ok(())
         }
+        Value::Register(_) => Err(LowerError::UnsupportedValue(value.clone())),
         Value::Const(value) => {
             out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
             Ok(())
@@ -1271,15 +1349,16 @@ fn load_value_to_a_as_width(
 ) -> Result<(), LowerError> {
     set_mode_for_width(out, width);
     match value {
-        Value::Accumulator => Ok(()),
-        Value::IndexX => {
+        Value::Accumulator | Value::Register(ArgRegister::A) => Ok(()),
+        Value::IndexX | Value::Register(ArgRegister::X) => {
             out.push(AsmInst::Txa);
             Ok(())
         }
-        Value::IndexY => {
+        Value::IndexY | Value::Register(ArgRegister::Y) => {
             out.push(AsmInst::Tya);
             Ok(())
         }
+        Value::Register(_) => Err(LowerError::UnsupportedValue(value.clone())),
         Value::Const(value) => {
             out.push(AsmInst::Lda(Operand::Immediate(immediate(*value))));
             Ok(())
@@ -1305,6 +1384,35 @@ fn load_value_to_a_as_width(
             Ok(())
         }
     }
+}
+
+/// Byte `i` of a value in memory or a constant, as a one-byte value.
+fn byte_of(value: &Value, i: u16) -> Result<Value, LowerError> {
+    if let Value::Const(value) = value {
+        return Ok(Value::Const(Const::U8((value.bits() >> (8 * i)) as u8)));
+    }
+    if i == 0 {
+        return Ok(match value {
+            Value::Stack { offset, .. } => Value::Stack {
+                offset: *offset,
+                size: 1,
+            },
+            other => other.clone(),
+        });
+    }
+    let named = |name: &String| format!("{name}+{i}");
+    Ok(match value {
+        Value::Direct(name) => Value::Direct(named(name)),
+        Value::Temp(name) => Value::Temp(named(name)),
+        Value::Local(name) => Value::Local(named(name)),
+        Value::Param(name) => Value::Param(named(name)),
+        Value::Global(name) => Value::Global(named(name)),
+        Value::Stack { offset, .. } => Value::Stack {
+            offset: offset + i,
+            size: 1,
+        },
+        other => return Err(LowerError::UnsupportedValue(other.clone())),
+    })
 }
 
 fn store_a_to_value(

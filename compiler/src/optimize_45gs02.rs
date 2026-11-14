@@ -29,7 +29,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::lower_45gs02::{
-    ACC_SYMBOL, ARG_SYMBOL, FARP_SYMBOL, FP_SYMBOL, MATH_ROUTINES, PTR_SYMBOL, TMP_SYMBOL,
+    ACC_SYMBOL, ARG_SYMBOL, FARP_SYMBOL, FP_SYMBOL, LEAVE_ROUTINE, MATH_ROUTINES, PTR_SYMBOL,
+    TMP_SYMBOL,
 };
 use crate::target_45gs02::{Inst, Op, Operand};
 
@@ -66,7 +67,7 @@ const RUNTIME: [(&str, u32, u32); 6] = [
 /// Optimizes one routine. `z_zero_on_entry` is false for interrupt handlers,
 /// which may interrupt a `(bp),z` sequence with Z non-zero.
 pub fn optimize_routine(insts: Vec<Inst>, z_zero_on_entry: bool) -> Vec<Inst> {
-    optimize_routine_with(insts, z_zero_on_entry, &HashSet::new())
+    optimize_routine_with(insts, z_zero_on_entry, &HashSet::new(), false)
 }
 
 /// Like [`optimize_routine`]; `flag_routines` are routines known to return
@@ -76,6 +77,7 @@ pub fn optimize_routine_with(
     insts: Vec<Inst>,
     z_zero_on_entry: bool,
     flag_routines: &HashSet<String>,
+    returns_carry: bool,
 ) -> Vec<Inst> {
     if insts.iter().any(|inst| matches!(inst, Inst::Raw(_))) {
         return insts;
@@ -84,9 +86,9 @@ pub fn optimize_routine_with(
     loop {
         let before = insts.len();
         let mut changed = clean_jumps(&mut insts);
-        changed |= eliminate_dead_code(&mut insts);
-        changed |= eliminate_redundant(&mut insts, z_zero_on_entry, flag_routines);
-        changed |= carry_increments(&mut insts);
+        changed |= eliminate_dead_code(&mut insts, returns_carry);
+        changed |= eliminate_redundant(&mut insts, z_zero_on_entry, flag_routines, returns_carry);
+        changed |= carry_increments(&mut insts, returns_carry);
         if !changed && insts.len() == before {
             break;
         }
@@ -263,6 +265,10 @@ fn effect(inst: &Inst) -> Effect {
                 Operand::Label(name) if MATH_ROUTINES.contains(&name.as_str()) => {
                     A | X | Y | NZ | C | ACC | FARP | ARG
                 }
+                // The frame release keeps the carry (a carry result).
+                Operand::Label(name) if name == LEAVE_ROUTINE => {
+                    A | X | Y | NZ | ACC | PTR | FARP | ARG | TMP
+                }
                 _ => A | X | Y | NZ | C | ACC | PTR | FARP | ARG | TMP,
             };
             (A | X | Y | Z | FP | arguments, clobbers, false)
@@ -300,9 +306,17 @@ fn label_positions(insts: &[Inst]) -> HashMap<String, usize> {
 // ---- liveness ---------------------------------------------------------------
 
 /// Locations live immediately after each instruction.
-fn live_after(insts: &[Inst]) -> Vec<Locs> {
+/// `returns_carry`: the routine returns a result in the carry flag.
+fn live_after(insts: &[Inst], returns_carry: bool) -> Vec<Locs> {
     let labels = label_positions(insts);
-    let effects: Vec<Effect> = insts.iter().map(effect).collect();
+    let mut effects: Vec<Effect> = insts.iter().map(effect).collect();
+    if returns_carry {
+        for (inst, effect) in insts.iter().zip(&mut effects) {
+            if matches!(inst, Inst::Op(Op::Rts | Op::Rtn, _)) {
+                effect.uses |= C;
+            }
+        }
+    }
     let n = insts.len();
     // Falling off the end of the list is treated as leaving everything live.
     let mut live_in = vec![0 as Locs; n + 1];
@@ -332,8 +346,8 @@ fn live_after(insts: &[Inst]) -> Vec<Locs> {
     }
 }
 
-fn eliminate_dead_code(insts: &mut Vec<Inst>) -> bool {
-    let live = live_after(insts);
+fn eliminate_dead_code(insts: &mut Vec<Inst>, returns_carry: bool) -> bool {
+    let live = live_after(insts, returns_carry);
     let before = insts.len();
     let mut i = 0;
     insts.retain(|inst| {
@@ -496,8 +510,9 @@ fn eliminate_redundant(
     insts: &mut Vec<Inst>,
     z_zero_on_entry: bool,
     flag_routines: &HashSet<String>,
+    returns_carry: bool,
 ) -> bool {
-    let live = live_after(insts);
+    let live = live_after(insts, returns_carry);
     let referenced: HashSet<String> = insts
         .iter()
         .filter_map(branch_target)
@@ -715,8 +730,8 @@ static NEXT_CARRY_LABEL: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 /// and `lda m / sbc #0 / sta m` is `bcs + / dec m`, when A and the flags are
 /// not needed afterwards. Only for compiler-owned memory: an I/O register
 /// would see a different access pattern.
-fn carry_increments(insts: &mut Vec<Inst>) -> bool {
-    let live = live_after(insts);
+fn carry_increments(insts: &mut Vec<Inst>, returns_carry: bool) -> bool {
+    let live = live_after(insts, returns_carry);
     let mut i = 0;
     let mut changed = false;
     while i + 2 < insts.len() {
@@ -1066,7 +1081,7 @@ mod tests {
             Inst::implied(Op::Rts),
         ];
         let flag_routines = HashSet::from(["f".to_owned()]);
-        let out = optimize_routine_with(insts, true, &flag_routines);
+        let out = optimize_routine_with(insts, true, &flag_routines, false);
         let compares = out
             .iter()
             .filter(|inst| matches!(inst, Inst::Op(Op::Cmp, _)))

@@ -12,7 +12,15 @@ pub struct StorageAssignment {
     pub module_name: String,
     pub routines: Vec<RoutineStorage>,
     pub direct_page_bytes: u16,
+    /// Private direct-page slots placed in the module's overlay region
+    /// ([`OVERLAY_SYMBOL`]): symbol -> offset. Routines that can never be
+    /// running at the same time share addresses there.
+    pub overlay: BTreeMap<String, u16>,
+    pub overlay_bytes: u16,
 }
+
+/// The module-local direct-page region private slots are overlaid in.
+pub const OVERLAY_SYMBOL: &str = "__dp_overlay";
 
 impl StorageAssignment {
     pub fn routine(&self, name: &str) -> Option<&RoutineStorage> {
@@ -317,11 +325,155 @@ fn assign_storage_with_direct_page_budget(
         })
         .collect();
 
-    StorageAssignment {
+    let mut assignment = StorageAssignment {
         module_name: module.name.clone(),
         routines,
         direct_page_bytes: allocator.next_offset,
+        overlay: BTreeMap::new(),
+        overlay_bytes: 0,
+    };
+    overlay_private_slots(module, &mut assignment);
+    assignment
+}
+
+/// Overlays routines' private direct-page slots (parameters, `direct`
+/// locals and temporaries that no other routine's storage shares) where the
+/// routines can never be running at the same time: neither can reach the
+/// other through calls. A call this module cannot follow (to an external
+/// routine, through a pointer, by trap or from inline assembly) may come
+/// back into any routine that is exported or has its address taken, and
+/// whatever an interrupt handler can reach may run at any time, so keeps
+/// slots of its own.
+fn overlay_private_slots(module: &Module, assignment: &mut StorageAssignment) {
+    let names: Vec<&str> = module
+        .routines
+        .iter()
+        .map(|routine| routine.name.as_str())
+        .collect();
+    let index_of = |name: &str| names.iter().position(|known| *known == name);
+    let count = names.len();
+    // Direct calls, and whether a routine makes calls this module cannot follow.
+    let mut calls = vec![BTreeSet::new(); count];
+    let mut opaque = vec![false; count];
+    let mut entered_from_outside = vec![false; count];
+    for vector in &module.vectors {
+        if let Some(target) = index_of(&vector.routine) {
+            entered_from_outside[target] = true;
+        }
     }
+    for (i, routine) in module.routines.iter().enumerate() {
+        if routine.export {
+            entered_from_outside[i] = true;
+        }
+        for inst in &routine.body {
+            match inst {
+                IrInst::CallProcedure { name, .. } | IrInst::CallFunction { name, .. } => {
+                    match index_of(name) {
+                        Some(target) => {
+                            calls[i].insert(target);
+                        }
+                        None => opaque[i] = true,
+                    }
+                }
+                IrInst::CallIndirect { .. } | IrInst::Trap { .. } | IrInst::InlineAsm(_) => {
+                    opaque[i] = true;
+                }
+                IrInst::LoadAddress { symbol, .. } => {
+                    if let Some(target) = index_of(symbol) {
+                        entered_from_outside[target] = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let outside: Vec<usize> = (0..count).filter(|&i| entered_from_outside[i]).collect();
+    for i in 0..count {
+        if opaque[i] {
+            calls[i].extend(outside.iter().copied());
+        }
+    }
+    // Transitive closure.
+    let mut reach = calls.clone();
+    loop {
+        let mut changed = false;
+        for i in 0..count {
+            let next: BTreeSet<usize> = reach[i]
+                .iter()
+                .flat_map(|&j| reach[j].iter().copied())
+                .collect();
+            for j in next {
+                changed |= reach[i].insert(j);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut pinned = vec![false; count];
+    for (i, routine) in module.routines.iter().enumerate() {
+        if matches!(routine.abi, Abi::Interrupt) {
+            pinned[i] = true;
+            for &j in &reach[i] {
+                pinned[j] = true;
+            }
+        }
+    }
+    let interferes = |a: usize, b: usize| a == b || reach[a].contains(&b) || reach[b].contains(&a);
+
+    // Slots owned by exactly one routine.
+    let mut owners: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, layout) in assignment.routines.iter().enumerate() {
+        for slot in &layout.direct_slots {
+            owners.entry(slot.symbol.as_str()).or_default().push(i);
+        }
+    }
+    let layout_routine = |i: usize| index_of(&assignment.routines[i].name);
+    let mut blocks: Vec<(usize, Vec<(String, u16)>)> = Vec::new();
+    for (i, layout) in assignment.routines.iter().enumerate() {
+        let Some(routine) = layout_routine(i) else {
+            continue;
+        };
+        if pinned[routine] {
+            continue;
+        }
+        let mut slots: Vec<(String, u16)> = Vec::new();
+        for slot in &layout.direct_slots {
+            let private = owners[slot.symbol.as_str()].iter().all(|&owner| owner == i);
+            if private && !slots.iter().any(|(symbol, _)| *symbol == slot.symbol) {
+                slots.push((slot.symbol.clone(), slot.size));
+            }
+        }
+        if !slots.is_empty() {
+            blocks.push((routine, slots));
+        }
+    }
+    let block_size = |slots: &[(String, u16)]| slots.iter().map(|(_, size)| size).sum::<u16>();
+    blocks.sort_by_key(|(routine, slots)| (std::cmp::Reverse(block_size(slots)), *routine));
+    let mut placed: Vec<(usize, u16, u16)> = Vec::new();
+    let mut overlay = BTreeMap::new();
+    let mut overlay_bytes = 0u16;
+    let mut overlaid_bytes = 0u16;
+    for (routine, slots) in &blocks {
+        let size = block_size(slots);
+        let mut offset = 0u16;
+        while let Some(&(_, start, len)) = placed.iter().find(|&&(other, start, len)| {
+            interferes(*routine, other) && offset < start + len && start < offset + size
+        }) {
+            offset = start + len;
+        }
+        placed.push((*routine, offset, size));
+        let mut at = offset;
+        for (symbol, slot_size) in slots {
+            overlay.insert(symbol.clone(), at);
+            at += slot_size;
+        }
+        overlay_bytes = overlay_bytes.max(offset + size);
+        overlaid_bytes += size;
+    }
+    assignment.direct_page_bytes = assignment.direct_page_bytes - overlaid_bytes + overlay_bytes;
+    assignment.overlay = overlay;
+    assignment.overlay_bytes = overlay_bytes;
 }
 
 pub fn validate_storage_assignment(
@@ -1270,6 +1422,15 @@ fn rewrite_inst(
         IrInst::ReturnValue(value) => {
             IrInst::ReturnValue(rewrite_value(value, layout, direct_aliases))
         }
+        IrInst::LoadRegisters { args } => IrInst::LoadRegisters {
+            args: args
+                .iter()
+                .map(|(register, value)| (*register, rewrite_value(value, layout, direct_aliases)))
+                .collect(),
+        },
+        IrInst::MoveCarry { dst } => IrInst::MoveCarry {
+            dst: rewrite_value(dst, layout, direct_aliases),
+        },
         other => other.clone(),
     }
 }
@@ -1358,10 +1519,10 @@ fn param_lifetimes(routine: &Routine) -> Vec<ParamLifetime> {
     params
         .into_iter()
         .map(|(name, (first_use, last_use))| {
+            // A parameter is live from entry (the caller stored it), not
+            // from its first use.
             let crosses_call = match (first_use, last_use) {
-                (Some(first_use), Some(last_use)) => call_indices
-                    .iter()
-                    .any(|call| first_use < *call && *call < last_use),
+                (Some(_), Some(last_use)) => call_indices.iter().any(|call| *call < last_use),
                 _ => false,
             };
             ParamLifetime { name, crosses_call }
@@ -1593,6 +1754,12 @@ fn param_uses(inst: &IrInst) -> Vec<String> {
                 collect_param_value(dst, &mut out);
             }
         }
+        IrInst::LoadRegisters { args } => {
+            for (_, value) in args {
+                collect_param_value(value, &mut out);
+            }
+        }
+        IrInst::MoveCarry { dst } => collect_param_value(dst, &mut out),
         IrInst::Dec { value, .. } | IrInst::Inc { value, .. } => {
             collect_param_value(value, &mut out);
         }
@@ -1713,6 +1880,12 @@ fn temp_uses(inst: &IrInst) -> Vec<(String, u16)> {
                 collect_temp_value(dst, width.size_bytes(), &mut out);
             }
         }
+        IrInst::LoadRegisters { args } => {
+            for (register, value) in args {
+                collect_temp_value(value, register.bytes(), &mut out);
+            }
+        }
+        IrInst::MoveCarry { dst } => collect_temp_value(dst, 1, &mut out),
         IrInst::Dec { width, value } | IrInst::Inc { width, value } => {
             collect_temp_value(value, width.size_bytes(), &mut out);
         }
@@ -1824,6 +1997,12 @@ fn local_uses(inst: &IrInst) -> Vec<String> {
                 collect_local_value(dst, &mut out);
             }
         }
+        IrInst::LoadRegisters { args } => {
+            for (_, value) in args {
+                collect_local_value(value, &mut out);
+            }
+        }
+        IrInst::MoveCarry { dst } => collect_local_value(dst, &mut out),
         IrInst::Dec { value, .. } | IrInst::Inc { value, .. } => {
             collect_local_value(value, &mut out);
         }
@@ -2667,6 +2846,8 @@ mod tests {
         );
         let assignment = StorageAssignment {
             module_name: "layout".to_owned(),
+            overlay: BTreeMap::new(),
+            overlay_bytes: 0,
             routines: vec![RoutineStorage {
                 name: "broken".to_owned(),
                 direct_slots: Vec::new(),
@@ -3117,5 +3298,53 @@ mod tests {
             IrInst::LoadConst { dst: Value::Direct(symbol), value: Const::U16(0) }
                 if symbol.starts_with("__tmp_regs")
         ));
+    }
+
+    #[test]
+    fn overlays_private_slots_of_routines_that_never_run_together() {
+        let module = crate::frontend::compile_source(
+            "
+            module Overlay
+            external procedure elsewhere()
+            procedure tick()
+                return
+            end
+            # Each keeps a parameter alive across a call: a private slot.
+            procedure left(a: u16)
+                tick()
+                a = a + 1
+                return
+            end
+            procedure right(b: u16)
+                tick()
+                b = b + 1
+                return
+            end
+            procedure outer(c: u16)
+                left(c)
+                c = c + 1
+                return
+            end
+            export procedure callback(d: u16)
+                tick()
+                d = d + 1
+                return
+            end
+            procedure leaves(e: u16)
+                elsewhere()
+                e = e + 1
+                return
+            end
+            ",
+        )
+        .unwrap();
+        let assignment = assign_storage(&module);
+        let at = |name: &str| assignment.overlay.get(name).copied();
+        // left and right never run together; outer calls left.
+        assert_eq!(at("__dp_left_param_a"), at("__dp_right_param_b"));
+        assert_ne!(at("__dp_outer_param_c"), at("__dp_left_param_a"));
+        // `elsewhere` might call back into the exported routine.
+        assert_ne!(at("__dp_leaves_param_e"), at("__dp_callback_param_d"));
+        assert!(at("__dp_left_param_a").is_some());
     }
 }

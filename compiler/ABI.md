@@ -34,6 +34,54 @@ object can pass arguments. For external declarations, the caller emits matching
 This direct-page parameter convention is simple and efficient, but it is not
 reentrant, and callers must know the callee's parameter symbols.
 
+Arguments are evaluated left to right. When an argument contains a call,
+the arguments before it (other than constants) are computed into
+temporaries first and copied into the parameter symbols afterwards, since
+the inner call may use the same direct-page slots.
+
+### Register arguments and carry results
+
+A plain, unexported routine (or an `external` one) can take parameters in
+registers and return a 0/1 result in the carry flag:
+
+```text
+function pick(index: u8 in x, bias: u8 in a): u8
+procedure add(amount: u16 in xy, extra: u8)
+function is_even(value: u8 in a): u8 in carry
+```
+
+- A byte parameter can be `in a`, `in x` or `in y`; a word `in ax` (low byte
+  in A, high in X) or `in xy` (low in X, high in Y). Each register carries
+  one argument. Other parameters still use their direct-page symbols.
+- The caller loads the registers immediately before `jsr`, X and Y first,
+  A last. On the 65816 index registers are 16 bits wide; a byte argument
+  arrives zero-extended, and the callee only looks at the low byte.
+- The callee stores register arguments to its parameter storage first thing,
+  before any frame setup (which uses the registers).
+- A carry-result function returns with C set for a non-zero result
+  (`sec`, `clc`, or `cmp #1` of a computed byte). `if f()` and `if not f()`
+  call it and branch on the carry; used as a value it becomes
+  `lda #0 / rol`. The MEGA65 frame release (`__m65_leave`) keeps the carry.
+- Exported routines cannot use either: a window bank's call stub uses the
+  registers and flags on the way through.
+
+### Direct-page overlay
+
+After storage assignment, each module overlays the direct-page slots that
+belong to a single routine (parameters kept across calls, `direct` locals,
+private temporaries) in one region, `__dp_overlay`. Two routines share
+addresses there only when neither can reach the other through calls, so
+they can never be active together. The call graph is the module's own:
+
+- a call the module cannot follow (an external routine, a routine pointer,
+  a trap, inline assembly) is assumed to reach every routine that is
+  exported, used as a vector, or has its address taken;
+- routines reachable from an interrupt handler (and the handler itself)
+  keep slots of their own.
+
+The overlaid symbols are emitted as `name = __dp_overlay+offset`. On the
+MEGA65 kernel this cut base-page use from 150 to 122 bytes.
+
 `stack` and `reentrant` routines take their arguments on the stack instead.
 The caller pushes argument values in reverse parameter order before `jsr`;
 the callee reads them in place (stack-relative on the 65816, through the frame
@@ -536,7 +584,8 @@ assignment with the 65816 backend but lowers everything byte by byte:
   `__m65_arg`. These use the MEGA65 math unit (`$D768-$D77F`) with interrupts
   held off, and clobber A/X/Y and `__m65_farp`. They live in
   `mega65::MATH_RUNTIME`, which is linked only into images that call them.
-- Internal and exported routines use direct-page parameters, as on the 65816.
+- Internal and exported routines use direct-page parameters, as on the 65816
+  (with register arguments and carry results as described above).
   `far` currently means nothing: every call is `jsr`/`rts`.
 - The runtime runs with a 16-bit stack pointer. Routines with stack storage
   address their frame through `__m65_fp` with `(fp),y`:

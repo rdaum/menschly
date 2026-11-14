@@ -43,7 +43,8 @@ use std::collections::HashSet;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, BinaryOp, Const, IrInst, Label, Module, Routine, RoutineKind, Type, Value, Width,
+    Abi, Address, ArgRegister, BinaryOp, Const, IrInst, Label, Module, Routine, RoutineKind, Type,
+    Value, Width,
 };
 use crate::optimize_45gs02::optimize_routine_with;
 use crate::storage::{
@@ -156,6 +157,7 @@ fn lower_with_assignment(
         .filter(|routine| {
             matches!(&routine.kind, RoutineKind::Function { result } if result.size_bytes() <= 2)
                 && !matches!(routine.abi, Abi::Interrupt)
+                && !routine.result_in_carry
         })
         .map(|routine| routine.name.clone())
         .collect();
@@ -288,8 +290,26 @@ fn lower_routine(
             routine.stack_frame_bytes
         )));
     }
+    // Register arguments are stored before the prologue, whose frame setup
+    // uses A, X and Y.
+    let arrivals = routine
+        .body
+        .iter()
+        .take_while(|inst| {
+            matches!(
+                inst,
+                IrInst::Move {
+                    src: Value::Register(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    for inst in &routine.body[..arrivals] {
+        lowerer.lower_inst(inst)?;
+    }
     lowerer.prologue();
-    for inst in &routine.body {
+    for inst in &routine.body[arrivals..] {
         lowerer.lower_inst(inst)?;
     }
     if lowerer.pending_result.is_some() {
@@ -307,7 +327,12 @@ fn lower_routine(
     out.export = routine.export;
     // Only interrupt handlers can start with Z non-zero.
     let z_zero_on_entry = !matches!(routine.abi, Abi::Interrupt);
-    out.insts = optimize_routine_with(lowerer.out, z_zero_on_entry, flag_routines);
+    out.insts = optimize_routine_with(
+        lowerer.out,
+        z_zero_on_entry,
+        flag_routines,
+        routine.result_in_carry,
+    );
     Ok(out)
 }
 
@@ -344,6 +369,7 @@ enum ByteSource {
     Operand(Operand),
     /// Frame byte at this (already remapped) `fp` offset.
     Frame(u16),
+    A,
     X,
     Y,
 }
@@ -692,7 +718,25 @@ impl<'a> RoutineLowerer<'a> {
                     self.take_result(*width, dst)?;
                 }
             }
+            IrInst::LoadRegisters { args } => self.load_registers(args)?,
+            IrInst::MoveCarry { dst } => {
+                self.emit(Op::Lda, Operand::imm_byte(0));
+                self.implied(Op::Rol);
+                self.store_a_to_byte(dst, 0)?;
+            }
             IrInst::Return => self.emit_return(),
+            IrInst::ReturnValue(value) if self.routine.result_in_carry => {
+                // The result is the carry: set for any non-zero value.
+                match value {
+                    Value::Const(value) if value.bits() != 0 => self.implied(Op::Sec),
+                    Value::Const(_) => self.implied(Op::Clc),
+                    _ => {
+                        self.load_byte_to_a(value, 0)?;
+                        self.emit(Op::Cmp, Operand::imm_byte(1));
+                    }
+                }
+                self.emit_return();
+            }
             IrInst::ReturnValue(value) => {
                 let RoutineKind::Function { result } = &self.routine.kind else {
                     return Err(self.unsupported("returning a value from a procedure"));
@@ -728,6 +772,55 @@ impl<'a> RoutineLowerer<'a> {
         Ok(())
     }
 
+    /// Loads register arguments: X and Y first (they may go through A),
+    /// then A. An A byte that has to be read through Y (a frame value),
+    /// while Y is wanted too, waits on the stack.
+    fn load_registers(&mut self, args: &[(ArgRegister, Value)]) -> Result<(), LowerError> {
+        let mut bytes: Vec<(ArgRegister, &Value, u16)> = Vec::new();
+        for (register, value) in args {
+            for i in 0..register.bytes() {
+                bytes.push((register.byte(i), value, i));
+            }
+        }
+        let a = bytes
+            .iter()
+            .find(|(target, _, _)| *target == ArgRegister::A)
+            .copied();
+        let wants_y = bytes.iter().any(|(target, _, _)| *target == ArgRegister::Y);
+        let mut a_waits = false;
+        if let Some((_, value, i)) = a {
+            if wants_y && matches!(self.value_byte(value, i)?, ByteSource::Frame(_)) {
+                self.load_byte_to_a(value, i)?;
+                self.implied(Op::Pha);
+                a_waits = true;
+            }
+        }
+        for target in [ArgRegister::X, ArgRegister::Y] {
+            for &(_, value, i) in bytes.iter().filter(|(register, _, _)| *register == target) {
+                let (load, transfer) = if target == ArgRegister::X {
+                    (Op::Ldx, Op::Tax)
+                } else {
+                    (Op::Ldy, Op::Tay)
+                };
+                match self.value_byte(value, i)? {
+                    ByteSource::Operand(operand) => self.emit(load, operand),
+                    _ => {
+                        self.load_byte_to_a(value, i)?;
+                        self.implied(transfer);
+                    }
+                }
+            }
+        }
+        if let Some((_, value, i)) = a {
+            if a_waits {
+                self.implied(Op::Pla);
+            } else {
+                self.load_byte_to_a(value, i)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Stores a call's result, or leaves it in the result registers for a
     /// following `Move` from X (see `IrInst::CallFunction`).
     fn take_result(&mut self, width: Width, dst: &Value) -> Result<(), LowerError> {
@@ -755,6 +848,11 @@ impl<'a> RoutineLowerer<'a> {
                 ByteSource::Operand(Operand::Absolute(offset(name, i)))
             }
             Value::Stack { offset, .. } => ByteSource::Frame(self.frame_offset(offset + i)?),
+            Value::Register(register) => match register.byte(i) {
+                ArgRegister::A => ByteSource::A,
+                ArgRegister::X => ByteSource::X,
+                _ => ByteSource::Y,
+            },
             Value::IndexX if i == 0 => ByteSource::X,
             Value::IndexY if i == 0 => ByteSource::Y,
             // Index registers are 8 bits: their upper bytes read as zero.
@@ -768,8 +866,8 @@ impl<'a> RoutineLowerer<'a> {
         match self.value_byte(value, i)? {
             ByteSource::Operand(operand) => self.emit(op, operand),
             ByteSource::Frame(fp_offset) => self.frame_op(op, fp_offset),
-            ByteSource::X | ByteSource::Y => {
-                return Err(self.unsupported("an index register as an arithmetic operand"))
+            ByteSource::A | ByteSource::X | ByteSource::Y => {
+                return Err(self.unsupported("a register as an arithmetic operand"))
             }
         }
         Ok(())
@@ -782,6 +880,7 @@ impl<'a> RoutineLowerer<'a> {
 
     fn load_byte_to_a(&mut self, value: &Value, i: u16) -> Result<(), LowerError> {
         match self.value_byte(value, i)? {
+            ByteSource::A => {}
             ByteSource::X => self.implied(Op::Txa),
             ByteSource::Y => self.implied(Op::Tya),
             _ => self.value_op(Op::Lda, value, i)?,

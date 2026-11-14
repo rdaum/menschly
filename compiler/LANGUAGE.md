@@ -124,6 +124,21 @@ Locals start undefined, except in `reentrant` routines, where they start at
 zero. An interrupt handler may only call `reentrant` routines (or ones
 without parameters).
 
+Plain routines that are not exported, and `external` declarations, can take
+small arguments in registers and return a flag in the carry:
+
+```text
+function pick(index: u8 in x, bias: u8 in a): u8   # a byte in a, x or y
+procedure add(amount: u16 in xy, extra: u8)         # a word in ax or xy
+function is_even(value: u8 in a): u8 in carry       # returns 0 or 1
+
+if is_even(n) ...                                   # branches on the carry
+flag = is_even(n)                                   # 0 or 1
+```
+
+A carry result is a one-byte function returning 0 or 1 (any non-zero value
+counts as 1). Arguments are evaluated left to right.
+
 ## Routine pointers
 
 ```text

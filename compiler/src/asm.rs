@@ -164,10 +164,28 @@ impl<I> AsmModule<I> {
                     .or_insert((slot.size, export));
             }
         }
-        self.direct_symbols = direct
-            .into_iter()
-            .map(|(name, (size, export))| DirectSymbol { name, size, export })
-            .collect();
+        let mut symbols = Vec::new();
+        if assignment.overlay_bytes != 0 {
+            symbols.push(DirectSymbol {
+                name: crate::storage::OVERLAY_SYMBOL.to_owned(),
+                size: assignment.overlay_bytes,
+                export: false,
+                alias: None,
+            });
+        }
+        symbols.extend(direct.into_iter().map(|(name, (size, export))| {
+            let alias = assignment
+                .overlay
+                .get(&name)
+                .map(|offset| (crate::storage::OVERLAY_SYMBOL.to_owned(), *offset));
+            DirectSymbol {
+                name,
+                size,
+                export,
+                alias,
+            }
+        }));
+        self.direct_symbols = symbols;
 
         let mut statics = BTreeMap::<String, u16>::new();
         for local in assignment
@@ -195,6 +213,8 @@ pub struct DirectSymbol {
     pub name: String,
     pub size: u16,
     pub export: bool,
+    /// Defined as `base + offset` rather than reserved (an overlay slot).
+    pub alias: Option<(String, u16)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

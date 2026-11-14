@@ -76,8 +76,15 @@ pub fn emit<I: Ca65Inst>(module: &crate::asm::AsmModule<I>) -> String {
                 out.push('\n');
             }
             out.push_str(&symbol.name);
-            out.push_str(": .res ");
-            out.push_str(&symbol.size.to_string());
+            match &symbol.alias {
+                Some((base, offset)) => {
+                    out.push_str(&format!(" = {base}+{offset}"));
+                }
+                None => {
+                    out.push_str(": .res ");
+                    out.push_str(&symbol.size.to_string());
+                }
+            }
             out.push('\n');
         }
         out.push('\n');
@@ -459,7 +466,9 @@ mod tests {
         let asm = emit_module(&module);
 
         assert!(asm.contains(".segment \"ZEROPAGE\"\n"));
-        assert!(asm.contains("__dp_direct_local_store_local_tmp: .res 1\n"));
+        // A slot only one routine uses lives in the module's overlay region.
+        assert!(asm.contains("__dp_overlay: .res 1\n"));
+        assert!(asm.contains("__dp_direct_local_store_local_tmp = __dp_overlay+0\n"));
         assert!(asm.contains("\tsta __dp_direct_local_store_local_tmp\n"));
     }
 
