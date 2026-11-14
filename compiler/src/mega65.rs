@@ -15,6 +15,8 @@
 //! $0200-$1fff   free low RAM (screen, buffers, test output)
 //! $2000-...     kernel image: code, data, then BSS
 //! ...-$c7ff     program area for loaded o65 programs (see `build_program`)
+//!               ($7fff when the kernel has window banks, below)
+//! $8000-$bfff   window: the mapped window bank's code (windowed kernels)
 //! $c800-$cfff   16-bit stack, growing down from $cfff
 //! $d000-$dfff   I/O
 //! $e000-$feff   stage-1 loader (ROM window), copied to RAM by stage 2
@@ -24,8 +26,19 @@
 //!
 //! Stage 1 (in the ROM window) maps BASIC out and copies `$2000-$cfff` from
 //! the ROM file. Stage 2 (in RAM) maps the KERNAL ROM out, copies the
-//! `$e000` window into the RAM underneath, clears base page and BSS, and
-//! calls `main`.
+//! `$e000` window into the RAM underneath, resets the `MAP` state, clears
+//! base page and BSS, and calls `main`.
+//!
+//! # Window banks
+//!
+//! Kernel modules can be placed in one of [`WINDOW_BANKS`] window banks (see
+//! [`KernelModule`]). Their code runs at `$8000-$bfff` straight out of the
+//! ROM image, at linear `$30000 + (bank - 1) * $4000`, while `MAP` points the
+//! window there; their data and strings stay in the resident image. Calls
+//! into a bank go through resident stubs and [`WINDOW_RUNTIME`], so any
+//! module can call any other (see `lower_45gs02::place_in_window`).
+
+pub use crate::lower_45gs02::WINDOW_BANKS;
 
 use std::fs;
 use std::io::Read;
@@ -296,6 +309,130 @@ __m65_divide:
 	rts
 "#;
 
+/// Window-bank calls (see the module docs and `lower_45gs02::place_in_window`),
+/// linked into kernels that have window banks. A stub for routine `foo`
+/// in bank `n` is `jsr __m65_farcall / .byte n / .addr __window_foo`.
+pub const WINDOW_RUNTIME: &str = r#".setcpu "45GS02"
+.importzp __m65_ptr
+.export __m65_farcall, __m65_map_window, __m65_window
+
+; Nesting depth of calls into window banks.
+WINDOW_DEPTH = 32
+
+.segment "BSS"
+__m65_window: .res 1                    ; window bank now mapped (0 = none)
+__m65_window_depth: .res 1
+; One entry per call in progress: the caller's flags, return address and
+; window bank.
+__m65_window_p: .res WINDOW_DEPTH
+__m65_window_ret_lo: .res WINDOW_DEPTH
+__m65_window_ret_hi: .res WINDOW_DEPTH
+__m65_window_prev: .res WINDOW_DEPTH
+; The callee's results, while the caller's bank is mapped back.
+__m65_window_a: .res 1
+__m65_window_x: .res 1
+__m65_window_y: .res 1
+
+.segment "CODE"
+; MAP values for the upper half: bank n runs at $8000-$bfff from linear
+; $30000 + (n - 1) * $4000 (offset = linear - $8000; blocks 4 and 5).
+__m65_window_map_y: .byte $00, $80, $c0, $00, $40
+__m65_window_map_z: .byte $00, $32, $32, $33, $33
+
+; Maps window bank A (0 = none) into $8000-$bfff. Clobbers A/X/Y; Z = 0.
+__m65_map_window:
+	tax
+	ldy __m65_window_map_y,x
+	ldz __m65_window_map_z,x
+	lda #$00            ; lower half: nothing mapped
+	ldx #$00
+	map
+	eom
+	ldz #$00
+	rts
+
+; Called by a stub, with the stub's return address (pointing just before
+; its bank and target) on top of the caller's, and the caller's arguments
+; below. Moves the caller's return address to the window stack, so the
+; target sees exactly the stack a direct call would give it, and arranges
+; for the target to return to @back, which maps the caller's bank again.
+; The window stack is only touched with interrupts off, so handlers can make
+; window calls too.
+__m65_farcall:
+	php
+	sei
+	ldx __m65_window_depth
+	pla
+	sta __m65_window_p,x
+	pla
+	sta __m65_ptr
+	pla
+	sta __m65_ptr+1
+	pla
+	sta __m65_window_ret_lo,x
+	pla
+	sta __m65_window_ret_hi,x
+	lda __m65_window
+	sta __m65_window_prev,x
+	inx
+	cpx #WINDOW_DEPTH
+	bcs @overflow
+	stx __m65_window_depth
+	lda #>(@back - 1)   ; the target returns to @back
+	pha
+	lda #<(@back - 1)
+	pha
+	ldy #$03            ; RTS into the target: push target - 1
+	lda (__m65_ptr),y
+	tax
+	dey
+	lda (__m65_ptr),y
+	bne @low
+	dex
+@low:
+	sec
+	sbc #$01
+	phx
+	pha
+	dey
+	lda (__m65_ptr),y
+	sta __m65_window
+	jsr __m65_map_window
+	ldx __m65_window_depth
+	lda __m65_window_p-1,x
+	pha
+	plp                 ; the caller's interrupt state
+	rts
+@back:
+	sei
+	sta __m65_window_a
+	stx __m65_window_x
+	sty __m65_window_y
+	ldx __m65_window_depth
+	dex
+	stx __m65_window_depth
+	lda __m65_window_prev,x
+	sta __m65_window
+	jsr __m65_map_window
+	ldx __m65_window_depth
+	lda __m65_window_ret_hi,x
+	pha
+	lda __m65_window_ret_lo,x
+	pha
+	lda __m65_window_p,x
+	pha
+	lda __m65_window_a
+	ldx __m65_window_x
+	ldy __m65_window_y
+	plp
+	rts
+@overflow:              ; window calls nested too deeply: stop, red border
+	lda #$02
+	sta $d020
+@halt:
+	bra @halt
+"#;
+
 /// Startup code: the two-stage loader, base-page and BSS clearing,
 /// `jsr main`, then exit through Xemu's testing register with `main`'s `A`
 /// as the status.
@@ -304,6 +441,9 @@ pub const CRT0: &str = r#".setcpu "45GS02"
 .import __m65_enter, __m65_leave
 .import main
 .import __BSS_RUN__, __BSS_SIZE__, __ZEROPAGE_RUN__, __ZEROPAGE_SIZE__
+; Programs load between the end of the kernel's BSS and this address (set by
+; the linker configuration: below the window, or below the stack).
+.import __m65_program_end
 .export machine_program_start, machine_program_end, machine_base_page_start
 .export machine_call
 
@@ -311,9 +451,6 @@ __m65_stack_top = $cfff
 __m65_image_start = $2000
 __m65_image_end = $d000
 __m65_rom_linear = $020000
-; Programs load between the end of the kernel's BSS and this address; the
-; 2 KiB above it are the stack.
-__m65_program_end = $c800
 
 ; Copy `count` bytes from linear `source` to bank-0 `dest`. Neither range
 ; may cross a 64 KiB boundary (only the low word of the source advances).
@@ -377,6 +514,15 @@ __m65_reset:
 
 .segment "KERNEL_START"
 __m65_stage2:
+	lda #$00            ; MAP: megabyte 0 for both halves, then nothing mapped
+	ldx #$0f
+	ldy #$00
+	ldz #$0f
+	map
+	ldx #$00
+	ldz #$00
+	map
+	eom
 	lda #$35            ; all RAM except I/O
 	sta $01
 	copy_linear __m65_rom_linear + $e000, $e000, $2000
@@ -451,16 +597,38 @@ machine_call:
 "#;
 
 /// ld65 configuration for a 128 KiB MEGA65 ROM image (see the module docs).
-pub const LINKER_CONFIG: &str = r#"MEMORY {
+/// The kernel's ld65 configuration. A windowed kernel's resident image must
+/// end below the window at `$8000`; otherwise it may run up to the I/O area.
+/// The four window banks fill the second half of the ROM file.
+pub fn linker_config(windowed: bool) -> String {
+    let (image_size, gap, program_end) = if windowed {
+        (
+            "$6000",
+            "  GAP:   start = $8000,  size = $5000, file = %O, fill = yes;\n",
+            "$8000",
+        )
+    } else {
+        ("$b000", "", "$c800")
+    };
+    LINKER_CONFIG_TEMPLATE
+        .replace("{image_size}", image_size)
+        .replace("{gap}", gap)
+        .replace("{program_end}", program_end)
+}
+
+const LINKER_CONFIG_TEMPLATE: &str = r#"MEMORY {
   ZP:    start = $0002,  size = $00fe, type = rw;
   LOW:   start = $0000,  size = $2000, file = %O, fill = yes;
-  IMAGE: start = $2000,  size = $b000, file = %O, fill = yes;
-  IO:    start = $d000,  size = $1000, file = %O, fill = yes;
+  IMAGE: start = $2000,  size = {image_size}, file = %O, fill = yes;
+{gap}  IO:    start = $d000,  size = $1000, file = %O, fill = yes;
   ROM:   start = $e000,  size = $1f00, file = %O, fill = yes;
   TRAP:  start = $ff00,  size = $0020, file = %O, fill = yes;
   TAIL:  start = $ff20,  size = $00da, file = %O, fill = yes;
   VEC:   start = $fffa,  size = $0006, file = %O, fill = yes;
-  HIGH:  start = $10000, size = $10000, file = %O, fill = yes;
+  WIN1:  start = $8000,  size = $4000, file = %O, fill = yes;
+  WIN2:  start = $8000,  size = $4000, file = %O, fill = yes;
+  WIN3:  start = $8000,  size = $4000, file = %O, fill = yes;
+  WIN4:  start = $8000,  size = $4000, file = %O, fill = yes;
 }
 SEGMENTS {
   ZEROPAGE:     load = ZP,    type = zp, define = yes;
@@ -491,6 +659,13 @@ SEGMENTS {
   VECTOR_NMI:   load = VEC, type = ro, optional = yes, offset = $0000;
   VECTOR_RESET: load = VEC, type = ro, offset = $0002;
   VECTOR_IRQ:   load = VEC, type = ro, optional = yes, offset = $0004;
+  WINDOW1:      load = WIN1, type = ro, optional = yes;
+  WINDOW2:      load = WIN2, type = ro, optional = yes;
+  WINDOW3:      load = WIN3, type = ro, optional = yes;
+  WINDOW4:      load = WIN4, type = ro, optional = yes;
+}
+SYMBOLS {
+  __m65_program_end: type = export, value = {program_end};
 }
 "#;
 
@@ -511,6 +686,21 @@ pub fn compile_modules(sources: &[(String, String)]) -> Result<Vec<(String, Stri
     compile_modules_with_budget(sources, BASE_PAGE_BUDGET)
 }
 
+/// A kernel module to compile, and the window bank its code goes in
+/// (`None` keeps it in the resident image).
+#[derive(Debug, Clone)]
+pub struct KernelModule {
+    pub name: String,
+    pub source: String,
+    pub window: Option<u8>,
+}
+
+/// Compiles kernel modules, placing each in its window bank. Returns
+/// `(module file stem, assembly)` pairs ready for [`build_rom`].
+pub fn compile_kernel_modules(modules: &[KernelModule]) -> Result<Vec<(String, String)>, String> {
+    compile_with_budget(modules, BASE_PAGE_BUDGET)
+}
+
 /// Compiles the Mensch modules of a loadable program (see [`build_program`]).
 pub fn compile_program_modules(
     sources: &[(String, String)],
@@ -522,21 +712,39 @@ fn compile_modules_with_budget(
     sources: &[(String, String)],
     budget: u16,
 ) -> Result<Vec<(String, String)>, String> {
+    let modules: Vec<KernelModule> = sources
+        .iter()
+        .map(|(name, source)| KernelModule {
+            name: name.clone(),
+            source: source.clone(),
+            window: None,
+        })
+        .collect();
+    compile_with_budget(&modules, budget)
+}
+
+fn compile_with_budget(
+    modules: &[KernelModule],
+    budget: u16,
+) -> Result<Vec<(String, String)>, String> {
     let mut assignments = Vec::new();
     let mut out = Vec::new();
-    for (name, source) in sources {
+    for module in modules {
+        let name = &module.name;
         let used: u16 = assignments
             .iter()
             .map(|assignment: &crate::storage::StorageAssignment| assignment.direct_page_bytes)
             .sum();
-        let compiled = crate::driver::compile_source(
-            source,
-            crate::driver::Target::Mega65,
-            budget.saturating_sub(used),
-        )
-        .map_err(|error| format!("{name}: {error}"))?;
-        assignments.push(compiled.assignment);
-        out.push((name.clone(), compiled.asm));
+        let ir = crate::frontend::compile_source(&module.source)
+            .map_err(|error| format!("{name}: {error}"))?;
+        let (mut lowered, assignment) =
+            crate::lower_45gs02::lower_module_with_storage_budget(&ir, budget.saturating_sub(used))
+                .map_err(|error| format!("{name}: {error}"))?;
+        if let Some(bank) = module.window {
+            crate::lower_45gs02::place_in_window(&mut lowered, bank)?;
+        }
+        assignments.push(assignment);
+        out.push((name.clone(), crate::ca65::emit(&lowered)));
     }
     crate::storage::validate_direct_page_budget(&assignments, budget)
         .map_err(|error| error.to_string())?;
@@ -547,8 +755,14 @@ fn compile_modules_with_budget(
 ///
 /// `modules` are `(name, ca65 source)` pairs. Intermediate files go in `dir`.
 pub fn build_rom(dir: &Path, modules: &[(&str, &str)]) -> Result<Vec<u8>, String> {
-    let runtime = [("runtime", RUNTIME), ("crt0", CRT0)];
-    let image = link(dir, "kernel", LINKER_CONFIG, &runtime, modules)?;
+    let windowed = modules
+        .iter()
+        .any(|(_, asm)| asm.contains(crate::lower_45gs02::FARCALL_ROUTINE));
+    let mut runtime = vec![("runtime", RUNTIME), ("crt0", CRT0)];
+    if windowed {
+        runtime.push(("window", WINDOW_RUNTIME));
+    }
+    let image = link(dir, "kernel", &linker_config(windowed), &runtime, modules)?;
     if image.len() != ROM_SIZE {
         return Err(format!(
             "linked ROM is {} bytes, expected {ROM_SIZE}",

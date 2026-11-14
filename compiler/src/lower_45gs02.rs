@@ -151,6 +151,107 @@ fn lower_with_assignment(
     Ok((out, assignment))
 }
 
+/// Window banks a kernel image can hold (see `mega65::WINDOW_RUNTIME`).
+pub const WINDOW_BANKS: u8 = 4;
+/// Runtime routine behind every window stub.
+pub const FARCALL_ROUTINE: &str = "__m65_farcall";
+
+/// The window-bank body of a routine whose resident stub keeps its name.
+pub fn window_body_name(routine: &str) -> String {
+    format!("__window_{routine}")
+}
+
+/// Moves a lowered module's code into window bank `bank`: the code runs at
+/// `$8000-$BFFF` while that bank is mapped there. Everything else stays
+/// resident: its data, its strings, and a 6-byte stub for each routine that
+/// can be reached from outside the module (exported, address taken, or a
+/// trap vector), which maps the bank for the call. Calls inside the module
+/// go straight to the bodies, and pointers to its routines point at stubs.
+pub fn place_in_window(module: &mut AsmModule, bank: u8) -> Result<(), String> {
+    if !(1..=WINDOW_BANKS).contains(&bank) {
+        return Err(format!(
+            "module {}: window bank {bank} is not in 1-{WINDOW_BANKS}",
+            module.name
+        ));
+    }
+    let names: Vec<String> = module
+        .routines
+        .iter()
+        .map(|routine| routine.name.clone())
+        .collect();
+    let mut reached: Vec<String> = module
+        .routines
+        .iter()
+        .filter(|routine| routine.export)
+        .map(|routine| routine.name.clone())
+        .collect();
+    let mut reach = |name: &str| {
+        if names.iter().any(|known| known == name) && !reached.iter().any(|seen| seen == name) {
+            reached.push(name.to_owned());
+        }
+    };
+    for routine in &module.routines {
+        for inst in &routine.insts {
+            if let Inst::Op(_, Operand::Immediate(text)) = inst {
+                if let Some(symbol) = text.strip_prefix(['<', '>', '^']) {
+                    reach(symbol);
+                }
+            }
+        }
+    }
+    for vector in &module.vectors {
+        if !names.contains(&vector.routine) {
+            continue;
+        }
+        if !vector.name.starts_with("trap_") {
+            return Err(format!(
+                "module {}: interrupt vector {} needs resident code; {} cannot live in a window bank",
+                module.name, vector.name, vector.routine
+            ));
+        }
+        reach(&vector.routine);
+    }
+
+    let mut stubs = Vec::new();
+    for routine in &mut module.routines {
+        for inst in &mut routine.insts {
+            if let Inst::Op(Op::Jsr, Operand::Label(target)) = inst {
+                if reached.contains(target) {
+                    *target = window_body_name(target);
+                }
+            }
+        }
+        if reached.contains(&routine.name) {
+            let body = window_body_name(&routine.name);
+            let mut stub = AsmRoutine::new(routine.name.clone());
+            stub.export = routine.export;
+            stub.segment = Some("CODE".to_owned());
+            stub.insts = vec![Inst::Raw(format!(
+                "jsr {FARCALL_ROUTINE}\n\t.byte {bank}\n\t.addr {body}"
+            ))];
+            stubs.push(stub);
+            routine.name = body;
+            routine.export = false;
+        }
+    }
+    if !stubs.is_empty() {
+        module.external_routines.push(FARCALL_ROUTINE.to_owned());
+    }
+    module.routines.extend(stubs);
+    module
+        .metadata
+        .retain(|entry| entry.key != "code_segment" && entry.key != "data_segment");
+    module.metadata.push(crate::asm::ModuleMetadata {
+        key: "code_segment".to_owned(),
+        value: format!("WINDOW{bank}"),
+    });
+    module.metadata.push(crate::asm::ModuleMetadata {
+        key: "data_segment".to_owned(),
+        value: "RODATA".to_owned(),
+    });
+    Ok(())
+}
+
 fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {
     let mut lowerer = RoutineLowerer::new(routine);
     if lowerer.frame.is_some_and(|frame| frame > 0xff) {

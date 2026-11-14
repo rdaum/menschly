@@ -48,6 +48,7 @@ fn optimize_routine(routine: &AsmRoutine, direct_symbols: &BTreeSet<String>) -> 
     AsmRoutine {
         name: routine.name.clone(),
         export: routine.export,
+        segment: routine.segment.clone(),
         insts,
     }
 }

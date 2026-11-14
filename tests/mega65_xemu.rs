@@ -653,17 +653,19 @@ fn interrupts_preserve_runtime_registers_and_scratch() {
     );
 }
 
-const HELLORD_MEGA65_MODULES: [&str; 10] = [
-    "hellord-os",
-    "hellord-dos",
-    "hellord-fat",
-    "hellord-exec",
-    "hellord-console",
-    "hellord-files",
-    "mega65-machine",
-    "hellord-bios",
-    "hellord-gemdos",
-    "hellord-traps-mega65",
+/// Hellord's MEGA65 kernel modules and their window banks (as in
+/// `scripts/boot-hellord-mega65.sh`).
+const HELLORD_MEGA65_MODULES: [(&str, Option<u8>); 10] = [
+    ("hellord-os", None),
+    ("hellord-dos", Some(1)),
+    ("hellord-fat", Some(2)),
+    ("hellord-exec", Some(2)),
+    ("hellord-console", None),
+    ("hellord-files", None),
+    ("mega65-machine", None),
+    ("hellord-bios", None),
+    ("hellord-gemdos", None),
+    ("hellord-traps-mega65", None),
 ];
 
 fn hellord_rom(name: &str) -> (PathBuf, Vec<u8>) {
@@ -671,13 +673,15 @@ fn hellord_rom(name: &str) -> (PathBuf, Vec<u8>) {
     let sources = HELLORD_MEGA65_MODULES
         .iter()
         .enumerate()
-        .map(|(index, module)| {
-            let source = std::fs::read_to_string(examples.join(format!("{module}.mensch")))
-                .expect("Hellord source should be readable");
-            (format!("{index}-{module}"), source)
+        .map(|(index, (module, window))| mega65::KernelModule {
+            name: format!("{index}-{module}"),
+            source: std::fs::read_to_string(examples.join(format!("{module}.mensch")))
+                .expect("Hellord source should be readable"),
+            window: *window,
         })
         .collect::<Vec<_>>();
-    let modules = mega65::compile_modules(&sources).expect("Hellord should compile for the MEGA65");
+    let modules =
+        mega65::compile_kernel_modules(&sources).expect("Hellord should compile for the MEGA65");
     let refs = modules
         .iter()
         .map(|(name, asm)| (name.as_str(), asm.as_str()))
@@ -850,16 +854,23 @@ fn hellord_blkinfo_reads_the_sd_card_partition() {
 
 fn hellord_library_rom(name: &str, caller: &str) -> (PathBuf, Vec<u8>) {
     let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let mut sources = vec![("0-caller".to_owned(), caller.to_owned())];
-    for (index, module) in HELLORD_MEGA65_MODULES.iter().enumerate() {
+    let mut sources = vec![mega65::KernelModule {
+        name: "0-caller".to_owned(),
+        source: caller.to_owned(),
+        window: None,
+    }];
+    for (index, (module, window)) in HELLORD_MEGA65_MODULES.iter().enumerate() {
         if *module == "hellord-os" {
             continue;
         }
-        let source = std::fs::read_to_string(examples.join(format!("{module}.mensch")))
-            .expect("Hellord source should be readable");
-        sources.push((format!("{}-{module}", index + 1), source));
+        sources.push(mega65::KernelModule {
+            name: format!("{}-{module}", index + 1),
+            source: std::fs::read_to_string(examples.join(format!("{module}.mensch")))
+                .expect("Hellord source should be readable"),
+            window: *window,
+        });
     }
-    let modules = mega65::compile_modules(&sources).expect("program should compile");
+    let modules = mega65::compile_kernel_modules(&sources).expect("program should compile");
     let refs = modules
         .iter()
         .map(|(name, asm)| (name.as_str(), asm.as_str()))
@@ -1433,4 +1444,215 @@ fn interrupts_can_multiply_and_divide_while_main_code_does() {
         u32::from_le_bytes(run.memory[0x0902..0x0906].try_into().unwrap()),
         expected
     );
+}
+
+const WINDOW_MAIN: &str = "
+module WindowMain
+vector irq = tick
+fixed($dc04) volatile var cia1_ta_lo: u8
+fixed($dc05) volatile var cia1_ta_hi: u8
+fixed($dc0d) volatile var cia1_icr: u8
+fixed($dc0e) volatile var cia1_cra: u8
+fixed($d01a) volatile var vic_irq_mask: u8
+fixed($0b00) volatile var out: [12]u16
+
+type Op = reentrant function(x: u16): u16
+
+external reentrant function far_sum(a: u16, b: u16): u16
+external function far_count(): u8
+external procedure far_store(value: u16)
+external function far_stored(): u16
+external reentrant function far_fib(n: u16): u16
+external reentrant function far_strlen_hello(): u16
+external reentrant function far_apply(f: Op, x: u16): u16
+external function far_handler(): Op
+external procedure two_tick()
+external function two_ticks(): u16
+
+reentrant function triple(x: u16): u16
+    return x * 3
+end
+
+export function main(): u8
+    var c: u8
+    var op: Op
+    var i: u16
+    var sum: u16
+    out[0] = far_sum(3, 4)
+    c = far_count()
+    c = far_count()
+    out[1] = u16(c)
+    far_store($1234)
+    out[2] = far_stored()
+    out[3] = far_fib(9)
+    out[4] = far_strlen_hello()
+    op = triple
+    out[5] = far_apply(op, 5)
+    op = far_handler()
+    out[6] = op(21)
+    out[7] = far_apply(far_handler(), 7)
+
+    vic_irq_mask = 0
+    cia1_icr = $7f
+    cia1_ta_lo = $f4
+    cia1_ta_hi = $01
+    cia1_icr = $81
+    cia1_cra = $11
+    asm \"cli\"
+    i = 0
+    sum = 0
+    while i != 3000
+        sum = far_sum(sum, i)
+        i = i + 1
+    end
+    asm \"sei\"
+    out[8] = sum
+    out[9] = two_ticks()
+    return 0
+end
+
+interrupt procedure tick()
+    var ack: u8
+    ack = cia1_icr
+    two_tick()
+    return
+end
+";
+
+const WINDOW_ONE: &str = "
+module WindowOne
+var count: u8
+var stored: u16
+
+external reentrant function two_fib(n: u16): u16
+external reentrant function two_strlen(text: near ^u8): u16
+
+function one(): u16
+    return 1
+end
+
+export reentrant function far_sum(a: u16, b: u16): u16
+    return a + b + one()
+end
+
+export function far_count(): u8
+    count = count + 1
+    return count
+end
+
+export procedure far_store(value: u16)
+    stored = value
+    return
+end
+
+export function far_stored(): u16
+    return stored
+end
+
+export reentrant function far_fib(n: u16): u16
+    if n < 2
+        return n
+    end
+    return two_fib(n - 1) + two_fib(n - 2)
+end
+
+export reentrant function far_strlen_hello(): u16
+    return two_strlen(\"hello\")
+end
+";
+
+const WINDOW_TWO: &str = "
+module WindowTwo
+type Op = reentrant function(x: u16): u16
+var ticks: u16
+
+external reentrant function far_fib(n: u16): u16
+
+export reentrant function two_fib(n: u16): u16
+    return far_fib(n)
+end
+
+export reentrant function two_strlen(text: near ^u8): u16
+    var length: u16
+    length = 0
+    while text^ != 0
+        length = length + 1
+        text = text + 1
+    end
+    return length
+end
+
+export reentrant function far_apply(f: Op, x: u16): u16
+    return f(x) + 1
+end
+
+reentrant function double(x: u16): u16
+    return x + x
+end
+
+export function far_handler(): Op
+    return double
+end
+
+export procedure two_tick()
+    ticks = ticks + 1
+    return
+end
+
+export function two_ticks(): u16
+    return ticks
+end
+";
+
+#[test]
+fn window_banks_call_each_other_and_the_resident_kernel() {
+    let module = |name: &str, source: &str, window| mega65::KernelModule {
+        name: name.to_owned(),
+        source: source.to_owned(),
+        window,
+    };
+    let modules = mega65::compile_kernel_modules(&[
+        module("main", WINDOW_MAIN, None),
+        module("one", WINDOW_ONE, Some(1)),
+        module("two", WINDOW_TWO, Some(2)),
+    ])
+    .expect("windowed modules should compile");
+    let refs: Vec<(&str, &str)> = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect();
+    let dir = temp_dir("window-banks");
+    let rom = mega65::build_rom(&dir, &refs).expect("windowed ROM should link");
+    let Some(xemu) = mega65::find_xemu() else {
+        eprintln!("skipping window banks: Xemu not found");
+        return;
+    };
+    let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).expect("Xemu run");
+    assert_eq!(run.exit_code, 0);
+    let word =
+        |i: usize| u16::from_le_bytes([run.memory[0x0b00 + 2 * i], run.memory[0x0b01 + 2 * i]]);
+    let expected_sum = (0u16..3000).fold(0u16, |sum, i| sum.wrapping_add(i).wrapping_add(1));
+    assert_eq!(
+        (0..9).map(word).collect::<Vec<_>>(),
+        vec![8, 2, 0x1234, 34, 5, 16, 42, 15, expected_sum]
+    );
+    assert!(word(9) > 5, "expected timer interrupts, got {}", word(9));
+}
+
+#[test]
+fn window_banks_reject_interrupt_handlers() {
+    let error = mega65::compile_kernel_modules(&[mega65::KernelModule {
+        name: "irq".to_owned(),
+        source: "
+            module Irq
+            vector irq = tick
+            interrupt procedure tick()
+                return
+            end
+            "
+        .to_owned(),
+        window: Some(1),
+    }])
+    .expect_err("an interrupt vector cannot point into a window bank");
+    assert!(error.contains("needs resident code"), "{error}");
 }

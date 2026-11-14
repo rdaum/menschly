@@ -556,13 +556,51 @@ the kernel to the same addresses in bank 0 and maps the ROMs out:
 ```text
 $0002-$00ff   base page: the kernel's, then the running program's
 $0200-$1fff   free (the console screen is at $0400)
-$2000-...     kernel code, data and BSS
-...-$c7ff     program area (from the end of the kernel's BSS)
+$2000-...     resident kernel code, data and BSS
+...-$7fff     program area (from the end of the kernel's BSS; up to $c7ff
+              in a kernel without window banks)
+$8000-$bfff   window: the mapped window bank's code
 $c800-$cfff   16-bit stack, growing down from $cfff
 $d000-$dfff   I/O
 $ff00-$ff1f   trap vector table
 $fffa-$ffff   NMI / RESET / IRQ vectors
 ```
+
+### Window banks
+
+A kernel module can be built into one of four *window banks*
+(`mega65::KernelModule::window`, or `mensch-run-mega65 --window N:PATH`).
+Hellord puts its DOS in bank 1 and the FAT driver and program loader in bank 2.
+
+- A bank's code is linked to run at `$8000-$bfff` and stays in the ROM image
+  at linear `$30000 + (N - 1) * $4000`; `MAP` points the upper half's blocks
+  4-5 there. Nothing is copied at boot.
+- Only code moves. The module's globals, string literals and metadata stay
+  in the resident image, so pointers keep meaning the same thing whichever
+  bank is mapped. Buffers passed between banks must not live in the window.
+- Each routine that can be reached from outside the module (exported, address
+  taken, or a trap vector) becomes a resident 6-byte stub with the routine's
+  name, and its body is renamed `__window_<name>`:
+
+  ```text
+  foo:  jsr __m65_farcall
+        .byte N
+        .addr __window_foo
+  ```
+
+  Calls within the module go straight to the bodies; everything else, and
+  every pointer to such a routine, goes through the stub. Interrupt vectors
+  cannot point into a window bank.
+- `__m65_farcall` (in `mega65::WINDOW_RUNTIME`) moves the caller's flags,
+  return address and current bank onto a resident window stack, maps bank N
+  and enters the body so that it sees exactly the stack a direct call would
+  give it (arguments, then a return address). When the body returns, it maps
+  the caller's bank back, restores the flags and returns with A/X/Y intact
+  (`__m65_acc+3` is never touched). The window stack only changes with
+  interrupts off, so interrupt handlers can call into banks too. It is 32
+  entries deep; overflowing it stops the machine with a red border.
+- The current bank is `__m65_window` (0 = nothing mapped). Calling into a
+  bank and back costs roughly 250 cycles (about 6 µs at 40 MHz).
 
 ### Machine drivers
 

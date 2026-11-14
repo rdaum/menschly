@@ -146,7 +146,13 @@ pub fn emit<I: Ca65Inst>(module: &crate::asm::AsmModule<I>) -> String {
     out.push('\n');
 
     for routine in &module.routines {
+        if let Some(segment) = &routine.segment {
+            emit_code_segment(&mut out, segment);
+        }
         emit_routine(&mut out, routine);
+        if routine.segment.is_some() {
+            emit_code_segment(&mut out, code_segment);
+        }
         out.push('\n');
     }
 

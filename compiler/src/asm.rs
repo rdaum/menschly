@@ -248,6 +248,8 @@ pub struct ModuleEntry {
 pub struct AsmRoutine<I> {
     pub name: String,
     pub export: bool,
+    /// Segment for this routine, when not the module's code segment.
+    pub segment: Option<String>,
     pub insts: Vec<I>,
 }
 
@@ -256,6 +258,7 @@ impl<I> AsmRoutine<I> {
         Self {
             name: name.into(),
             export: false,
+            segment: None,
             insts: Vec::new(),
         }
     }

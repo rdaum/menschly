@@ -1,8 +1,12 @@
 //! Compiles Mensch modules into a MEGA65 kernel ROM and boots it in Xemu.
 //!
 //! ```text
-//! mensch-run-mega65 [--type-in TEXT] [--rom OUT.rom] [--no-run] module.mensch...
+//! mensch-run-mega65 [--type-in TEXT] [--rom OUT.rom] [--no-run]
+//!     [--window N:module.mensch]... module.mensch...
 //! ```
+//!
+//! Modules given with `--window` have their code placed in window bank `N`
+//! (see `mega65`); the others are resident.
 
 use std::fs;
 use std::path::PathBuf;
@@ -18,6 +22,11 @@ struct Config {
     /// Mensch source modules; one must export `main`.
     #[arg(required = true)]
     sources: Vec<PathBuf>,
+
+    /// A module whose code goes in window bank N (1-4), as `N:PATH`
+    /// (repeatable).
+    #[arg(long = "window", value_name = "N:PATH")]
+    windows: Vec<String>,
 
     /// Text typed into the keyboard queue as the kernel reads it (`\n` is RETURN).
     #[arg(long = "type-in")]
@@ -53,18 +62,36 @@ fn main() {
 }
 
 fn run(config: Config) -> Result<(), String> {
+    let mut placed = config
+        .sources
+        .iter()
+        .map(|path| (path.clone(), None))
+        .collect::<Vec<_>>();
+    for spec in &config.windows {
+        let (bank, path) = spec
+            .split_once(':')
+            .ok_or_else(|| format!("--window {spec}: expected N:PATH"))?;
+        let bank = bank
+            .parse::<u8>()
+            .map_err(|_| format!("--window {spec}: bad bank number"))?;
+        placed.push((PathBuf::from(path), Some(bank)));
+    }
     let mut sources = Vec::new();
-    for path in &config.sources {
-        let source = fs::read_to_string(path)
+    for (path, window) in placed {
+        let source = fs::read_to_string(&path)
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
         let stem = path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("module")
             .to_owned();
-        sources.push((format!("{}-{stem}", sources.len()), source));
+        sources.push(mega65::KernelModule {
+            name: format!("{}-{stem}", sources.len()),
+            source,
+            window,
+        });
     }
-    let modules = mega65::compile_modules(&sources)?;
+    let modules = mega65::compile_kernel_modules(&sources)?;
     let dir = config.work_dir.clone().unwrap_or_else(|| {
         std::env::temp_dir().join(format!("mensch-mega65-run-{}", process::id()))
     });
