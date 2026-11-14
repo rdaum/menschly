@@ -153,9 +153,10 @@ export procedure bios_init_registry()
 end
 
 reentrant procedure bios_ensure_registry()
-    if registry_initialized == 0
-        bios_init_registry()
+    if registry_initialized != 0
+        return
     end
+    bios_init_registry()
     return
 end
 
@@ -164,257 +165,214 @@ reentrant function bios_find_device(): u16
     if bios_first_device == bios_device
         if serial_device.id == bios_device
             return serial_device.id
-        else
-            return 0
         end
-    elsif block_device.id == bios_device
-        return block_device.id
-    else
         return 0
     end
+    if block_device.id == bios_device
+        return block_device.id
+    end
+    return 0
 end
 
 reentrant function bios_dispatch_bconstat(): u16
     var driver: u16
-    if bios_find_device() != 0
-        if serial_device.kind == DEVICE_KIND_CHAR
-            driver = serial_device.driver
-            if driver == DEVICE_DRIVER_SERIAL
-                if serial_device.flags & DEVICE_FLAG_READ != 0
-                    if serial_has_data() != 0
-                        return $ffff
-                    else
-                        return 0
-                    end
-                else
-                    return 0
-                end
-            else
-                return 0
-            end
-        else
-            return 0
-        end
-    else
+    if bios_find_device() == 0
         return 0
     end
+    if serial_device.kind != DEVICE_KIND_CHAR
+        return 0
+    end
+    driver = serial_device.driver
+    if driver != DEVICE_DRIVER_SERIAL
+        return 0
+    end
+    if serial_device.flags & DEVICE_FLAG_READ == 0
+        return 0
+    end
+    if serial_has_data() != 0
+        return $ffff
+    end
+    return 0
 end
 
 reentrant function bios_dispatch_bconin(): u16
     var driver: u16
-    if bios_find_device() != 0
-        if serial_device.kind == DEVICE_KIND_CHAR
-            driver = serial_device.driver
-            if driver == DEVICE_DRIVER_SERIAL
-                if serial_device.flags & DEVICE_FLAG_READ != 0
-                    if serial_has_data() != 0
-                        return u16(serial_read())
-                    else
-                        return 0
-                    end
-                else
-                    return 0
-                end
-            else
-                return 0
-            end
-        else
-            return 0
-        end
-    else
+    if bios_find_device() == 0
         return 0
     end
+    if serial_device.kind != DEVICE_KIND_CHAR
+        return 0
+    end
+    driver = serial_device.driver
+    if driver != DEVICE_DRIVER_SERIAL
+        return 0
+    end
+    if serial_device.flags & DEVICE_FLAG_READ == 0
+        return 0
+    end
+    if serial_has_data() != 0
+        return u16(serial_read())
+    end
+    return 0
 end
 
 reentrant function bios_dispatch_bconout(): u16
     var driver: u16
-    if bios_find_device() != 0
-        if serial_device.kind == DEVICE_KIND_CHAR
-            driver = serial_device.driver
-            if driver == DEVICE_DRIVER_SERIAL
-                if serial_device.flags & DEVICE_FLAG_WRITE != 0
-                    serial_write(bios_arg)
-                    return 0
-                else
-                    return $ffff
-                end
-            else
-                return $ffff
-            end
-        else
-            return $ffff
-        end
-    else
+    if bios_find_device() == 0
         return $ffff
     end
+    if serial_device.kind != DEVICE_KIND_CHAR
+        return $ffff
+    end
+    driver = serial_device.driver
+    if driver != DEVICE_DRIVER_SERIAL
+        return $ffff
+    end
+    if serial_device.flags & DEVICE_FLAG_WRITE == 0
+        return $ffff
+    end
+    serial_write(bios_arg)
+    return 0
 end
 
 reentrant function bios_dispatch_bcostat(): u16
     var driver: u16
-    if bios_find_device() != 0
-        if serial_device.kind == DEVICE_KIND_CHAR
-            driver = serial_device.driver
-            if driver == DEVICE_DRIVER_SERIAL
-                if serial_device.flags & DEVICE_FLAG_WRITE != 0
-                    return $ffff
-                else
-                    return 0
-                end
-            else
-                return 0
-            end
-        else
-            return 0
-        end
-    else
+    if bios_find_device() == 0
         return 0
     end
+    if serial_device.kind != DEVICE_KIND_CHAR
+        return 0
+    end
+    driver = serial_device.driver
+    if driver != DEVICE_DRIVER_SERIAL
+        return 0
+    end
+    if serial_device.flags & DEVICE_FLAG_WRITE != 0
+        return $ffff
+    end
+    return 0
 end
 
 reentrant function bios_dispatch_device_next(): u16
-    if bios_find_device() != 0
-        if bios_device == serial_device.id
-            return serial_device.next_sibling
-        else
-            return block_device.next_sibling
-        end
-    else
+    if bios_find_device() == 0
         return 0
     end
+    if bios_device == serial_device.id
+        return serial_device.next_sibling
+    end
+    return block_device.next_sibling
 end
 
 reentrant function bios_dispatch_device_parent(): u16
-    if bios_find_device() != 0
-        if bios_device == serial_device.id
-            return serial_device.parent
-        else
-            return block_device.parent
-        end
-    else
+    if bios_find_device() == 0
         return 0
     end
+    if bios_device == serial_device.id
+        return serial_device.parent
+    end
+    return block_device.parent
 end
 
 reentrant function bios_dispatch_device_child(): u16
-    if bios_find_device() != 0
-        if bios_device == serial_device.id
-            return serial_device.first_child
-        else
-            return block_device.first_child
-        end
-    else
+    if bios_find_device() == 0
         return 0
     end
+    if bios_device == serial_device.id
+        return serial_device.first_child
+    end
+    return block_device.first_child
 end
 
 reentrant function bios_dispatch_device_kind(): u16
-    if bios_find_device() != 0
-        if bios_device == serial_device.id
-            return serial_device.kind
-        else
-            return block_device.kind
-        end
-    else
+    if bios_find_device() == 0
         return 0
     end
+    if bios_device == serial_device.id
+        return serial_device.kind
+    end
+    return block_device.kind
 end
 
 reentrant function bios_dispatch_device_flags(): u16
-    if bios_find_device() != 0
-        if bios_device == serial_device.id
-            return serial_device.flags
-        else
-            return block_device.flags
-        end
-    else
+    if bios_find_device() == 0
         return 0
     end
+    if bios_device == serial_device.id
+        return serial_device.flags
+    end
+    return block_device.flags
 end
 
 reentrant function bios_dispatch_device_driver(): u16
-    if bios_find_device() != 0
-        if bios_device == serial_device.id
-            return serial_device.driver
-        else
-            return block_device.driver
-        end
-    else
+    if bios_find_device() == 0
         return 0
     end
+    if bios_device == serial_device.id
+        return serial_device.driver
+    end
+    return block_device.driver
 end
 
 reentrant function bios_dispatch_block_status(): u16
-    if bios_find_device() != 0
-        if bios_device == block_device.id
-            return blockdev_status()
-        else
-            return 0
-        end
-    else
+    if bios_find_device() == 0
         return 0
     end
+    if bios_device == block_device.id
+        return blockdev_status()
+    end
+    return 0
 end
 
 reentrant function bios_dispatch_block_sector_count(): u16
-    if bios_find_device() != 0
-        if bios_device == block_device.id
-            return blockdev_sector_count()
-        else
-            return 0
-        end
-    else
+    if bios_find_device() == 0
         return 0
     end
+    if bios_device == block_device.id
+        return blockdev_sector_count()
+    end
+    return 0
 end
 
 reentrant function bios_dispatch_block_set_lba_high(): u16
-    if bios_find_device() != 0
-        if bios_device == block_device.id
-            blockdev_set_lba_high(bios_arg)
-            return 0
-        else
-            return $ffff
-        end
-    else
+    if bios_find_device() == 0
         return $ffff
     end
+    if bios_device != block_device.id
+        return $ffff
+    end
+    blockdev_set_lba_high(bios_arg)
+    return 0
 end
 
 reentrant function bios_dispatch_block_set_lba(): u16
-    if bios_find_device() != 0
-        if bios_device == block_device.id
-            blockdev_set_lba(bios_arg)
-            return 0
-        else
-            return $ffff
-        end
-    else
+    if bios_find_device() == 0
         return $ffff
     end
+    if bios_device != block_device.id
+        return $ffff
+    end
+    blockdev_set_lba(bios_arg)
+    return 0
 end
 
 reentrant function bios_dispatch_block_read(): u16
-    if bios_find_device() != 0
-        if bios_device == block_device.id
-            return blockdev_read(bios_arg)
-        else
-            return $ffff
-        end
-    else
+    if bios_find_device() == 0
         return $ffff
     end
+    if bios_device == block_device.id
+        return blockdev_read(bios_arg)
+    end
+    return $ffff
 end
 
 reentrant function bios_dispatch_block_write(): u16
-    if bios_find_device() != 0
-        if bios_device == block_device.id
-            return blockdev_write(bios_arg)
-        else
-            return $ffff
-        end
-    else
+    if bios_find_device() == 0
         return $ffff
     end
+    if bios_device == block_device.id
+        return blockdev_write(bios_arg)
+    end
+    return $ffff
 end
 
 export reentrant function bios_trap_dispatch(call: u16, dev: u16, arg: u16): u16
@@ -423,40 +381,55 @@ export reentrant function bios_trap_dispatch(call: u16, dev: u16, arg: u16): u16
     bios_arg = arg
     if bios_call == BIOS_BCONSTAT
         return bios_dispatch_bconstat()
-    elsif bios_call == BIOS_BCONIN
+    end
+    if bios_call == BIOS_BCONIN
         return bios_dispatch_bconin()
-    elsif bios_call == BIOS_BCONOUT
+    end
+    if bios_call == BIOS_BCONOUT
         return bios_dispatch_bconout()
-    elsif bios_call == BIOS_BCOSTAT
+    end
+    if bios_call == BIOS_BCOSTAT
         return bios_dispatch_bcostat()
-    elsif bios_call == BIOS_BBLKSTAT
+    end
+    if bios_call == BIOS_BBLKSTAT
         return bios_dispatch_block_status()
-    elsif bios_call == BIOS_BBLKCOUNT
+    end
+    if bios_call == BIOS_BBLKCOUNT
         return bios_dispatch_block_sector_count()
-    elsif bios_call == BIOS_BSETLBA
+    end
+    if bios_call == BIOS_BSETLBA
         return bios_dispatch_block_set_lba()
-    elsif bios_call == BIOS_BSETLBAHI
+    end
+    if bios_call == BIOS_BSETLBAHI
         return bios_dispatch_block_set_lba_high()
-    elsif bios_call == BIOS_BREAD
+    end
+    if bios_call == BIOS_BREAD
         return bios_dispatch_block_read()
-    elsif bios_call == BIOS_BWRITE
+    end
+    if bios_call == BIOS_BWRITE
         return bios_dispatch_block_write()
-    elsif bios_call == BIOS_DEV_FIRST
+    end
+    if bios_call == BIOS_DEV_FIRST
         bios_ensure_registry()
         return bios_first_device
-    elsif bios_call == BIOS_DEV_NEXT
-        return bios_dispatch_device_next()
-    elsif bios_call == BIOS_DEV_PARENT
-        return bios_dispatch_device_parent()
-    elsif bios_call == BIOS_DEV_CHILD
-        return bios_dispatch_device_child()
-    elsif bios_call == BIOS_DEV_KIND
-        return bios_dispatch_device_kind()
-    elsif bios_call == BIOS_DEV_FLAGS
-        return bios_dispatch_device_flags()
-    elsif bios_call == BIOS_DEV_DRIVER
-        return bios_dispatch_device_driver()
-    else
-        return $ffff
     end
+    if bios_call == BIOS_DEV_NEXT
+        return bios_dispatch_device_next()
+    end
+    if bios_call == BIOS_DEV_PARENT
+        return bios_dispatch_device_parent()
+    end
+    if bios_call == BIOS_DEV_CHILD
+        return bios_dispatch_device_child()
+    end
+    if bios_call == BIOS_DEV_KIND
+        return bios_dispatch_device_kind()
+    end
+    if bios_call == BIOS_DEV_FLAGS
+        return bios_dispatch_device_flags()
+    end
+    if bios_call == BIOS_DEV_DRIVER
+        return bios_dispatch_device_driver()
+    end
+    return $ffff
 end

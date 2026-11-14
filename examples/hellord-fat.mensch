@@ -294,9 +294,10 @@ reentrant procedure next_cluster()
             c_end = 1
         end
     end
-    if c_hi == 0 and c_lo < 2
-        c_end = 1
+    if not (c_hi == 0 and c_lo < 2)
+        return
     end
+    c_end = 1
     return
 end
 

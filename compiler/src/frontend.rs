@@ -3191,44 +3191,41 @@ impl<'a> RoutineLowerer<'a> {
         } else {
             index
         };
-        let mut first = true;
-        for bit in (0..16u8).rev() {
-            if element_size & (1 << bit) == 0 {
-                continue;
-            }
-            let term = if bit == 0 {
-                source.clone()
-            } else {
-                let dst = if first {
-                    Value::Accumulator
-                } else {
-                    self.parent.temp()
-                };
+        // Horner's rule from the top bit: shift the running product left
+        // over each run of bits, adding the index for each set bit. Only the
+        // index's own copy is needed besides the accumulator.
+        self.body.push(IrInst::Move {
+            width: Width::Word,
+            dst: Value::Accumulator,
+            src: source.clone(),
+        });
+        let top = 15 - element_size.leading_zeros() as u8;
+        let mut pending = 0u8;
+        for bit in (0..top).rev() {
+            pending += 1;
+            if element_size & (1 << bit) != 0 {
                 self.body.push(IrInst::ShiftLeft {
                     width: Width::Word,
-                    dst: dst.clone(),
-                    lhs: source.clone(),
-                    rhs: Value::Const(Const::U8(bit)),
+                    dst: Value::Accumulator,
+                    lhs: Value::Accumulator,
+                    rhs: Value::Const(Const::U8(pending)),
                 });
-                dst
-            };
-            if first {
-                if term != Value::Accumulator {
-                    self.body.push(IrInst::Move {
-                        width: Width::Word,
-                        dst: Value::Accumulator,
-                        src: term,
-                    });
-                }
-                first = false;
-            } else {
+                pending = 0;
                 self.body.push(IrInst::Add {
                     width: Width::Word,
                     dst: Value::Accumulator,
                     lhs: Value::Accumulator,
-                    rhs: term,
+                    rhs: source.clone(),
                 });
             }
+        }
+        if pending != 0 {
+            self.body.push(IrInst::ShiftLeft {
+                width: Width::Word,
+                dst: Value::Accumulator,
+                lhs: Value::Accumulator,
+                rhs: Value::Const(Const::U8(pending)),
+            });
         }
         Ok(Value::Accumulator)
     }

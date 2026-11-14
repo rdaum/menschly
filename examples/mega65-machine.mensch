@@ -107,9 +107,9 @@ end
 procedure line_feed()
     if row_start == LAST_ROW
         scroll_up()
-    else
-        row_start = row_start + COLUMNS
+        return
     end
+    row_start = row_start + COLUMNS
     return
 end
 
@@ -117,17 +117,20 @@ end
 function screen_code(ch: u8): u8
     if ch >= 'a' and ch <= 'z'
         return ch - 96
-    elsif ch >= 'A' and ch <= 'Z'
-        return ch
-    elsif ch >= ' ' and ch <= '?'
-        return ch
-    elsif ch == '_'
-        return 100
-    elsif ch >= '@' and ch <= '^'
-        return ch - 64
-    else
-        return '?'
     end
+    if ch >= 'A' and ch <= 'Z'
+        return ch
+    end
+    if ch >= ' ' and ch <= '?'
+        return ch
+    end
+    if ch == '_'
+        return 100
+    end
+    if ch >= '@' and ch <= '^'
+        return ch - 64
+    end
+    return '?'
 end
 
 export procedure serial_write(value: u16)
@@ -135,42 +138,58 @@ export procedure serial_write(value: u16)
     ch = u8(value)
     if in_escape != 0
         # Minimal ANSI: ESC [ ... J clears the screen, ESC [ ... H homes.
-        if ch >= '@' and ch <= '~' and ch != '['
-            in_escape = 0
-            if ch == 'J'
-                clear_screen()
-            elsif ch == 'H'
-                row_start = 0
-                column = 0
-            end
+        if not (ch >= '@' and ch <= '~' and ch != '[')
+            return
         end
-    elsif ch == ESC
-        in_escape = 1
-    elsif ch == '\r'
+        in_escape = 0
+        if ch == 'J'
+            clear_screen()
+            return
+        end
+        if ch != 'H'
+            return
+        end
+        row_start = 0
         column = 0
-    elsif ch == '\n'
-        line_feed()
-    elsif ch == BACKSPACE
-        if column != 0
-            column = column - 1
-        end
-    elsif ch >= ' '
-        screen[row_start + column] = screen_code(ch)
-        column = column + 1
-        if column == COLUMNS
-            column = 0
-            line_feed()
-        end
+        return
     end
+    if ch == ESC
+        in_escape = 1
+        return
+    end
+    if ch == '\r'
+        column = 0
+        return
+    end
+    if ch == '\n'
+        line_feed()
+        return
+    end
+    if ch == BACKSPACE
+        if column == 0
+            return
+        end
+        column = column - 1
+        return
+    end
+    if ch < ' '
+        return
+    end
+    screen[row_start + column] = screen_code(ch)
+    column = column + 1
+    if column != COLUMNS
+        return
+    end
+    column = 0
+    line_feed()
     return
 end
 
 export function serial_has_data(): u8
     if kbd_ascii != 0
         return 1
-    else
-        return 0
     end
+    return 0
 end
 
 export function serial_read(): u8

@@ -39,20 +39,19 @@ export procedure serial_write(value: u16)
     if tx_next == tx_tail
         tx_drop = u8(value)
         tx_overflow = 1
-    else
-        tx_buffer[tx_head] = u8(value)
-        tx_head = tx_next
-        serial_ctrl = RX_IRQ + TX_IRQ
+        return
     end
+    tx_buffer[tx_head] = u8(value)
+    tx_head = tx_next
+    serial_ctrl = RX_IRQ + TX_IRQ
     return
 end
 
 export function serial_has_data(): u8
     if rx_head == rx_tail
         return 0
-    else
-        return 1
     end
+    return 1
 end
 
 export function serial_read(): u8
@@ -83,16 +82,16 @@ export interrupt procedure serial_irq()
     end
     if tx_head == tx_tail
         serial_ctrl = RX_IRQ
-    else
-        if serial_status & TX_FULL == 0
-            serial_data = tx_buffer[tx_tail]
-            tx_tail = tx_tail + 1 & RING_MASK
-        end
-        if tx_head == tx_tail
-            serial_ctrl = RX_IRQ
-        else
-            serial_ctrl = RX_IRQ + TX_IRQ
-        end
+        return
     end
+    if serial_status & TX_FULL == 0
+        serial_data = tx_buffer[tx_tail]
+        tx_tail = tx_tail + 1 & RING_MASK
+    end
+    if tx_head == tx_tail
+        serial_ctrl = RX_IRQ
+        return
+    end
+    serial_ctrl = RX_IRQ + TX_IRQ
     return
 end

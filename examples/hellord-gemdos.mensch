@@ -143,9 +143,10 @@ export reentrant procedure gemdos_init()
 end
 
 reentrant procedure gemdos_ensure_init()
-    if gemdos_initialized == 0
-        gemdos_init()
+    if gemdos_initialized != 0
+        return
     end
+    gemdos_init()
     return
 end
 
@@ -171,24 +172,30 @@ reentrant function gemdos_impl_get_stddev(stream: u16): u16
     gemdos_ensure_init()
     if stream == GEMDOS_STDIN
         return gemdos_stdin_device
-    elsif stream == GEMDOS_STDOUT
-        return gemdos_stdout_device
-    elsif stream == GEMDOS_STDERR
-        return gemdos_stderr_device
-    else
-        return 0
     end
+    if stream == GEMDOS_STDOUT
+        return gemdos_stdout_device
+    end
+    if stream == GEMDOS_STDERR
+        return gemdos_stderr_device
+    end
+    return 0
 end
 
 reentrant procedure gemdos_impl_set_stddev(stream: u16, dev: u16)
     gemdos_ensure_init()
     if stream == GEMDOS_STDIN
         gemdos_stdin_device = dev
-    elsif stream == GEMDOS_STDOUT
-        gemdos_stdout_device = dev
-    elsif stream == GEMDOS_STDERR
-        gemdos_stderr_device = dev
+        return
     end
+    if stream == GEMDOS_STDOUT
+        gemdos_stdout_device = dev
+        return
+    end
+    if stream != GEMDOS_STDERR
+        return
+    end
+    gemdos_stderr_device = dev
     return
 end
 
@@ -325,55 +332,74 @@ export reentrant function gemdos_trap_dispatch(call: u16, arg0: u16, arg1: u16):
     if caller != 0
         if call == GEMDOS_DSETPATH
             return gemdos_impl_dsetpath(gemdos_caller_path(caller, arg0))
-        elsif call == GEMDOS_FOPEN
+        end
+        if call == GEMDOS_FOPEN
             return gemdos_impl_fopen(gemdos_caller_path(caller, arg0), arg1)
-        elsif call == GEMDOS_FREAD
+        end
+        if call == GEMDOS_FREAD
             return gemdos_caller_fread(caller, arg0, arg1)
-        elsif call == GEMDOS_FWRITE
+        end
+        if call == GEMDOS_FWRITE
             return gemdos_caller_fwrite(caller, arg0, arg1)
-        elsif call == GEMDOS_FSFIRST
+        end
+        if call == GEMDOS_FSFIRST
             gemdos_path[0] = 0
             return gemdos_caller_find(caller, 1, arg1)
-        elsif call == GEMDOS_FSNEXT
+        end
+        if call == GEMDOS_FSNEXT
             return gemdos_caller_find(caller, 0, arg0)
         end
     end
     if call == GEMDOS_FCOUNT
         gemdos_arg_word = arg0
         return 0
-    elsif call == GEMDOS_CCONIS
+    end
+    if call == GEMDOS_CCONIS
         return gemdos_impl_cconis()
-    elsif call == GEMDOS_CCONIN
+    end
+    if call == GEMDOS_CCONIN
         return u16(gemdos_impl_cconin())
-    elsif call == GEMDOS_CCONOS
+    end
+    if call == GEMDOS_CCONOS
         return gemdos_impl_cconos()
-    elsif call == GEMDOS_CCONOUT
+    end
+    if call == GEMDOS_CCONOUT
         gemdos_impl_cconout(u8(arg0))
         return 0
-    elsif call == GEMDOS_DSETDRV
+    end
+    if call == GEMDOS_DSETDRV
         return gemdos_impl_dsetdrv(arg0)
-    elsif call == GEMDOS_DGETDRV
+    end
+    if call == GEMDOS_DGETDRV
         return gemdos_impl_dgetdrv()
-    elsif call == GEMDOS_DSETPATH
+    end
+    if call == GEMDOS_DSETPATH
         return gemdos_impl_dsetpath(arg0)
-    elsif call == GEMDOS_FOPEN
+    end
+    if call == GEMDOS_FOPEN
         return gemdos_impl_fopen(arg0, arg1)
-    elsif call == GEMDOS_FCLOSE
+    end
+    if call == GEMDOS_FCLOSE
         return gemdos_impl_fclose(arg0)
-    elsif call == GEMDOS_FREAD
+    end
+    if call == GEMDOS_FREAD
         return gemdos_impl_fread(arg0, arg1)
-    elsif call == GEMDOS_FWRITE
+    end
+    if call == GEMDOS_FWRITE
         return gemdos_impl_fwrite(arg0, arg1)
-    elsif call == GEMDOS_FSFIRST
+    end
+    if call == GEMDOS_FSFIRST
         return gemdos_impl_fsfirst(arg0, arg1)
-    elsif call == GEMDOS_FSNEXT
+    end
+    if call == GEMDOS_FSNEXT
         return gemdos_impl_fsnext(arg0)
-    elsif call == GEMDOS_GET_STDDEV
+    end
+    if call == GEMDOS_GET_STDDEV
         return gemdos_impl_get_stddev(arg0)
-    elsif call == GEMDOS_SET_STDDEV
-        gemdos_impl_set_stddev(arg0, arg1)
-        return 0
-    else
+    end
+    if call != GEMDOS_SET_STDDEV
         return $ffff
     end
+    gemdos_impl_set_stddev(arg0, arg1)
+    return 0
 end

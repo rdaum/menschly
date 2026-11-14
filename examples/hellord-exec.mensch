@@ -112,11 +112,14 @@ end
 reentrant function segment_delta(segment: u8): u16
     if segment == SEGMENT_TEXT
         return text_delta
-    elsif segment == SEGMENT_DATA
+    end
+    if segment == SEGMENT_DATA
         return data_delta
-    elsif segment == SEGMENT_BSS
+    end
+    if segment == SEGMENT_BSS
         return bss_delta
-    elsif segment == SEGMENT_ZERO
+    end
+    if segment == SEGMENT_ZERO
         return zero_delta
     end
     return 0
@@ -137,7 +140,8 @@ reentrant function relocate(start: u16): u8
         step = next_byte()
         if step == 0
             return 1
-        elsif step == SKIP_STEP
+        end
+        if step == SKIP_STEP
             position = position + SKIP_BYTES
         else
             position = position + u16(step)

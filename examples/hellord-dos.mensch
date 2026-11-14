@@ -68,6 +68,37 @@ const COMMAND_FILL = 21
 const COMMAND_BLKINFO = 22
 const COMMAND_REBOOT = 23
 const COMMAND_EMPTY = 255
+
+# Commands, tried in order. A command may stand alone (ACCEPTS_WORD) or
+# take arguments (ACCEPTS_ARGUMENTS); `short` and `long` are its names.
+const ACCEPTS_WORD = 1
+const ACCEPTS_ARGUMENTS = 2
+const ACCEPTS_EITHER = 3
+const COMMAND_COUNT = 21
+type Command = record(short: near ^u8, long: near ^u8, accepts: u8, code: u8)
+const COMMANDS: [21]Command = [
+    ("H", "HELP", ACCEPTS_WORD, COMMAND_HELP),
+    ("V", "VER", ACCEPTS_WORD, COMMAND_VERSION),
+    ("D", "DIR", ACCEPTS_WORD, COMMAND_DIR),
+    ("S", "STAT", ACCEPTS_WORD, COMMAND_STATUS),
+    ("P", "PWD", ACCEPTS_WORD, COMMAND_PWD),
+    ("M", "MAP", ACCEPTS_WORD, COMMAND_MAP),
+    ("MEM", "MEM", ACCEPTS_WORD, COMMAND_MEM),
+    ("C", "CLS", ACCEPTS_WORD, COMMAND_CLS),
+    ("PROMPT", "PROMPT", ACCEPTS_EITHER, COMMAND_PROMPT),
+    ("PATH", "PATH", ACCEPTS_EITHER, COMMAND_PATH),
+    ("PEEK", "PEEK", ACCEPTS_ARGUMENTS, COMMAND_PEEK),
+    ("POKE", "POKE", ACCEPTS_ARGUMENTS, COMMAND_POKE),
+    ("DUMP", "DUMP", ACCEPTS_ARGUMENTS, COMMAND_DUMP),
+    ("FILL", "FILL", ACCEPTS_ARGUMENTS, COMMAND_FILL),
+    ("BLK", "BLKINFO", ACCEPTS_WORD, COMMAND_BLKINFO),
+    ("REBOOT", "REBOOT", ACCEPTS_WORD, COMMAND_REBOOT),
+    ("SET", "SET", ACCEPTS_EITHER, COMMAND_SET),
+    ("R", "RUN", ACCEPTS_ARGUMENTS, COMMAND_RUN),
+    ("T", "TYPE", ACCEPTS_ARGUMENTS, COMMAND_TYPE),
+    ("CD", "CD", ACCEPTS_EITHER, COMMAND_CD),
+    ("E", "ECHO", ACCEPTS_EITHER, COMMAND_ECHO),
+]
 const FILE_UNKNOWN = 0
 const FILE_README = 1
 const FILE_SYSTEM = 2
@@ -136,6 +167,18 @@ var block_cache_drive: u8
 var block_cache_lba: u16
 var dos_search_dir: u8
 var dos_search_next: u8
+
+# The ROM filesystem's directories, as Fsfirst/Fsnext list them.
+type RomEntry = record(name: near ^u8, size: u16, attr: u8)
+const ROMFS_ROOT_COUNT = 4
+const ROMFS_ROOT: [4]RomEntry = [
+    ("README.TXT", 49, 0),
+    ("SYSTEM.TXT", 65, 0),
+    ("HELLO.PRG", 37, 0),
+    ("GAMES", 0, GEMDOS_ATTR_DIR),
+]
+const ROMFS_GAMES_COUNT = 2
+const ROMFS_GAMES: [2]RomEntry = [("DEMO.TXT", 48, 0), ("DEMO.PRG", 36, 0)]
 var dos_current_read_slot: u8
 var dos_handle_driver: [4]u8
 var dos_handle_file: [4]u8
@@ -173,24 +216,23 @@ end
 
 export reentrant function dos_set_drive_index(drive: u16): u16
     dos_ensure_init()
-    if drive < DRIVE_COUNT
-        current_drive = u8(drive) + 'A'
-        return $ffff
-    else
+    if drive >= DRIVE_COUNT
         return 0
     end
+    current_drive = u8(drive) + 'A'
+    return $ffff
 end
 
 export reentrant function dos_mount_fat_drive(drive: u16): u16
     dos_ensure_init()
     if drive >= DRIVE_COUNT
         return DOS_BLOCK_ERR_NO_DEVICE
-    elsif drive_backend[drive] != DRIVE_BACKEND_BIOS_BLOCK
-        return DOS_BLOCK_ERR_NO_DEVICE
-    else
-        drive_fs_driver[drive] = FS_DRIVER_FAT
-        return DOS_OK
     end
+    if drive_backend[drive] != DRIVE_BACKEND_BIOS_BLOCK
+        return DOS_BLOCK_ERR_NO_DEVICE
+    end
+    drive_fs_driver[drive] = FS_DRIVER_FAT
+    return DOS_OK
 end
 
 export reentrant function dos_set_path(path: near ^u8): u16
@@ -198,23 +240,27 @@ export reentrant function dos_set_path(path: near ^u8): u16
     if path^ == 0
         init_path()
         return DOS_OK
-    elsif path_is_root(path) != 0
+    end
+    if path_is_root(path) != 0
         init_path()
         return DOS_OK
-    elsif path_is_current(path) != 0
+    end
+    if path_is_current(path) != 0
         return DOS_OK
-    elsif path_is_parent(path) != 0
+    end
+    if path_is_parent(path) != 0
         init_path()
         return DOS_OK
-    elsif path_is_games(path) != 0
+    end
+    if name_is(path, "GAMES", "")
         set_games_path()
         return DOS_OK
-    elsif path_is_root_games(path) != 0
-        set_games_path()
-        return DOS_OK
-    else
+    end
+    if path_is_root_games(path) == 0
         return DOS_ERR_PATH_NOT_FOUND
     end
+    set_games_path()
+    return DOS_OK
 end
 
 export reentrant function dos_fsfirst(dta: near ^u8): u16
@@ -243,14 +289,14 @@ end
 export reentrant function dos_fsnext(dta: near ^u8): u16
     if dos_current_fs_driver() == FS_DRIVER_ROMFS
         return romfs_search_next(dta)
-    elsif dos_current_fs_driver() == FS_DRIVER_FAT
-        if dos_search_dir != DIR_ROOT
-            return DOS_ERR_NO_MORE_FILES
-        end
-        return fat_dir_next(dta)
-    else
+    end
+    if dos_current_fs_driver() != FS_DRIVER_FAT
         return DOS_ERR_NO_MORE_FILES
     end
+    if dos_search_dir != DIR_ROOT
+        return DOS_ERR_NO_MORE_FILES
+    end
+    return fat_dir_next(dta)
 end
 
 export reentrant function dos_fopen(path: near ^u8): u16
@@ -264,9 +310,8 @@ export reentrant function dos_fopen(path: near ^u8): u16
     code = dos_fs_file_code(path)
     if code == FILE_UNKNOWN
         return DOS_ERR_FILE_NOT_FOUND
-    else
-        return dos_alloc_handle(driver, code)
     end
+    return dos_alloc_handle(driver, code)
 end
 
 export reentrant function dos_fread(handle: u16, count: u16, buffer: near ^u8): u16
@@ -321,13 +366,13 @@ export reentrant function dos_fwrite(handle: u16, count: u16, buffer: near ^u8):
     slot = handle - DOS_HANDLE_BASE
     if dos_handle_file[slot] == FILE_UNKNOWN
         return DOS_ERR_BAD_HANDLE
-    elsif dos_handle_driver[slot] == FS_DRIVER_FAT
-        written = fat_write(slot, dos_handle_offset[slot], count, buffer)
-        dos_handle_offset[slot] = dos_handle_offset[slot] + written
-        return written
-    else
+    end
+    if dos_handle_driver[slot] != FS_DRIVER_FAT
         return DOS_ERR_ACCESS_DENIED
     end
+    written = fat_write(slot, dos_handle_offset[slot], count, buffer)
+    dos_handle_offset[slot] = dos_handle_offset[slot] + written
+    return written
 end
 
 export reentrant function dos_fclose(handle: u16): u16
@@ -335,16 +380,15 @@ export reentrant function dos_fclose(handle: u16): u16
     dos_ensure_init()
     if dos_handle_slot_valid(handle) == 0
         return DOS_ERR_BAD_HANDLE
-    else
-        slot = handle - DOS_HANDLE_BASE
-        dos_handle_driver[slot] = FS_DRIVER_NONE
-        dos_handle_file[slot] = FILE_UNKNOWN
-        dos_handle_offset[slot] = 0
-        dos_handle_drive[slot] = 0
-        dos_handle_lba[slot] = 0
-        dos_handle_size[slot] = 0
-        return DOS_OK
     end
+    slot = handle - DOS_HANDLE_BASE
+    dos_handle_driver[slot] = FS_DRIVER_NONE
+    dos_handle_file[slot] = FILE_UNKNOWN
+    dos_handle_offset[slot] = 0
+    dos_handle_drive[slot] = 0
+    dos_handle_lba[slot] = 0
+    dos_handle_size[slot] = 0
+    return DOS_OK
 end
 
 reentrant function dos_fat_open(path: near ^u8): u16
@@ -373,76 +417,50 @@ export reentrant function fat_read_sector(drive: u16, lba: u16, buffer: near ^u8
     dos_ensure_init()
     if drive >= DRIVE_COUNT
         return DOS_BLOCK_ERR_NO_DEVICE
-    elsif drive_fs_driver[drive] != FS_DRIVER_FAT
-        return DOS_BLOCK_ERR_NO_DEVICE
-    else
-        return dos_drive_read_blocks(u8(drive) + 'A', lba, 1, buffer)
     end
+    if drive_fs_driver[drive] != FS_DRIVER_FAT
+        return DOS_BLOCK_ERR_NO_DEVICE
+    end
+    return dos_drive_read_blocks(u8(drive) + 'A', lba, 1, buffer)
 end
 
 export reentrant function fat_write_sector(drive: u16, lba: u16, buffer: near ^u8): u16
     dos_ensure_init()
     if drive >= DRIVE_COUNT
         return DOS_BLOCK_ERR_NO_DEVICE
-    elsif drive_fs_driver[drive] != FS_DRIVER_FAT
-        return DOS_BLOCK_ERR_NO_DEVICE
-    else
-        return dos_drive_write_blocks(u8(drive) + 'A', lba, 1, buffer)
     end
+    if drive_fs_driver[drive] != FS_DRIVER_FAT
+        return DOS_BLOCK_ERR_NO_DEVICE
+    end
+    return dos_drive_write_blocks(u8(drive) + 'A', lba, 1, buffer)
 end
 
 function command_code(): u8
+    var i: u8
+    var accepts: u8
     if line_len == 0
         return COMMAND_EMPTY
-    elsif is_help() != 0
-        return COMMAND_HELP
-    elsif is_version() != 0
-        return COMMAND_VERSION
-    elsif is_dir() != 0
-        return COMMAND_DIR
-    elsif is_status() != 0
-        return COMMAND_STATUS
-    elsif is_pwd() != 0
-        return COMMAND_PWD
-    elsif is_map() != 0
-        return COMMAND_MAP
-    elsif is_mem() != 0
-        return COMMAND_MEM
-    elsif is_cls() != 0
-        return COMMAND_CLS
-    elsif is_prompt() != 0
-        return COMMAND_PROMPT
-    elsif is_path() != 0
-        return COMMAND_PATH
-    elsif is_peek() != 0
-        return COMMAND_PEEK
-    elsif is_poke() != 0
-        return COMMAND_POKE
-    elsif is_dump() != 0
-        return COMMAND_DUMP
-    elsif is_fill() != 0
-        return COMMAND_FILL
-    elsif is_blkinfo() != 0
-        return COMMAND_BLKINFO
-    elsif command_word_matches("REBOOT") != 0
-        return COMMAND_REBOOT
-    elsif is_set() != 0
-        return COMMAND_SET
-    elsif is_run() != 0
-        return COMMAND_RUN
-    elsif is_type() != 0
-        return COMMAND_TYPE
-    elsif is_cd() != 0
-        return COMMAND_CD
-    elsif is_echo() != 0
-        return COMMAND_ECHO
-    elsif is_drive_select() != 0
-        return COMMAND_DRIVE
-    elsif bare_program_code() != 0
-        return COMMAND_PROGRAM
-    else
-        return COMMAND_UNKNOWN
     end
+    for i = 0 to COMMAND_COUNT - 1
+        accepts = COMMANDS[i].accepts
+        if accepts & ACCEPTS_WORD
+            if command_word_matches(COMMANDS[i].short) or command_word_matches(COMMANDS[i].long)
+                return COMMANDS[i].code
+            end
+        end
+        if accepts & ACCEPTS_ARGUMENTS
+            if command_argument_matches(COMMANDS[i].short) or command_argument_matches(COMMANDS[i].long)
+                return COMMANDS[i].code
+            end
+        end
+    end
+    if is_drive_select()
+        return COMMAND_DRIVE
+    end
+    if bare_program_code()
+        return COMMAND_PROGRAM
+    end
+    return COMMAND_UNKNOWN
 end
 
 procedure init_path()
@@ -469,90 +487,53 @@ end
 function normalized_drive(value: u8): u8
     if value >= 'a' and value <= 'z'
         return value - LOWERCASE_DELTA
-    else
-        return value
     end
+    return value
 end
 
 reentrant function path_is_root(path: near ^u8): u8
-    if path^ == '/'
-        path = path + 1
-        if path^ == 0
-            return 1
-        else
-            return 0
-        end
-    else
-        return 0
-    end
-end
-
-reentrant function path_is_current(path: near ^u8): u8
-    if path^ == '.'
-        path = path + 1
-        if path^ == 0
-            return 1
-        else
-            return 0
-        end
-    else
-        return 0
-    end
-end
-
-reentrant function path_is_parent(path: near ^u8): u8
-    if path^ == '.'
-        path = path + 1
-        if path^ == '.'
-            path = path + 1
-            if path^ == 0
-                return 1
-            else
-                return 0
-            end
-        else
-            return 0
-        end
-    else
-        return 0
-    end
-end
-
-reentrant function path_is_games(path: near ^u8): u8
-    if normalized_drive(path^) != 'G'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'A'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'M'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'E'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'S'
+    if path^ != '/'
         return 0
     end
     path = path + 1
     if path^ == 0
         return 1
-    else
+    end
+    return 0
+end
+
+reentrant function path_is_current(path: near ^u8): u8
+    if path^ != '.'
         return 0
     end
+    path = path + 1
+    if path^ == 0
+        return 1
+    end
+    return 0
+end
+
+reentrant function path_is_parent(path: near ^u8): u8
+    if path^ != '.'
+        return 0
+    end
+    path = path + 1
+    if path^ != '.'
+        return 0
+    end
+    path = path + 1
+    if path^ == 0
+        return 1
+    end
+    return 0
 end
 
 reentrant function path_is_root_games(path: near ^u8): u8
-    if path^ == '/'
-        path = path + 1
-        return path_is_games(path)
-    else
+    if path^ != '/'
         return 0
     end
+    path = path + 1
+    return name_is(path, "GAMES", "")
 end
 
 function is_drive_letter(value: u8): u8
@@ -560,23 +541,22 @@ function is_drive_letter(value: u8): u8
     drive = normalized_drive(value)
     if drive >= 'A' and drive <= 'Z'
         return 1
-    else
-        return 0
     end
+    return 0
 end
 
 function is_drive_select(): u8
     if line_len == 2 and is_drive_letter(command_buffer[0]) != 0 and command_buffer[1] == ':'
         return 1
-    else
-        return 0
     end
+    return 0
 end
 
 reentrant procedure dos_ensure_init()
-    if dos_initialized == 0
-        dos_init_drives()
+    if dos_initialized != 0
+        return
     end
+    dos_init_drives()
     return
 end
 
@@ -631,9 +611,8 @@ end
 function dos_drive_bios_device(drive: u8): u16
     if dos_drive_backend(drive) != DRIVE_BACKEND_BIOS_BLOCK
         return 0
-    else
-        return drive_bios_device[dos_drive_index(drive)]
     end
+    return drive_bios_device[dos_drive_index(drive)]
 end
 
 function dos_drive_partition_lba(drive: u8): u16
@@ -645,9 +624,8 @@ function dos_drive_block_status(drive: u8): u16
     dev = dos_drive_bios_device(drive)
     if dev == 0
         return 0
-    else
-        return bios_block_status(dev)
     end
+    return bios_block_status(dev)
 end
 
 function dos_drive_block_sector_count(drive: u8): u16
@@ -655,9 +633,8 @@ function dos_drive_block_sector_count(drive: u8): u16
     dev = dos_drive_bios_device(drive)
     if dev == 0
         return 0
-    else
-        return bios_block_sector_count(dev)
     end
+    return bios_block_sector_count(dev)
 end
 
 function dos_drive_read_blocks(drive: u8, lba: u16, count: u16, buffer: near ^u8): u16
@@ -680,29 +657,28 @@ function dos_volume_read_blocks(drive: u8, lba: u16, count: u16, buffer: near ^u
     dev = dos_drive_bios_device(drive)
     if dev == 0
         return DOS_BLOCK_ERR_NO_DEVICE
-    else
-        sector_lba = lba
-        remaining = count
-        while remaining != 0
-            if block_cache_valid != 0 and block_cache_drive == normalized_drive(drive) and block_cache_lba == sector_lba
-                copy_block_cache_to(buffer)
-            else
-                bios_block_set_lba(dev, sector_lba)
-                status = bios_block_read(dev, addr(block_sector_buffer))
-                if status != DOS_BLOCK_OK
-                    return status
-                end
-                block_cache_valid = 1
-                block_cache_drive = normalized_drive(drive)
-                block_cache_lba = sector_lba
-                copy_block_cache_to(buffer)
-            end
-            buffer = buffer + $0200
-            sector_lba = sector_lba + 1
-            remaining = remaining - 1
-        end
-        return DOS_BLOCK_OK
     end
+    sector_lba = lba
+    remaining = count
+    while remaining != 0
+        if block_cache_valid != 0 and block_cache_drive == normalized_drive(drive) and block_cache_lba == sector_lba
+            copy_block_cache_to(buffer)
+        else
+            bios_block_set_lba(dev, sector_lba)
+            status = bios_block_read(dev, addr(block_sector_buffer))
+            if status != DOS_BLOCK_OK
+                return status
+            end
+            block_cache_valid = 1
+            block_cache_drive = normalized_drive(drive)
+            block_cache_lba = sector_lba
+            copy_block_cache_to(buffer)
+        end
+        buffer = buffer + $0200
+        sector_lba = sector_lba + 1
+        remaining = remaining - 1
+    end
+    return DOS_BLOCK_OK
 end
 
 function dos_volume_write_blocks(drive: u8, lba: u16, count: u16, buffer: near ^u8): u16
@@ -713,25 +689,24 @@ function dos_volume_write_blocks(drive: u8, lba: u16, count: u16, buffer: near ^
     dev = dos_drive_bios_device(drive)
     if dev == 0
         return DOS_BLOCK_ERR_NO_DEVICE
-    else
-        sector_lba = lba
-        remaining = count
-        while remaining != 0
-            copy_block_to_cache(buffer)
-            bios_block_set_lba(dev, sector_lba)
-            status = bios_block_write(dev, addr(block_sector_buffer))
-            if status != DOS_BLOCK_OK
-                return status
-            end
-            block_cache_valid = 1
-            block_cache_drive = normalized_drive(drive)
-            block_cache_lba = sector_lba
-            buffer = buffer + $0200
-            sector_lba = sector_lba + 1
-            remaining = remaining - 1
-        end
-        return DOS_BLOCK_OK
     end
+    sector_lba = lba
+    remaining = count
+    while remaining != 0
+        copy_block_to_cache(buffer)
+        bios_block_set_lba(dev, sector_lba)
+        status = bios_block_write(dev, addr(block_sector_buffer))
+        if status != DOS_BLOCK_OK
+            return status
+        end
+        block_cache_valid = 1
+        block_cache_drive = normalized_drive(drive)
+        block_cache_lba = sector_lba
+        buffer = buffer + $0200
+        sector_lba = sector_lba + 1
+        remaining = remaining - 1
+    end
+    return DOS_BLOCK_OK
 end
 
 procedure copy_block_cache_to(buffer: near ^u8)
@@ -759,9 +734,8 @@ end
 function command_char_matches(index: u16, expected: u8): u8
     if normalized_drive(command_buffer[index]) == expected
         return 1
-    else
-        return 0
     end
+    return 0
 end
 
 function command_word_matches(word: near ^u8): u8
@@ -772,19 +746,18 @@ function command_word_matches(word: near ^u8): u8
     while ch != 0
         if index >= line_len
             return 0
-        elsif command_char_matches(index, ch) == 0
-            return 0
-        else
-            index = index + 1
-            word = word + 1
-            ch = word^
         end
+        if command_char_matches(index, ch) == 0
+            return 0
+        end
+        index = index + 1
+        word = word + 1
+        ch = word^
     end
     if index == line_len
         return 1
-    else
-        return 0
     end
+    return 0
 end
 
 function command_argument_matches(word: near ^u8): u8
@@ -795,19 +768,18 @@ function command_argument_matches(word: near ^u8): u8
     while ch != 0
         if index >= line_len
             return 0
-        elsif command_char_matches(index, ch) == 0
-            return 0
-        else
-            index = index + 1
-            word = word + 1
-            ch = word^
         end
+        if command_char_matches(index, ch) == 0
+            return 0
+        end
+        index = index + 1
+        word = word + 1
+        ch = word^
     end
     if index < line_len and command_buffer[index] == ' ' and index + 1 < line_len
         return 1
-    else
-        return 0
     end
+    return 0
 end
 
 function argument_start(short: near ^u8, long: near ^u8): u16
@@ -819,13 +791,12 @@ function argument_start(short: near ^u8, long: near ^u8): u16
             short = short + 1
         end
         return index + 1
-    else
-        while long^ != 0
-            index = index + 1
-            long = long + 1
-        end
-        return index + 1
     end
+    while long^ != 0
+        index = index + 1
+        long = long + 1
+    end
+    return index + 1
 end
 
 function argument_word_matches(index: u16, word: near ^u8): u8
@@ -834,19 +805,18 @@ function argument_word_matches(index: u16, word: near ^u8): u8
     while ch != 0
         if index >= line_len
             return 0
-        elsif command_char_matches(index, ch) == 0
-            return 0
-        else
-            index = index + 1
-            word = word + 1
-            ch = word^
         end
+        if command_char_matches(index, ch) == 0
+            return 0
+        end
+        index = index + 1
+        word = word + 1
+        ch = word^
     end
     if index == line_len
         return 1
-    else
-        return 0
     end
+    return 0
 end
 
 function argument_name_matches(index: u16, word: near ^u8): u8
@@ -855,227 +825,34 @@ function argument_name_matches(index: u16, word: near ^u8): u8
     while ch != 0
         if index >= line_len
             return 0
-        elsif command_char_matches(index, ch) == 0
-            return 0
-        else
-            index = index + 1
-            word = word + 1
-            ch = word^
         end
+        if command_char_matches(index, ch) == 0
+            return 0
+        end
+        index = index + 1
+        word = word + 1
+        ch = word^
     end
     if index == line_len
         return 1
-    elsif command_buffer[index] == ' '
-        return 1
-    else
-        return 0
     end
-end
-
-function is_help(): u8
-    if command_word_matches("H") != 0
+    if command_buffer[index] == ' '
         return 1
-    elsif command_word_matches("HELP") != 0
-        return 1
-    else
-        return 0
     end
-end
-
-function is_version(): u8
-    if command_word_matches("V") != 0
-        return 1
-    elsif command_word_matches("VER") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_dir(): u8
-    if command_word_matches("D") != 0
-        return 1
-    elsif command_word_matches("DIR") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_echo(): u8
-    if command_word_matches("E") != 0
-        return 1
-    elsif command_argument_matches("E") != 0
-        return 1
-    elsif command_word_matches("ECHO") != 0
-        return 1
-    elsif command_argument_matches("ECHO") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_status(): u8
-    if command_word_matches("S") != 0
-        return 1
-    elsif command_word_matches("STAT") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_pwd(): u8
-    if command_word_matches("PWD") != 0
-        return 1
-    elsif command_word_matches("P") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_map(): u8
-    if command_word_matches("M") != 0
-        return 1
-    elsif command_word_matches("MAP") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_mem(): u8
-    if command_word_matches("MEM") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_cls(): u8
-    if command_word_matches("C") != 0
-        return 1
-    elsif command_word_matches("CLS") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_prompt(): u8
-    if command_word_matches("PROMPT") != 0
-        return 1
-    elsif command_argument_matches("PROMPT") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_path(): u8
-    if command_word_matches("PATH") != 0
-        return 1
-    elsif command_argument_matches("PATH") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_peek(): u8
-    if command_argument_matches("PEEK") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_poke(): u8
-    if command_argument_matches("POKE") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_dump(): u8
-    if command_argument_matches("DUMP") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_fill(): u8
-    if command_argument_matches("FILL") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_blkinfo(): u8
-    if command_word_matches("BLK") != 0
-        return 1
-    elsif command_word_matches("BLKINFO") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_set(): u8
-    if command_word_matches("SET") != 0
-        return 1
-    elsif command_argument_matches("SET") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_type(): u8
-    if command_argument_matches("T") != 0
-        return 1
-    elsif command_argument_matches("TYPE") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_run(): u8
-    if command_argument_matches("R") != 0
-        return 1
-    elsif command_argument_matches("RUN") != 0
-        return 1
-    else
-        return 0
-    end
-end
-
-function is_cd(): u8
-    if command_word_matches("CD") != 0
-        return 1
-    elsif command_argument_matches("CD") != 0
-        return 1
-    else
-        return 0
-    end
+    return 0
 end
 
 function echo_start(): u16
     if command_word_matches("E") != 0
         return 1
-    elsif command_argument_matches("E") != 0
-        return 2
-    elsif command_word_matches("ECHO") != 0
-        return 4
-    else
-        return 5
     end
+    if command_argument_matches("E") != 0
+        return 2
+    end
+    if command_word_matches("ECHO") != 0
+        return 4
+    end
+    return 5
 end
 
 procedure read_line()
@@ -1085,32 +862,17 @@ procedure read_line()
     done = 0
     repeat
         ch = console_read()
-        if ch == '\r'
+        if ch == '\r' or ch == '\n'
             console_newline()
             done = 1
-        else
-            if ch == '\n'
-                console_newline()
-                done = 1
-            else
-                if ch == BACKSPACE
-                    erase_char()
-                else
-                    if ch == DELETE
-                        erase_char()
-                    else
-                        if ch == RECALL
-                            recall_history()
-                        else
-                            if line_len < LINE_LIMIT
-                                command_buffer[line_len] = ch
-                                line_len = line_len + 1
-                                console_write(ch)
-                            end
-                        end
-                    end
-                end
-            end
+        elsif ch == BACKSPACE or ch == DELETE
+            erase_char()
+        elsif ch == RECALL
+            recall_history()
+        elsif line_len < LINE_LIMIT
+            command_buffer[line_len] = ch
+            line_len = line_len + 1
+            console_write(ch)
         end
     until done != 0
     return
@@ -1118,15 +880,16 @@ end
 
 procedure recall_history()
     var index: u16
-    if line_len == 0
-        index = 0
-        while index != history_len
-            command_buffer[index] = history_buffer[index]
-            console_write(command_buffer[index])
-            index = index + 1
-        end
-        line_len = history_len
+    if line_len != 0
+        return
     end
+    index = 0
+    while index != history_len
+        command_buffer[index] = history_buffer[index]
+        console_write(command_buffer[index])
+        index = index + 1
+    end
+    line_len = history_len
     return
 end
 
@@ -1146,12 +909,12 @@ end
 
 procedure erase_char()
     if line_len == 0
-    else
-        line_len = line_len - 1
-        console_write(BACKSPACE)
-        console_write(' ')
-        console_write(BACKSPACE)
+        return
     end
+    line_len = line_len - 1
+    console_write(BACKSPACE)
+    console_write(' ')
+    console_write(BACKSPACE)
     return
 end
 
@@ -1160,65 +923,110 @@ procedure dispatch_line()
     code = command_code()
     if code == COMMAND_EMPTY
         return
-    elsif code == COMMAND_HELP
-        console_write_help()
-    elsif code == COMMAND_VERSION
-        console_write_version()
-    elsif code == COMMAND_DIR
-        write_dir()
-    elsif code == COMMAND_STATUS
-        write_status()
-    elsif code == COMMAND_PWD
-        write_path()
-    elsif code == COMMAND_MAP
-        write_memory_map()
-    elsif code == COMMAND_MEM
-        write_memory_status()
-    elsif code == COMMAND_CLS
-        console_clear()
-    elsif code == COMMAND_PROMPT
-        configure_prompt()
-    elsif code == COMMAND_PATH
-        configure_path()
-    elsif code == COMMAND_PEEK
-        peek_memory()
-    elsif code == COMMAND_POKE
-        poke_memory()
-    elsif code == COMMAND_DUMP
-        dump_memory()
-    elsif code == COMMAND_FILL
-        fill_memory()
-    elsif code == COMMAND_REBOOT
-        machine_reboot()
-    elsif code == COMMAND_BLKINFO
-        write_block_info()
-    elsif code == COMMAND_SET
-        configure_set()
-    elsif code == COMMAND_RUN
-        run_program()
-    elsif code == COMMAND_PROGRAM
-        run_bare_program()
-    elsif code == COMMAND_TYPE
-        type_file()
-    elsif code == COMMAND_CD
-        change_dir()
-    elsif code == COMMAND_ECHO
-        echo_line()
-    elsif code == COMMAND_DRIVE
-        select_drive()
-    else
-        console_write_unknown()
     end
+    if code == COMMAND_HELP
+        console_write_help()
+        return
+    end
+    if code == COMMAND_VERSION
+        console_write_version()
+        return
+    end
+    if code == COMMAND_DIR
+        write_dir()
+        return
+    end
+    if code == COMMAND_STATUS
+        write_status()
+        return
+    end
+    if code == COMMAND_PWD
+        write_path()
+        return
+    end
+    if code == COMMAND_MAP
+        write_memory_map()
+        return
+    end
+    if code == COMMAND_MEM
+        write_memory_status()
+        return
+    end
+    if code == COMMAND_CLS
+        console_clear()
+        return
+    end
+    if code == COMMAND_PROMPT
+        configure_prompt()
+        return
+    end
+    if code == COMMAND_PATH
+        configure_path()
+        return
+    end
+    if code == COMMAND_PEEK
+        peek_memory()
+        return
+    end
+    if code == COMMAND_POKE
+        poke_memory()
+        return
+    end
+    if code == COMMAND_DUMP
+        dump_memory()
+        return
+    end
+    if code == COMMAND_FILL
+        fill_memory()
+        return
+    end
+    if code == COMMAND_REBOOT
+        machine_reboot()
+        return
+    end
+    if code == COMMAND_BLKINFO
+        write_block_info()
+        return
+    end
+    if code == COMMAND_SET
+        configure_set()
+        return
+    end
+    if code == COMMAND_RUN
+        run_program()
+        return
+    end
+    if code == COMMAND_PROGRAM
+        run_bare_program()
+        return
+    end
+    if code == COMMAND_TYPE
+        type_file()
+        return
+    end
+    if code == COMMAND_CD
+        change_dir()
+        return
+    end
+    if code == COMMAND_ECHO
+        echo_line()
+        return
+    end
+    if code == COMMAND_DRIVE
+        select_drive()
+        return
+    end
+    console_write_unknown()
     return
 end
 
 procedure prompt()
     if prompt_mode == PROMPT_SHORT
         console_prompt_drive(current_drive)
-    else
-        write_path_prefix()
-        console_write_text("> ")
+        return
     end
+    write_path_prefix()
+    console_write_text("> ")
     return
 end
 
@@ -1259,59 +1067,24 @@ function hex_digit(value: u8): u8
     value = normalized_drive(value)
     if value >= '0' and value <= '9'
         return value - '0'
-    elsif value >= 'A' and value <= 'F'
-        return value - 'A' + 10
-    else
-        return $ff
     end
+    if value >= 'A' and value <= 'F'
+        return value - 'A' + 10
+    end
+    return $ff
 end
 
 function hex_argument_start(index: u16): u16
     if index < line_len and command_buffer[index] == '$'
         return index + 1
-    else
-        return index
     end
+    return index
 end
 
 function append_hex_digit(value: u16, digit: u8): u16
-    value = value + value
-    value = value + value
-    value = value + value
-    value = value + value
-    if digit == 0
-        return value
-    elsif digit == 1
-        return value + 1
-    elsif digit == 2
-        return value + 2
-    elsif digit == 3
-        return value + 3
-    elsif digit == 4
-        return value + 4
-    elsif digit == 5
-        return value + 5
-    elsif digit == 6
-        return value + 6
-    elsif digit == 7
-        return value + 7
-    elsif digit == 8
-        return value + 8
-    elsif digit == 9
-        return value + 9
-    elsif digit == 10
-        return value + 10
-    elsif digit == 11
-        return value + 11
-    elsif digit == 12
-        return value + 12
-    elsif digit == 13
-        return value + 13
-    elsif digit == 14
-        return value + 14
-    else
-        return value + 15
-    end
+    value = value << 4
+    value = value | u16(digit)
+    return value
 end
 
 function parse_hex_u16(index: u16): u16
@@ -1327,14 +1100,14 @@ function parse_hex_u16(index: u16): u16
         if digit == $ff
             parse_end = index
             return 0
-        elsif digits == 4
+        end
+        if digits == 4
             parse_end = index
             return 0
-        else
-            value = append_hex_digit(value, digit)
-            digits = digits + 1
-            index = index + 1
         end
+        value = append_hex_digit(value, digit)
+        digits = digits + 1
+        index = index + 1
     end
     parse_end = index
     parse_ok = digits
@@ -1354,18 +1127,18 @@ function parse_hex_u8(index: u16): u8
         if digit == $ff
             parse_end = index
             return 0
-        elsif digits == 2
+        end
+        if digits == 2
             parse_end = index
             return 0
-        else
-            value = value + value
-            value = value + value
-            value = value + value
-            value = value + value
-            value = value + digit
-            digits = digits + 1
-            index = index + 1
         end
+        value = value + value
+        value = value + value
+        value = value + value
+        value = value + value
+        value = value + digit
+        digits = digits + 1
+        index = index + 1
     end
     parse_end = index
     parse_ok = digits
@@ -1379,17 +1152,19 @@ procedure peek_memory()
     addr = parse_hex_u16(5)
     if parse_ok == 0
         console_write_unknown()
-    elsif parse_end != line_len
-        console_write_unknown()
-    else
-        ptr = addr
-        value = ptr^
-        console_write('$')
-        console_write_hex16(addr)
-        console_write_text(" = $")
-        console_write_hex8(value)
-        console_newline()
+        return
     end
+    if parse_end != line_len
+        console_write_unknown()
+        return
+    end
+    ptr = addr
+    value = ptr^
+    console_write('$')
+    console_write_hex16(addr)
+    console_write_text(" = $")
+    console_write_hex8(value)
+    console_newline()
     return
 end
 
@@ -1400,22 +1175,28 @@ procedure poke_memory()
     addr = parse_hex_u16(5)
     if parse_ok == 0
         console_write_unknown()
-    elsif parse_end >= line_len
-        console_write_unknown()
-    elsif command_buffer[parse_end] != ' '
-        console_write_unknown()
-    else
-        value = parse_hex_u8(parse_end + 1)
-        if parse_ok == 0
-            console_write_unknown()
-        elsif parse_end != line_len
-            console_write_unknown()
-        else
-            ptr = addr
-            ptr^ = value
-            console_write_text("OK\r\n")
-        end
+        return
     end
+    if parse_end >= line_len
+        console_write_unknown()
+        return
+    end
+    if command_buffer[parse_end] != ' '
+        console_write_unknown()
+        return
+    end
+    value = parse_hex_u8(parse_end + 1)
+    if parse_ok == 0
+        console_write_unknown()
+        return
+    end
+    if parse_end != line_len
+        console_write_unknown()
+        return
+    end
+    ptr = addr
+    ptr^ = value
+    console_write_text("OK\r\n")
     return
 end
 
@@ -1428,38 +1209,48 @@ procedure dump_memory()
     addr = parse_hex_u16(5)
     if parse_ok == 0
         console_write_unknown()
-    elsif parse_end >= line_len
-        console_write_unknown()
-    elsif command_buffer[parse_end] != ' '
-        console_write_unknown()
-    else
-        length = parse_hex_u8(parse_end + 1)
-        if parse_ok == 0
-            console_write_unknown()
-        elsif parse_end != line_len
-            console_write_unknown()
-        elsif length == 0
-            console_write_unknown()
-        elsif length > $10
-            console_write_unknown()
-        else
-            ptr = addr
-            count = 0
-            console_write('$')
-            console_write_hex16(addr)
-            console_write_text(": ")
-            while count != length
-                if count != 0
-                    console_write(' ')
-                end
-                value = ptr^
-                console_write_hex8(value)
-                ptr = ptr + 1
-                count = count + 1
-            end
-            console_newline()
-        end
+        return
     end
+    if parse_end >= line_len
+        console_write_unknown()
+        return
+    end
+    if command_buffer[parse_end] != ' '
+        console_write_unknown()
+        return
+    end
+    length = parse_hex_u8(parse_end + 1)
+    if parse_ok == 0
+        console_write_unknown()
+        return
+    end
+    if parse_end != line_len
+        console_write_unknown()
+        return
+    end
+    if length == 0
+        console_write_unknown()
+        return
+    end
+    if length > $10
+        console_write_unknown()
+        return
+    end
+    ptr = addr
+    count = 0
+    console_write('$')
+    console_write_hex16(addr)
+    console_write_text(": ")
+    while count != length
+        if count != 0
+            console_write(' ')
+        end
+        value = ptr^
+        console_write_hex8(value)
+        ptr = ptr + 1
+        count = count + 1
+    end
+    console_newline()
     return
 end
 
@@ -1472,40 +1263,54 @@ procedure fill_memory()
     addr = parse_hex_u16(5)
     if parse_ok == 0
         console_write_unknown()
-    elsif parse_end >= line_len
-        console_write_unknown()
-    elsif command_buffer[parse_end] != ' '
-        console_write_unknown()
-    else
-        length = parse_hex_u8(parse_end + 1)
-        if parse_ok == 0
-            console_write_unknown()
-        elsif parse_end >= line_len
-            console_write_unknown()
-        elsif command_buffer[parse_end] != ' '
-            console_write_unknown()
-        elsif length == 0
-            console_write_unknown()
-        elsif length > $10
-            console_write_unknown()
-        else
-            value = parse_hex_u8(parse_end + 1)
-            if parse_ok == 0
-                console_write_unknown()
-            elsif parse_end != line_len
-                console_write_unknown()
-            else
-                ptr = addr
-                count = 0
-                while count != length
-                    ptr^ = value
-                    ptr = ptr + 1
-                    count = count + 1
-                end
-                console_write_text("OK\r\n")
-            end
-        end
+        return
     end
+    if parse_end >= line_len
+        console_write_unknown()
+        return
+    end
+    if command_buffer[parse_end] != ' '
+        console_write_unknown()
+        return
+    end
+    length = parse_hex_u8(parse_end + 1)
+    if parse_ok == 0
+        console_write_unknown()
+        return
+    end
+    if parse_end >= line_len
+        console_write_unknown()
+        return
+    end
+    if command_buffer[parse_end] != ' '
+        console_write_unknown()
+        return
+    end
+    if length == 0
+        console_write_unknown()
+        return
+    end
+    if length > $10
+        console_write_unknown()
+        return
+    end
+    value = parse_hex_u8(parse_end + 1)
+    if parse_ok == 0
+        console_write_unknown()
+        return
+    end
+    if parse_end != line_len
+        console_write_unknown()
+        return
+    end
+    ptr = addr
+    count = 0
+    while count != length
+        ptr^ = value
+        ptr = ptr + 1
+        count = count + 1
+    end
+    console_write_text("OK\r\n")
     return
 end
 
@@ -1523,11 +1328,13 @@ end
 procedure dos_fs_write_dir()
     if dos_current_fs_driver() == FS_DRIVER_ROMFS
         romfs_write_dir()
-    elsif dos_current_fs_driver() == FS_DRIVER_FAT
-        fat_write_dir()
-    else
-        files_write_path_not_found()
+        return
     end
+    if dos_current_fs_driver() == FS_DRIVER_FAT
+        fat_write_dir()
+        return
+    end
+    files_write_path_not_found()
     return
 end
 
@@ -1594,19 +1401,30 @@ reentrant procedure fat_run_program(start: u16)
     status = exec_program(addr(fat_name))
     if status == DOS_ERR_FILE_NOT_FOUND
         files_write_program_not_found()
-    elsif status == EXEC_ERR_FORMAT
-        console_write_text("Not a program\r\n")
-    elsif status == EXEC_ERR_TOO_LARGE
-        console_write_text("Program too large\r\n")
-    elsif status == EXEC_ERR_IMPORTS
-        console_write_text("Program has unresolved imports\r\n")
-    elsif status == EXEC_ERR_BASE_PAGE
-        console_write_text("Not enough base page\r\n")
-    elsif status != 0
-        console_write_text("Exit status $")
-        console_write_hex8(u8(status))
-        console_newline()
+        return
     end
+    if status == EXEC_ERR_FORMAT
+        console_write_text("Not a program\r\n")
+        return
+    end
+    if status == EXEC_ERR_TOO_LARGE
+        console_write_text("Program too large\r\n")
+        return
+    end
+    if status == EXEC_ERR_IMPORTS
+        console_write_text("Program has unresolved imports\r\n")
+        return
+    end
+    if status == EXEC_ERR_BASE_PAGE
+        console_write_text("Not enough base page\r\n")
+        return
+    end
+    if status == 0
+        return
+    end
+    console_write_text("Exit status $")
+    console_write_hex8(u8(status))
+    console_newline()
     return
 end
 
@@ -1641,46 +1459,28 @@ end
 procedure romfs_write_dir()
     if current_dir == DIR_ROOT
         files_write_root_dir()
-    else
-        files_write_games_dir()
+        return
     end
+    files_write_games_dir()
     return
 end
 
 reentrant function romfs_search_next(dta: near ^u8): u16
+    var i: u8
+    i = dos_search_next
     if dos_search_dir == DIR_ROOT
-        if dos_search_next == 0
-            dos_search_next = 1
-            romfs_write_search_entry(dta, "README.TXT", 49, 0)
-            return DOS_OK
-        elsif dos_search_next == 1
-            dos_search_next = 2
-            romfs_write_search_entry(dta, "SYSTEM.TXT", 65, 0)
-            return DOS_OK
-        elsif dos_search_next == 2
-            dos_search_next = 3
-            romfs_write_search_entry(dta, "HELLO.PRG", 37, 0)
-            return DOS_OK
-        elsif dos_search_next == 3
-            dos_search_next = 4
-            romfs_write_search_entry(dta, "GAMES", 0, GEMDOS_ATTR_DIR)
-            return DOS_OK
-        else
+        if i >= ROMFS_ROOT_COUNT
             return DOS_ERR_NO_MORE_FILES
         end
+        romfs_write_search_entry(dta, ROMFS_ROOT[i].name, ROMFS_ROOT[i].size, ROMFS_ROOT[i].attr)
     else
-        if dos_search_next == 0
-            dos_search_next = 1
-            romfs_write_search_entry(dta, "DEMO.TXT", 48, 0)
-            return DOS_OK
-        elsif dos_search_next == 1
-            dos_search_next = 2
-            romfs_write_search_entry(dta, "DEMO.PRG", 36, 0)
-            return DOS_OK
-        else
+        if i >= ROMFS_GAMES_COUNT
             return DOS_ERR_NO_MORE_FILES
         end
+        romfs_write_search_entry(dta, ROMFS_GAMES[i].name, ROMFS_GAMES[i].size, ROMFS_GAMES[i].attr)
     end
+    dos_search_next = i + 1
+    return DOS_OK
 end
 
 reentrant procedure romfs_write_search_entry(dta: near ^u8, name: near ^u8, size: u16, attr: u8)
@@ -1748,20 +1548,20 @@ procedure write_block_info()
     console_write_hex16(sectors)
     console_newline()
     read_status = dos_drive_read_blocks(current_drive, 0, 1, addr(block_sector_buffer))
-    if read_status == DOS_BLOCK_OK
-        console_write_text("Sector0:")
-        index = 0
-        while index != 16
-            console_write(' ')
-            console_write_hex8(block_sector_buffer[index])
-            index = index + 1
-        end
-        console_newline()
-    else
+    if read_status != DOS_BLOCK_OK
         console_write_text("Read error $")
         console_write_hex8(u8(read_status))
         console_newline()
+        return
     end
+    console_write_text("Sector0:")
+    index = 0
+    while index != 16
+        console_write(' ')
+        console_write_hex8(block_sector_buffer[index])
+        index = index + 1
+    end
+    console_newline()
     return
 end
 
@@ -1769,9 +1569,9 @@ procedure write_prompt_mode()
     console_write_text("Prompt: ")
     if prompt_mode == PROMPT_SHORT
         console_write_text("SHORT\r\n")
-    else
-        console_write_text("FULL\r\n")
+        return
     end
+    console_write_text("FULL\r\n")
     return
 end
 
@@ -1779,20 +1579,21 @@ procedure write_path_mode()
     console_write_text("PATH=")
     if path_mode == PATH_CURRENT
         console_write_text(".\r\n")
-    else
-        console_write_text("/\r\n")
+        return
     end
+    console_write_text("/\r\n")
     return
 end
 
 procedure configure_prompt()
     if command_word_matches("PROMPT") != 0
         write_prompt_mode()
-    else
-        if set_prompt_mode(7) == 0
-            console_write_unknown()
-        end
+        return
     end
+    if set_prompt_mode(7) != 0
+        return
+    end
+    console_write_unknown()
     return
 end
 
@@ -1800,32 +1601,35 @@ function set_prompt_mode(index: u16): u8
     if argument_word_matches(index, "SHORT") != 0
         prompt_mode = PROMPT_SHORT
         return 1
-    elsif argument_word_matches(index, "FULL") != 0
-        prompt_mode = PROMPT_FULL
-        return 1
-    else
+    end
+    if argument_word_matches(index, "FULL") == 0
         return 0
     end
+    prompt_mode = PROMPT_FULL
+    return 1
 end
 
 function set_path_mode(index: u16): u8
     if argument_word_matches(index, ".") != 0
         path_mode = PATH_CURRENT
         return 1
-    elsif argument_word_matches(index, "/") != 0
-        path_mode = PATH_ROOT
-        return 1
-    else
+    end
+    if argument_word_matches(index, "/") == 0
         return 0
     end
+    path_mode = PATH_ROOT
+    return 1
 end
 
 procedure configure_path()
     if command_word_matches("PATH") != 0
         write_path_mode()
-    elsif set_path_mode(5) == 0
-        console_write_unknown()
+        return
     end
+    if set_path_mode(5) != 0
+        return
+    end
+    console_write_unknown()
     return
 end
 
@@ -1847,32 +1651,40 @@ procedure write_environment()
 end
 
 function set_drive_from_argument(index: u16): u8
-    if line_len == index + 1 and is_drive_letter(command_buffer[index]) != 0
-        current_drive = normalized_drive(command_buffer[index])
-        return 1
-    else
+    if not (line_len == index + 1 and is_drive_letter(command_buffer[index]) != 0)
         return 0
     end
+    current_drive = normalized_drive(command_buffer[index])
+    return 1
 end
 
 procedure configure_set()
     if command_word_matches("SET") != 0
         write_environment()
-    elsif argument_name_matches(4, "PROMPT") != 0
-        if set_prompt_mode(11) == 0
-            console_write_unknown()
-        end
-    elsif argument_name_matches(4, "DRIVE") != 0
-        if set_drive_from_argument(10) == 0
-            console_write_unknown()
-        end
-    elsif argument_name_matches(4, "PATH") != 0
-        if set_path_mode(9) == 0
-            console_write_unknown()
-        end
-    else
-        console_write_unknown()
+        return
     end
+    if argument_name_matches(4, "PROMPT") != 0
+        if set_prompt_mode(11) != 0
+            return
+        end
+        console_write_unknown()
+        return
+    end
+    if argument_name_matches(4, "DRIVE") != 0
+        if set_drive_from_argument(10) != 0
+            return
+        end
+        console_write_unknown()
+        return
+    end
+    if argument_name_matches(4, "PATH") == 0
+        console_write_unknown()
+        return
+    end
+    if set_path_mode(9) != 0
+        return
+    end
+    console_write_unknown()
     return
 end
 
@@ -1885,68 +1697,68 @@ end
 function dos_fs_type_file_code(start: u16): u8
     if dos_current_fs_driver() == FS_DRIVER_ROMFS
         return romfs_type_file_code(start)
-    else
-        return FILE_UNKNOWN
     end
+    return FILE_UNKNOWN
 end
 
 reentrant function dos_fs_file_code(path: near ^u8): u8
     if dos_current_fs_driver() == FS_DRIVER_ROMFS
         return romfs_file_code(path)
-    else
-        return FILE_UNKNOWN
     end
+    return FILE_UNKNOWN
 end
 
 reentrant function romfs_file_code(path: near ^u8): u8
     if path^ == '/'
         path = path + 1
         return romfs_root_file_code(path)
-    elsif current_dir == DIR_ROOT
-        return romfs_root_file_code(path)
-    else
-        return romfs_games_file_code(path)
     end
+    if current_dir == DIR_ROOT
+        return romfs_root_file_code(path)
+    end
+    return romfs_games_file_code(path)
 end
 
 reentrant function romfs_root_file_code(path: near ^u8): u8
-    if file_name_is_readme(path) != 0
+    if name_is(path, "README", "TXT")
         return FILE_README
-    elsif file_name_is_system(path) != 0
-        return FILE_SYSTEM
-    else
-        return FILE_UNKNOWN
     end
+    if name_is(path, "SYSTEM", "TXT")
+        return FILE_SYSTEM
+    end
+    return FILE_UNKNOWN
 end
 
 reentrant function romfs_games_file_code(path: near ^u8): u8
-    if file_name_is_demo(path) != 0
+    if name_is(path, "DEMO", "TXT")
         return FILE_DEMO
-    else
-        return FILE_UNKNOWN
     end
+    return FILE_UNKNOWN
 end
 
 function romfs_type_file_code(start: u16): u8
     if current_dir == DIR_ROOT
         if argument_word_matches(start, "README.TXT") != 0
             return FILE_README
-        elsif argument_word_matches(start, "README") != 0
-            return FILE_README
-        elsif argument_word_matches(start, "SYSTEM.TXT") != 0
-            return FILE_SYSTEM
-        elsif argument_word_matches(start, "SYSTEM") != 0
-            return FILE_SYSTEM
-        else
-            return FILE_UNKNOWN
         end
-    elsif argument_word_matches(start, "DEMO.TXT") != 0
-        return FILE_DEMO
-    elsif argument_word_matches(start, "DEMO") != 0
-        return FILE_DEMO
-    else
+        if argument_word_matches(start, "README") != 0
+            return FILE_README
+        end
+        if argument_word_matches(start, "SYSTEM.TXT") != 0
+            return FILE_SYSTEM
+        end
+        if argument_word_matches(start, "SYSTEM") != 0
+            return FILE_SYSTEM
+        end
         return FILE_UNKNOWN
     end
+    if argument_word_matches(start, "DEMO.TXT") != 0
+        return FILE_DEMO
+    end
+    if argument_word_matches(start, "DEMO") != 0
+        return FILE_DEMO
+    end
+    return FILE_UNKNOWN
 end
 
 reentrant function dos_alloc_handle(driver: u8, code: u8): u16
@@ -1970,55 +1782,57 @@ end
 reentrant function dos_handle_slot_valid(handle: u16): u8
     if handle < DOS_HANDLE_BASE
         return 0
-    elsif handle >= DOS_HANDLE_LIMIT
-        return 0
-    else
-        return 1
     end
+    if handle >= DOS_HANDLE_LIMIT
+        return 0
+    end
+    return 1
 end
 
 reentrant function dos_file_size(driver: u8, code: u8): u16
     if driver == FS_DRIVER_ROMFS
         return romfs_file_size(code)
-    elsif driver == FS_DRIVER_FAT
-        return fat_file_size(u16(dos_current_read_slot))
-    else
-        return 0
     end
+    if driver == FS_DRIVER_FAT
+        return fat_file_size(u16(dos_current_read_slot))
+    end
+    return 0
 end
 
 reentrant function dos_file_byte(driver: u8, code: u8, offset: u16): u8
     if driver == FS_DRIVER_ROMFS
         return romfs_file_byte(code, offset)
-    elsif driver == FS_DRIVER_FAT
-        return fat_file_byte(u16(dos_current_read_slot), offset)
-    else
-        return 0
     end
+    if driver == FS_DRIVER_FAT
+        return fat_file_byte(u16(dos_current_read_slot), offset)
+    end
+    return 0
 end
 
 reentrant function romfs_file_size(code: u8): u16
     if code == FILE_README
         return 49
-    elsif code == FILE_SYSTEM
-        return 65
-    elsif code == FILE_DEMO
-        return 48
-    else
-        return 0
     end
+    if code == FILE_SYSTEM
+        return 65
+    end
+    if code == FILE_DEMO
+        return 48
+    end
+    return 0
 end
 
 reentrant function romfs_file_byte(code: u8, offset: u16): u8
     if code == FILE_README
         return readme_byte(offset)
-    elsif code == FILE_SYSTEM
-        return system_byte(offset)
-    elsif code == FILE_DEMO
-        return demo_byte(offset)
-    else
-        return 0
     end
+    if code == FILE_SYSTEM
+        return system_byte(offset)
+    end
+    if code == FILE_DEMO
+        return demo_byte(offset)
+    end
+    return 0
 end
 
 reentrant function readme_byte(offset: u16): u8
@@ -2041,157 +1855,41 @@ reentrant function string_byte_at(text: near ^u8, offset: u16): u8
     return text^
 end
 
-reentrant function file_name_is_readme(path: near ^u8): u8
-    if normalized_drive(path^) != 'R'
-        return 0
+# Whether `path` names `base`, or `base.ext` when `ext` is not empty,
+# ignoring case.
+reentrant function name_is(path: near ^u8, base: near ^u8, ext: near ^u8): u8
+    while base^
+        if normalized_drive(path^) != base^
+            return 0
+        end
+        path = path + 1
+        base = base + 1
     end
-    path = path + 1
-    if normalized_drive(path^) != 'E'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'A'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'D'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'M'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'E'
-        return 0
-    end
-    path = path + 1
     if path^ == 0
         return 1
-    elsif path^ == '.'
-        path = path + 1
-        if normalized_drive(path^) != 'T'
+    end
+    if path^ != '.' or ext^ == 0
+        return 0
+    end
+    path = path + 1
+    while ext^
+        if normalized_drive(path^) != ext^
             return 0
         end
         path = path + 1
-        if normalized_drive(path^) != 'X'
-            return 0
-        end
-        path = path + 1
-        if normalized_drive(path^) != 'T'
-            return 0
-        end
-        path = path + 1
-        if path^ == 0
-            return 1
-        else
-            return 0
-        end
-    else
-        return 0
+        ext = ext + 1
     end
-end
-
-reentrant function file_name_is_system(path: near ^u8): u8
-    if normalized_drive(path^) != 'S'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'Y'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'S'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'T'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'E'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'M'
-        return 0
-    end
-    path = path + 1
     if path^ == 0
         return 1
-    elsif path^ == '.'
-        path = path + 1
-        if normalized_drive(path^) != 'T'
-            return 0
-        end
-        path = path + 1
-        if normalized_drive(path^) != 'X'
-            return 0
-        end
-        path = path + 1
-        if normalized_drive(path^) != 'T'
-            return 0
-        end
-        path = path + 1
-        if path^ == 0
-            return 1
-        else
-            return 0
-        end
-    else
-        return 0
     end
-end
-
-reentrant function file_name_is_demo(path: near ^u8): u8
-    if normalized_drive(path^) != 'D'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'E'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'M'
-        return 0
-    end
-    path = path + 1
-    if normalized_drive(path^) != 'O'
-        return 0
-    end
-    path = path + 1
-    if path^ == 0
-        return 1
-    elsif path^ == '.'
-        path = path + 1
-        if normalized_drive(path^) != 'T'
-            return 0
-        end
-        path = path + 1
-        if normalized_drive(path^) != 'X'
-            return 0
-        end
-        path = path + 1
-        if normalized_drive(path^) != 'T'
-            return 0
-        end
-        path = path + 1
-        if path^ == 0
-            return 1
-        else
-            return 0
-        end
-    else
-        return 0
-    end
+    return 0
 end
 
 function run_program_code(): u8
     if dos_current_fs_driver() == FS_DRIVER_ROMFS
         return romfs_run_program_code()
-    else
-        return FILE_UNKNOWN
     end
+    return FILE_UNKNOWN
 end
 
 function bare_program_code(): u8
@@ -2207,15 +1905,14 @@ function bare_program_code(): u8
     end
     if code != FILE_UNKNOWN
         return code
-    elsif path_mode == PATH_ROOT
-        if dos_current_fs_driver() == FS_DRIVER_ROMFS
-            return romfs_root_program_code_at(0)
-        else
-            return FILE_UNKNOWN
-        end
-    else
+    end
+    if path_mode != PATH_ROOT
         return FILE_UNKNOWN
     end
+    if dos_current_fs_driver() == FS_DRIVER_ROMFS
+        return romfs_root_program_code_at(0)
+    end
+    return FILE_UNKNOWN
 end
 
 function romfs_run_program_code(): u8
@@ -2227,23 +1924,24 @@ end
 function romfs_program_code_at(start: u16): u8
     if current_dir == DIR_ROOT
         return romfs_root_program_code_at(start)
-    elsif argument_word_matches(start, "DEMO.PRG") != 0
-        return PROGRAM_DEMO
-    elsif argument_word_matches(start, "DEMO") != 0
-        return PROGRAM_DEMO
-    else
-        return FILE_UNKNOWN
     end
+    if argument_word_matches(start, "DEMO.PRG") != 0
+        return PROGRAM_DEMO
+    end
+    if argument_word_matches(start, "DEMO") != 0
+        return PROGRAM_DEMO
+    end
+    return FILE_UNKNOWN
 end
 
 function romfs_root_program_code_at(start: u16): u8
     if argument_word_matches(start, "HELLO.PRG") != 0
         return PROGRAM_HELLO
-    elsif argument_word_matches(start, "HELLO") != 0
-        return PROGRAM_HELLO
-    else
-        return FILE_UNKNOWN
     end
+    if argument_word_matches(start, "HELLO") != 0
+        return PROGRAM_HELLO
+    end
+    return FILE_UNKNOWN
 end
 
 procedure run_program_code_value(code: u8)
@@ -2254,11 +1952,13 @@ end
 procedure romfs_run_program_code_value(code: u8)
     if code == PROGRAM_HELLO
         files_run_hello()
-    elsif code == PROGRAM_DEMO
-        files_run_demo()
-    else
-        files_write_program_not_found()
+        return
     end
+    if code == PROGRAM_DEMO
+        files_run_demo()
+        return
+    end
+    files_write_program_not_found()
     return
 end
 
@@ -2293,37 +1993,47 @@ procedure type_file()
     code = type_file_code()
     if dos_current_fs_driver() == FS_DRIVER_ROMFS
         romfs_type_file_code_value(code)
-    else
-        files_write_not_found()
+        return
     end
+    files_write_not_found()
     return
 end
 
 procedure romfs_type_file_code_value(code: u8)
     if code == FILE_README
         files_type_readme()
-    elsif code == FILE_SYSTEM
-        files_type_system()
-    elsif code == FILE_DEMO
-        files_type_demo()
-    else
-        files_write_not_found()
+        return
     end
+    if code == FILE_SYSTEM
+        files_type_system()
+        return
+    end
+    if code == FILE_DEMO
+        files_type_demo()
+        return
+    end
+    files_write_not_found()
     return
 end
 
 procedure change_dir()
     if line_len == 2
         init_path()
-    elsif argument_word_matches(3, "/") != 0
-        init_path()
-    elsif argument_word_matches(3, "..") != 0
-        init_path()
-    elsif argument_word_matches(3, "GAMES") != 0
-        set_games_path()
-    else
-        files_write_path_not_found()
+        return
     end
+    if argument_word_matches(3, "/") != 0
+        init_path()
+        return
+    end
+    if argument_word_matches(3, "..") != 0
+        init_path()
+        return
+    end
+    if argument_word_matches(3, "GAMES") != 0
+        set_games_path()
+        return
+    end
+    files_write_path_not_found()
     return
 end
 
@@ -2337,10 +2047,8 @@ procedure echo_line()
     var index: u16
     index = echo_start()
     if index == line_len
-    else
-        if command_buffer[index] == ' '
-            index = index + 1
-        end
+    elsif command_buffer[index] == ' '
+        index = index + 1
     end
     while index != line_len
         console_write(command_buffer[index])
