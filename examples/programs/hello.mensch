@@ -1,0 +1,54 @@
+module Hello
+
+# A Hellord program: build it with
+#   cargo run --bin mensch-mega65-program -- -o HELLO.PRG examples/programs/hello.mensch
+# and run it from the SD card with `S:` then `HELLO` (or `RUN HELLO.PRG`).
+# Programs reach the kernel only through the GEMDOS/BIOS trap table.
+
+const GEMDOS = $01
+const CCONIN = $0001
+const CCONOUT = $0002
+
+procedure put(ch: u8)
+    var ignored: u16
+    ignored = trap(GEMDOS, CCONOUT, u16(ch), 0)
+    return
+end
+
+procedure say(text: near ^u8)
+    while text^ != 0
+        put(text^)
+        text = text + 1
+    end
+    return
+end
+
+procedure say_hex(value: u8)
+    var digit: u8
+    digit = value >> 4
+    if digit < 10
+        put('0' + digit)
+    else
+        put('A' + digit - 10)
+    end
+    digit = value & $0f
+    if digit < 10
+        put('0' + digit)
+    else
+        put('A' + digit - 10)
+    end
+    return
+end
+
+export function main(): u8
+    var value: u8
+    say("Hello from a loaded program!\r\n")
+    value = 3
+    while value != 18
+        say("  $")
+        say_hex(value)
+        say("\r\n")
+        value = value + 3
+    end
+    return 0
+end

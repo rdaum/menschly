@@ -488,7 +488,8 @@ assignment with the 65816 backend but lowers everything byte by byte:
   and released by two runtime routines in the kernel's `CRT0`, called with
   `Z` = the local byte count `F` (omitted when it is zero):
   `ldz #F / jsr __m65_enter` first thing in the routine, and
-  `ldz #F / jsr __m65_leave` just before its `rts`/`rtn`/`rti`. Both use
+  `ldz #F / jsr __m65_leave` just before its `rts`/`rtn`/`rti`. They live in
+  `mega65::RUNTIME`, linked into the kernel and into every program. Both use
   `__m65_acc` and `__m65_ptr` as scratch, and `__m65_leave` keeps the
   A/X/Y result intact.
 - Generated code is cleaned up by `optimize_45gs02` (dead-code elimination,
@@ -512,9 +513,11 @@ file at linear `$20000`; a two-stage loader in the `$E000` ROM window copies
 the kernel to the same addresses in bank 0 and maps the ROMs out:
 
 ```text
-$0002-$00ff   base page
+$0002-$00ff   base page: the kernel's, then the running program's
 $0200-$1fff   free (the console screen is at $0400)
-$2000-$cfff   kernel code, data and BSS; the 16-bit stack grows down from $cfff
+$2000-...     kernel code, data and BSS
+...-$c7ff     program area (from the end of the kernel's BSS)
+$c800-$cfff   16-bit stack, growing down from $cfff
 $d000-$dfff   I/O
 $ff00-$ff1f   trap vector table
 $fffa-$ffff   NMI / RESET / IRQ vectors
@@ -549,6 +552,33 @@ sectors and clusters, opening 8.3 names case-insensitively, reading through
 cluster chains, and in-place writes within a file's existing size. File
 offsets are 16-bit for now, so reads stop at 64 KiB, and subdirectories are
 not yet supported.
+
+### Hellord programs (MEGA65)
+
+On a FAT drive, `RUN NAME` or just `NAME` loads and runs `NAME.PRG` (the
+extension is added when the name has none) with `hellord-exec.mensch`.
+Programs are relocatable o65 files ("small" mode, byte-wise relocation)
+built by `mensch-mega65-program` (`mega65::build_program`):
+
+- The whole file is read into the program area and relocated in place: text
+  and data stay where they were read, BSS follows the data (over the
+  relocation tables), and the base-page segment is placed in the base page
+  the kernel leaves free. BSS and base page are cleared.
+- The loader calls the exported `main` (else the start of the text) with
+  `JSR`, Z = 0 and the kernel's stack; `A` on return is the exit status,
+  which `RUN` reports when it is non-zero.
+- Programs link their own copy of the runtime (`mega65::RUNTIME`: the
+  base-page registers and `__m65_enter`/`__m65_leave`), so they never share
+  scratch state with the kernel. They reach the kernel only through the trap
+  table, so a file with undefined references is rejected.
+- Program code gets a base-page budget of `PROGRAM_BASE_PAGE_BUDGET` bytes
+  (plus the 12 runtime bytes); the loader rejects a program whose base-page
+  segment does not fit.
+
+The kernel side needs four machine services, provided by the MEGA65
+startup code: `machine_program_start`, `machine_program_end`,
+`machine_base_page_start`, and `machine_call(entry)` to enter the program.
+The x65-alike's machine driver stubs `exec_program` out for now.
 
 Mensch's `addr(global)` builtin gives a near byte pointer to a global
 variable, so buffers such as the DOS sector buffer live in BSS instead of at

@@ -534,6 +534,33 @@ export reentrant function fat_file_byte(slot: u16, offset: u16): u8
     return fat_sector[offset & $01ff]
 end
 
+# Copies up to `count` bytes of the file in `slot` starting at `offset` into
+# `buffer`, a sector at a time. Returns the number of bytes read.
+export reentrant function fat_read(slot: u16, offset: u16, count: u16, buffer: near ^u8): u16
+    var done: u16
+    var size: u16
+    var position: u16
+    size = fat_file_size(slot)
+    done = 0
+    while done != count and offset < size
+        if locate(slot, offset) == 0
+            return done
+        end
+        if read_sector() != FAT_OK
+            return done
+        end
+        position = offset & $01ff
+        while position != 512 and done != count and offset < size
+            buffer^ = fat_sector[position]
+            buffer = buffer + 1
+            position = position + 1
+            offset = offset + 1
+            done = done + 1
+        end
+    end
+    return done
+end
+
 # Overwrites up to `count` bytes of the file in `slot` starting at `offset`,
 # stopping at the end of the file. Returns the number of bytes written.
 export reentrant function fat_write(slot: u16, offset: u16, count: u16, buffer: near ^u8): u16

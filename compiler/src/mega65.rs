@@ -10,10 +10,12 @@
 //! file, so loading is a straight copy:
 //!
 //! ```text
-//! $0002-$00ff   base page (runtime registers, direct-page variables)
+//! $0002-$00ff   base page (runtime registers, direct-page variables), then
+//!               the running program's base-page segment
 //! $0200-$1fff   free low RAM (screen, buffers, test output)
-//! $2000-$cfff   kernel image: code, data, then BSS; 16-bit stack grows
-//!               down from $cfff towards the end of BSS
+//! $2000-...     kernel image: code, data, then BSS
+//! ...-$c7ff     program area for loaded o65 programs (see `build_program`)
+//! $c800-$cfff   16-bit stack, growing down from $cfff
 //! $d000-$dfff   I/O
 //! $e000-$feff   stage-1 loader (ROM window), copied to RAM by stage 2
 //! $ff00-$ff1f   trap vector table
@@ -38,25 +40,101 @@ pub const MAIN_RAM_SIZE: usize = 0x60000;
 /// Linear address where the hypervisor loads the ROM file.
 pub const ROM_LOAD_ADDRESS: u32 = 0x20000;
 
-/// Startup code: the two-stage loader, base-page and BSS clearing,
-/// `jsr main`, then exit through Xemu's testing register with `main`'s `A`
-/// as the status.
-pub const CRT0: &str = r#".setcpu "45GS02"
+/// Runtime shared by the kernel and loadable programs: the base-page
+/// registers generated code uses and the stack-frame routines (see
+/// `lower_45gs02`). Each program links its own copy, so a program and the
+/// kernel never share scratch state.
+pub const RUNTIME: &str = r#".setcpu "45GS02"
 .exportzp __m65_acc, __m65_ptr, __m65_farp, __m65_fp
 .export __m65_enter, __m65_leave
-.import main
-.import __BSS_RUN__, __BSS_SIZE__
-
-__m65_stack_top = $cfff
-__m65_image_start = $2000
-__m65_image_end = $d000
-__m65_rom_linear = $020000
 
 .segment "ZEROPAGE"
 __m65_acc: .res 4
 __m65_ptr: .res 2
 __m65_farp: .res 4
 __m65_fp: .res 2
+
+.segment "CODE"
+; Stack frames (see lower_45gs02). A routine with a frame starts with
+; `ldz #F / jsr __m65_enter` (A, X and Y are free there): this pushes the
+; caller's fp and F zeroed local bytes beneath the routine's return address,
+; points fp at the new frame and returns with Z = 0.
+__m65_enter:
+	pla                 ; our return address (the JSR's last byte)
+	sta __m65_ptr
+	pla
+	sta __m65_ptr+1
+	lda __m65_fp+1
+	pha
+	lda __m65_fp
+	pha
+	tza
+	tax
+	beq @framed
+	lda #$00
+@zero:
+	pha
+	dex
+	bne @zero
+@framed:
+	tsx
+	stx __m65_fp
+	tsy
+	sty __m65_fp+1
+	ldz #$00
+	inw __m65_ptr
+	jmp (__m65_ptr)
+
+; The matching epilogue: `ldz #F / jsr __m65_leave`, with the routine's result
+; in A/X/Y. Drops the locals and restores the caller's fp, returning with
+; A/X/Y intact and Z = 0; the routine then returns with RTS, RTN or RTI.
+__m65_leave:
+	sta __m65_acc
+	stx __m65_acc+1
+	sty __m65_acc+2
+	pla
+	sta __m65_ptr
+	pla
+	sta __m65_ptr+1
+	tza
+	tax
+	beq @dropped
+@drop:
+	pla
+	dex
+	bne @drop
+@dropped:
+	pla
+	sta __m65_fp
+	pla
+	sta __m65_fp+1
+	inw __m65_ptr
+	lda __m65_acc
+	ldx __m65_acc+1
+	ldy __m65_acc+2
+	ldz #$00
+	jmp (__m65_ptr)
+
+"#;
+
+/// Startup code: the two-stage loader, base-page and BSS clearing,
+/// `jsr main`, then exit through Xemu's testing register with `main`'s `A`
+/// as the status.
+pub const CRT0: &str = r#".setcpu "45GS02"
+.importzp __m65_acc, __m65_ptr, __m65_farp, __m65_fp
+.import __m65_enter, __m65_leave
+.import main
+.import __BSS_RUN__, __BSS_SIZE__, __ZEROPAGE_RUN__, __ZEROPAGE_SIZE__
+.export machine_program_start, machine_program_end, machine_base_page_start
+.export machine_call
+
+__m65_stack_top = $cfff
+__m65_image_start = $2000
+__m65_image_end = $d000
+__m65_rom_linear = $020000
+; Programs load between the end of the kernel's BSS and this address; the
+; 2 KiB above it are the stack.
+__m65_program_end = $c800
 
 ; Copy `count` bytes from linear `source` to bank-0 `dest`. Neither range
 ; may cross a 64 KiB boundary (only the low word of the source advances).
@@ -154,64 +232,39 @@ __m65_stage2:
 	bra @hang
 
 .segment "CODE"
-; Stack frames (see lower_45gs02). A routine with a frame starts with
-; `ldz #F / jsr __m65_enter` (A, X and Y are free there): this pushes the
-; caller's fp and F zeroed local bytes beneath the routine's return address,
-; points fp at the new frame and returns with Z = 0.
-__m65_enter:
-	pla                 ; our return address (the JSR's last byte)
-	sta __m65_ptr
-	pla
-	sta __m65_ptr+1
-	lda __m65_fp+1
-	pha
-	lda __m65_fp
-	pha
-	tza
-	tax
-	beq @framed
-	lda #$00
-@zero:
-	pha
-	dex
-	bne @zero
-@framed:
-	tsx
-	stx __m65_fp
-	tsy
-	sty __m65_fp+1
-	ldz #$00
-	inw __m65_ptr
-	jmp (__m65_ptr)
+; Machine services for the program loader (hellord-exec.mensch).
+; First byte of free RAM after the kernel.
+machine_program_start:
+	lda #<(__BSS_RUN__ + __BSS_SIZE__)
+	ldx #>(__BSS_RUN__ + __BSS_SIZE__)
+	rts
 
-; The matching epilogue: `ldz #F / jsr __m65_leave`, with the routine's result
-; in A/X/Y. Drops the locals and restores the caller's fp, returning with
-; A/X/Y intact and Z = 0; the routine then returns with RTS, RTN or RTI.
-__m65_leave:
-	sta __m65_acc
-	stx __m65_acc+1
-	sty __m65_acc+2
-	pla
+; End (exclusive) of the program area.
+machine_program_end:
+	lda #<__m65_program_end
+	ldx #>__m65_program_end
+	rts
+
+; First base-page byte the kernel does not use.
+machine_base_page_start:
+	lda #<(__ZEROPAGE_RUN__ + __ZEROPAGE_SIZE__)
+	ldx #$00
+	rts
+
+; reentrant function machine_call(entry: u16): u16 -- calls `entry` with
+; Z = 0 and returns its A/X. The callee keeps its own runtime registers.
+machine_call:
+	jsr __m65_enter
+	ldy #$05            ; the argument, above the saved fp and return address
+	lda (__m65_fp),y
 	sta __m65_ptr
-	pla
+	iny
+	lda (__m65_fp),y
 	sta __m65_ptr+1
-	tza
-	tax
-	beq @dropped
-@drop:
-	pla
-	dex
-	bne @drop
-@dropped:
-	pla
-	sta __m65_fp
-	pla
-	sta __m65_fp+1
-	inw __m65_ptr
-	lda __m65_acc
-	ldx __m65_acc+1
-	ldy __m65_acc+2
-	ldz #$00
+	jsr @call
+	jsr __m65_leave
+	rtn #$02
+@call:
 	jmp (__m65_ptr)
 
 .segment "VECTOR_RESET"
@@ -231,7 +284,7 @@ pub const LINKER_CONFIG: &str = r#"MEMORY {
   HIGH:  start = $10000, size = $10000, file = %O, fill = yes;
 }
 SEGMENTS {
-  ZEROPAGE:     load = ZP,    type = zp;
+  ZEROPAGE:     load = ZP,    type = zp, define = yes;
   KERNEL_START: load = IMAGE, type = ro;
   LOWCODE:      load = IMAGE, type = ro, optional = yes;
   CODE:         load = IMAGE, type = ro;
@@ -262,13 +315,34 @@ SEGMENTS {
 }
 "#;
 
-/// Base-page bytes available to Mensch code: `$02-$FF` minus the runtime
-/// registers defined in [`CRT0`].
-pub const BASE_PAGE_BUDGET: u16 = 0xfe - 12;
+/// Base-page bytes the runtime registers in [`RUNTIME`] take.
+pub const RUNTIME_BASE_PAGE_BYTES: u16 = 12;
 
-/// Compiles Mensch modules for the MEGA65 with one shared base-page budget.
-/// Returns `(module file stem, assembly)` pairs ready for [`build_rom`].
+/// Base-page bytes available to kernel Mensch code: `$02-$FF` minus the
+/// runtime registers.
+pub const BASE_PAGE_BUDGET: u16 = 0xfe - RUNTIME_BASE_PAGE_BYTES;
+
+/// Base-page bytes available to a loadable program's Mensch code. A program
+/// gets the base page the kernel leaves free, so it is kept small.
+pub const PROGRAM_BASE_PAGE_BUDGET: u16 = 0x30;
+
+/// Compiles Mensch modules for the MEGA65 kernel with one shared base-page
+/// budget. Returns `(module file stem, assembly)` pairs ready for [`build_rom`].
 pub fn compile_modules(sources: &[(String, String)]) -> Result<Vec<(String, String)>, String> {
+    compile_modules_with_budget(sources, BASE_PAGE_BUDGET)
+}
+
+/// Compiles the Mensch modules of a loadable program (see [`build_program`]).
+pub fn compile_program_modules(
+    sources: &[(String, String)],
+) -> Result<Vec<(String, String)>, String> {
+    compile_modules_with_budget(sources, PROGRAM_BASE_PAGE_BUDGET)
+}
+
+fn compile_modules_with_budget(
+    sources: &[(String, String)],
+    budget: u16,
+) -> Result<Vec<(String, String)>, String> {
     let mut assignments = Vec::new();
     let mut out = Vec::new();
     for (name, source) in sources {
@@ -279,13 +353,13 @@ pub fn compile_modules(sources: &[(String, String)]) -> Result<Vec<(String, Stri
         let compiled = crate::driver::compile_source(
             source,
             crate::driver::Target::Mega65,
-            BASE_PAGE_BUDGET.saturating_sub(used),
+            budget.saturating_sub(used),
         )
         .map_err(|error| format!("{name}: {error}"))?;
         assignments.push(compiled.assignment);
         out.push((name.clone(), compiled.asm));
     }
-    crate::storage::validate_direct_page_budget(&assignments, BASE_PAGE_BUDGET)
+    crate::storage::validate_direct_page_budget(&assignments, budget)
         .map_err(|error| error.to_string())?;
     Ok(out)
 }
@@ -294,13 +368,65 @@ pub fn compile_modules(sources: &[(String, String)]) -> Result<Vec<(String, Stri
 ///
 /// `modules` are `(name, ca65 source)` pairs. Intermediate files go in `dir`.
 pub fn build_rom(dir: &Path, modules: &[(&str, &str)]) -> Result<Vec<u8>, String> {
+    let runtime = [("runtime", RUNTIME), ("crt0", CRT0)];
+    let image = link(dir, "kernel", LINKER_CONFIG, &runtime, modules)?;
+    if image.len() != ROM_SIZE {
+        return Err(format!(
+            "linked ROM is {} bytes, expected {ROM_SIZE}",
+            image.len()
+        ));
+    }
+    Ok(image)
+}
+
+/// ld65 configuration for a loadable program: a relocatable o65 file whose
+/// text, data, BSS and base-page segments the kernel's loader places.
+pub const PROGRAM_LINKER_CONFIG: &str = r#"MEMORY {
+  ZP:   start = $0000, size = $0100, type = rw;
+  TEXT: start = $0000, size = $c000, type = ro;
+  DATA: start = $0000, size = $c000, type = rw;
+  BSS:  start = $0000, size = $c000, type = rw;
+}
+SEGMENTS {
+  ZEROPAGE:    load = ZP,   type = zp;
+  CODE:        load = TEXT, type = ro;
+  LOWCODE:     load = TEXT, type = ro, optional = yes;
+  RODATA:      load = TEXT, type = ro, optional = yes;
+  MENSCH_META: load = TEXT, type = ro, optional = yes;
+  DATA:        load = DATA, type = rw, optional = yes;
+  BSS:         load = BSS,  type = bss, optional = yes;
+}
+FILES { %O: format = o65; }
+FORMATS { o65: type = small, os = lunix, export = main; }
+"#;
+
+/// Links compiled program modules into an o65 executable for Hellord's
+/// `RUN`. One module must export `main`; the loader calls it with `JSR` and
+/// takes `A` as the exit status. Programs reach the kernel only through the
+/// trap table, so the file has no undefined references.
+pub fn build_program(dir: &Path, modules: &[(&str, &str)]) -> Result<Vec<u8>, String> {
+    link(
+        dir,
+        "program",
+        PROGRAM_LINKER_CONFIG,
+        &[("runtime", RUNTIME)],
+        modules,
+    )
+}
+
+fn link(
+    dir: &Path,
+    output: &str,
+    config: &str,
+    runtime: &[(&str, &str)],
+    modules: &[(&str, &str)],
+) -> Result<Vec<u8>, String> {
     fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
-    let cfg = dir.join("mega65-rom.cfg");
-    write(&cfg, LINKER_CONFIG)?;
+    let cfg = dir.join(format!("{output}.cfg"));
+    write(&cfg, config)?;
 
     let mut objects = Vec::new();
-    let sources = std::iter::once(("crt0", CRT0)).chain(modules.iter().copied());
-    for (name, source) in sources {
+    for (name, source) in runtime.iter().chain(modules) {
         let asm = dir.join(format!("{name}.s"));
         let obj = dir.join(format!("{name}.o"));
         write(&asm, source)?;
@@ -314,23 +440,16 @@ pub fn build_rom(dir: &Path, modules: &[(&str, &str)]) -> Result<Vec<u8>, String
         objects.push(obj);
     }
 
-    let rom = dir.join("kernel.rom");
+    let file = dir.join(format!("{output}.bin"));
     run(Command::new("ld65")
         .arg("-C")
         .arg(&cfg)
         .arg("-m")
-        .arg(dir.join("kernel.map"))
+        .arg(dir.join(format!("{output}.map")))
         .arg("-o")
-        .arg(&rom)
+        .arg(&file)
         .args(&objects))?;
-    let image = fs::read(&rom).map_err(|error| format!("read {}: {error}", rom.display()))?;
-    if image.len() != ROM_SIZE {
-        return Err(format!(
-            "linked ROM is {} bytes, expected {ROM_SIZE}",
-            image.len()
-        ));
-    }
-    Ok(image)
+    fs::read(&file).map_err(|error| format!("read {}: {error}", file.display()))
 }
 
 /// Locates the Xemu MEGA65 binary: `$MENSCH_XMEGA65`, then

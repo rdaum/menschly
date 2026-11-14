@@ -1,0 +1,276 @@
+module HellordExec
+
+# Loads and runs relocatable o65 programs.
+#
+# The whole file is read into the machine's program area, then relocated in
+# place: its text and data stay where they landed, its BSS goes right after
+# the data (over the relocation tables, once they have been applied), and its
+# base-page segment goes in the base page the kernel leaves free. Then the
+# exported `main` (or the start of the text) is called; its A is the exit
+# status. Programs talk to the kernel only through the trap table, so files
+# with undefined references are rejected.
+#
+# Supported: "small" o65 files (16-bit sizes) with byte-wise relocation, as
+# ld65 writes them (see mega65.rs `build_program`).
+
+external reentrant function dos_fopen(path: near ^u8): u16
+external reentrant function dos_fread(handle: u16, count: u16, buffer: near ^u8): u16
+external reentrant function dos_fclose(handle: u16): u16
+external function machine_program_start(): u16
+external function machine_program_end(): u16
+external function machine_base_page_start(): u16
+external reentrant function machine_call(entry: u16): u16
+
+const DOS_HANDLE_BASE = 6
+const DOS_HANDLE_LIMIT = 10
+const EXEC_ERR_NOT_FOUND = $fffd
+const EXEC_ERR_FORMAT = $ff01
+const EXEC_ERR_TOO_LARGE = $ff02
+const EXEC_ERR_IMPORTS = $ff03
+const EXEC_ERR_BASE_PAGE = $ff04
+const HEADER_BYTES = 26
+const BASE_PAGE_END = $0100
+# Mode bits for object files, 32-bit sizes and page-wise relocation.
+const MODE_UNSUPPORTED = $7000
+const RELOC_KIND = $e0
+const RELOC_SEGMENT = $0f
+const RELOC_WORD = $80
+const RELOC_HIGH = $40
+const RELOC_LOW = $20
+const SEGMENT_UNDEFINED = 0
+const SEGMENT_TEXT = 2
+const SEGMENT_DATA = 3
+const SEGMENT_BSS = 4
+const SEGMENT_ZERO = 5
+const SKIP_STEP = 255
+const SKIP_BYTES = 254
+
+var image: u16
+var cursor: u16
+var text_delta: u16
+var data_delta: u16
+var bss_delta: u16
+var zero_delta: u16
+var probe: [1]u8
+
+reentrant function peek(address: u16): u8
+    var p: near ^u8
+    p = address
+    return p^
+end
+
+reentrant procedure poke(address: u16, value: u8)
+    var p: near ^u8
+    p = address
+    p^ = value
+    return
+end
+
+reentrant function header_word(offset: u16): u16
+    var low: u16
+    low = u16(peek(image + offset))
+    return low | u16(peek(image + offset + 1)) << 8
+end
+
+reentrant function next_byte(): u8
+    var value: u8
+    value = peek(cursor)
+    cursor = cursor + 1
+    return value
+end
+
+reentrant function next_word(): u16
+    var low: u16
+    low = u16(next_byte())
+    return low | u16(next_byte()) << 8
+end
+
+# Consumes a NUL-terminated name and reports whether it equals `expected`.
+reentrant function next_name_is(expected: near ^u8): u8
+    var matched: u8
+    var ch: u8
+    matched = 1
+    ch = next_byte()
+    while ch != 0
+        if matched != 0 and ch == expected^
+            expected = expected + 1
+        else
+            matched = 0
+        end
+        ch = next_byte()
+    end
+    if expected^ != 0
+        matched = 0
+    end
+    return matched
+end
+
+reentrant function segment_delta(segment: u8): u16
+    if segment == SEGMENT_TEXT
+        return text_delta
+    elsif segment == SEGMENT_DATA
+        return data_delta
+    elsif segment == SEGMENT_BSS
+        return bss_delta
+    elsif segment == SEGMENT_ZERO
+        return zero_delta
+    end
+    return 0
+end
+
+# Applies the relocation table at the cursor to the segment loaded at
+# `start`. Returns 0 for an entry this loader cannot apply.
+reentrant function relocate(start: u16): u8
+    var position: u16
+    var step: u8
+    var kind: u8
+    var segment: u8
+    var delta: u16
+    var value: u16
+    var low: u8
+    position = start - 1
+    while 1 != 0
+        step = next_byte()
+        if step == 0
+            return 1
+        elsif step == SKIP_STEP
+            position = position + SKIP_BYTES
+        else
+            position = position + u16(step)
+            kind = next_byte()
+            segment = kind & RELOC_SEGMENT
+            kind = kind & RELOC_KIND
+            if segment == SEGMENT_UNDEFINED
+                return 0
+            end
+            delta = segment_delta(segment)
+            if kind == RELOC_WORD
+                value = u16(peek(position)) | u16(peek(position + 1)) << 8
+                value = value + delta
+                poke(position, u8(value))
+                poke(position + 1, u8(value >> 8))
+            elsif kind == RELOC_HIGH
+                # The low byte of the original address follows, so a carry
+                # out of it reaches the high byte.
+                low = next_byte()
+                value = u16(peek(position)) << 8 | u16(low)
+                value = value + delta
+                poke(position, u8(value >> 8))
+            elsif kind == RELOC_LOW
+                poke(position, peek(position) + u8(delta))
+            else
+                return 0
+            end
+        end
+    end
+end
+
+reentrant procedure clear(start: u16, count: u16)
+    while count != 0
+        poke(start, 0)
+        start = start + 1
+        count = count - 1
+    end
+    return
+end
+
+# Loads and runs the program in file `path` on the current drive. Returns its
+# exit status (0-255), or one of the EXEC_ERR_* codes.
+export reentrant function exec_program(path: near ^u8): u16
+    var handle: u16
+    var buffer: near ^u8
+    var area_end: u16
+    var length: u16
+    var extra: u16
+    var options: u8
+    var text_start: u16
+    var data_start: u16
+    var bss_start: u16
+    var zero_start: u16
+    var bss_length: u16
+    var zero_length: u16
+    var entry: u16
+    var count: u16
+    var segment: u8
+    var value: u16
+    var is_main: u8
+    image = machine_program_start()
+    area_end = machine_program_end()
+    handle = dos_fopen(path)
+    if handle < DOS_HANDLE_BASE or handle >= DOS_HANDLE_LIMIT
+        return EXEC_ERR_NOT_FOUND
+    end
+    buffer = image
+    length = dos_fread(handle, area_end - image, buffer)
+    extra = dos_fread(handle, 1, addr(probe))
+    handle = dos_fclose(handle)
+    if extra != 0
+        return EXEC_ERR_TOO_LARGE
+    end
+    if length < HEADER_BYTES
+        return EXEC_ERR_FORMAT
+    end
+    if peek(image) != 1 or peek(image + 1) != 0 or peek(image + 2) != 'o'
+        return EXEC_ERR_FORMAT
+    end
+    if peek(image + 3) != '6' or peek(image + 4) != '5' or peek(image + 5) != 0
+        return EXEC_ERR_FORMAT
+    end
+    if header_word(6) & MODE_UNSUPPORTED != 0
+        return EXEC_ERR_FORMAT
+    end
+
+    cursor = image + HEADER_BYTES
+    options = next_byte()
+    while options != 0
+        cursor = cursor + u16(options) - 1
+        options = next_byte()
+    end
+    text_start = cursor
+    data_start = text_start + header_word(10)
+    bss_start = data_start + header_word(14)
+    bss_length = header_word(18)
+    zero_length = header_word(22)
+    if bss_start > image + length
+        return EXEC_ERR_FORMAT
+    end
+    if bss_length > area_end - bss_start
+        return EXEC_ERR_TOO_LARGE
+    end
+    zero_start = machine_base_page_start()
+    if zero_length > BASE_PAGE_END - zero_start
+        return EXEC_ERR_BASE_PAGE
+    end
+    text_delta = text_start - header_word(8)
+    data_delta = data_start - header_word(12)
+    bss_delta = bss_start - header_word(16)
+    zero_delta = zero_start - header_word(20)
+
+    # Undefined references, then the text and data relocation tables.
+    cursor = bss_start
+    if next_word() != 0
+        return EXEC_ERR_IMPORTS
+    end
+    if relocate(text_start) == 0
+        return EXEC_ERR_FORMAT
+    end
+    if relocate(data_start) == 0
+        return EXEC_ERR_FORMAT
+    end
+
+    entry = text_start
+    count = next_word()
+    while count != 0
+        is_main = next_name_is("main")
+        segment = next_byte()
+        value = next_word()
+        if is_main != 0
+            entry = value + segment_delta(segment)
+        end
+        count = count - 1
+    end
+
+    clear(bss_start, bss_length)
+    clear(zero_start, zero_length)
+    return machine_call(entry) & $00ff
+end

@@ -14,6 +14,7 @@ cargo run --quiet --manifest-path "$repo_root/Cargo.toml" --bin mensch-run-mega6
   "$examples/hellord-os.mensch" \
   "$examples/hellord-dos.mensch" \
   "$examples/hellord-fat.mensch" \
+  "$examples/hellord-exec.mensch" \
   "$examples/hellord-console.mensch" \
   "$examples/hellord-files.mensch" \
   "$examples/mega65-machine.mensch" \

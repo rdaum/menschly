@@ -19,6 +19,10 @@ path = "compiler/src/bin/mensch-run-x65.rs"
 name = "mensch-run-mega65"
 path = "compiler/src/bin/mensch-run-mega65.rs"
 
+[[bin]]
+name = "mensch-mega65-program"
+path = "compiler/src/bin/mensch-mega65-program.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 x65alike-emul = { path = "x65alike-emul" }

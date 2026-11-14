@@ -38,6 +38,8 @@ external reentrant function fat_open(path: near ^u8, slot: u16): u16
 external reentrant function fat_file_size(slot: u16): u16
 external reentrant function fat_file_byte(slot: u16, offset: u16): u8
 external reentrant function fat_write(slot: u16, offset: u16, count: u16, buffer: near ^u8): u16
+external reentrant function fat_read(slot: u16, offset: u16, count: u16, buffer: near ^u8): u16
+external reentrant function exec_program(path: near ^u8): u16
 external reentrant function bios_block_read(dev: u16, buffer: near ^u8): u16
 external reentrant function bios_block_write(dev: u16, buffer: near ^u8): u16
 
@@ -72,6 +74,12 @@ const FILE_SYSTEM = 2
 const FILE_DEMO = 3
 const PROGRAM_HELLO = 1
 const PROGRAM_DEMO = 2
+# A program file on a FAT drive, loaded by exec_program.
+const PROGRAM_FILE = 3
+const EXEC_ERR_FORMAT = $ff01
+const EXEC_ERR_TOO_LARGE = $ff02
+const EXEC_ERR_IMPORTS = $ff03
+const EXEC_ERR_BASE_PAGE = $ff04
 const DIR_ROOT = 0
 const DIR_GAMES = 1
 const PROMPT_SHORT = 0
@@ -280,6 +288,11 @@ export reentrant function dos_fread(handle: u16, count: u16, buffer: near ^u8): 
     end
     dos_current_read_slot = u8(slot)
     offset = dos_handle_offset[slot]
+    if driver == FS_DRIVER_FAT
+        read_count = fat_read(slot, offset, count, buffer)
+        dos_handle_offset[slot] = offset + read_count
+        return read_count
+    end
     read_count = 0
     done = 0
     while done == 0
@@ -1554,6 +1567,49 @@ reentrant procedure fat_write_dir()
     return
 end
 
+# Runs the program file named by the word at `start`, adding ".PRG" when the
+# name has no extension.
+reentrant procedure fat_run_program(start: u16)
+    var index: u16
+    var dotted: u8
+    var status: u16
+    index = 0
+    dotted = 0
+    while start < line_len and index != 12 and command_buffer[start] != ' '
+        if command_buffer[start] == '.'
+            dotted = 1
+        end
+        fat_name[index] = command_buffer[start]
+        start = start + 1
+        index = index + 1
+    end
+    if dotted == 0 and index <= 8
+        fat_name[index] = '.'
+        fat_name[index + 1] = 'P'
+        fat_name[index + 2] = 'R'
+        fat_name[index + 3] = 'G'
+        index = index + 4
+    end
+    fat_name[index] = 0
+    status = exec_program(addr(fat_name))
+    if status == DOS_ERR_FILE_NOT_FOUND
+        files_write_program_not_found()
+    elsif status == EXEC_ERR_FORMAT
+        console_write_text("Not a program\r\n")
+    elsif status == EXEC_ERR_TOO_LARGE
+        console_write_text("Program too large\r\n")
+    elsif status == EXEC_ERR_IMPORTS
+        console_write_text("Program has unresolved imports\r\n")
+    elsif status == EXEC_ERR_BASE_PAGE
+        console_write_text("Not enough base page\r\n")
+    elsif status != 0
+        console_write_text("Exit status $")
+        console_write_hex8(u8(status))
+        console_newline()
+    end
+    return
+end
+
 reentrant procedure fat_type_file(start: u16)
     var index: u16
     var handle: u16
@@ -2140,6 +2196,10 @@ end
 
 function bare_program_code(): u8
     var code: u8
+    if dos_current_fs_driver() == FS_DRIVER_FAT
+        # Any other word names a program file; RUN reports a missing one.
+        return PROGRAM_FILE
+    end
     if dos_current_fs_driver() == FS_DRIVER_ROMFS
         code = romfs_program_code_at(0)
     else
@@ -2204,6 +2264,10 @@ end
 
 procedure run_program()
     var code: u8
+    if dos_current_fs_driver() == FS_DRIVER_FAT
+        fat_run_program(argument_start("R", "RUN"))
+        return
+    end
     code = run_program_code()
     run_program_code_value(code)
     return
@@ -2211,6 +2275,10 @@ end
 
 procedure run_bare_program()
     var code: u8
+    if dos_current_fs_driver() == FS_DRIVER_FAT
+        fat_run_program(0)
+        return
+    end
     code = bare_program_code()
     run_program_code_value(code)
     return

@@ -653,10 +653,11 @@ fn interrupts_preserve_runtime_registers_and_scratch() {
     );
 }
 
-const HELLORD_MEGA65_MODULES: [&str; 9] = [
+const HELLORD_MEGA65_MODULES: [&str; 10] = [
     "hellord-os",
     "hellord-dos",
     "hellord-fat",
+    "hellord-exec",
     "hellord-console",
     "hellord-files",
     "mega65-machine",
@@ -998,6 +999,88 @@ fn hellord_lists_and_types_files_on_the_sd_card() {
     .unwrap();
     assert!(!run.timed_out, "REBOOT should end the run");
     let expected = "S> DIR\nDirectory of S:/\nHELLO.TXT    $0026\nBIG.DAT      $2710\n02 file(s)  00 dir(s)\nS> TYPE hello.txt\nHello from the SD card!\nSecond line.\nS> TYPE NOPE.TXT\nFile not found\n";
+    assert!(run.screen.contains(expected), "screen:\n{}", run.screen);
+}
+
+/// A loadable program that exercises every relocation kind the loader
+/// handles: calls and jumps into its own text (WORD), string addresses
+/// (LOW/HIGH), a BSS counter, and a base-page parameter (zero page).
+const HELLO_PROGRAM: &str = "
+module Hello
+const GEMDOS = $01
+const CCONOUT = $0002
+
+var greetings: u16
+
+procedure say(text: near ^u8)
+    var ignored: u16
+    while text^ != 0
+        ignored = trap(GEMDOS, CCONOUT, u16(text^), 0)
+        text = text + 1
+    end
+    return
+end
+
+export function main(): u8
+    greetings = greetings + 1
+    say(\"Hello from a program\\r\\n\")
+    if greetings == 1
+        say(\"BSS was cleared\\r\\n\")
+    end
+    return $2a
+end
+";
+
+fn build_hello_program() -> Vec<u8> {
+    let modules =
+        mega65::compile_program_modules(&[("hello".to_owned(), HELLO_PROGRAM.to_owned())])
+            .expect("program should compile");
+    let refs = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect::<Vec<_>>();
+    let program =
+        mega65::build_program(&temp_dir("hello-program"), &refs).expect("program should link");
+    assert_eq!(&program[..6], b"\x01\x00o65\x00", "o65 magic");
+    assert!(
+        program[0x15] != 0 || program[0x16] != 0,
+        "the program should have a base-page segment"
+    );
+    program
+}
+
+#[test]
+fn hellord_loads_and_runs_relocated_programs_from_the_sd_card() {
+    let program = build_hello_program();
+    let (dir, rom) = hellord_rom("hellord-exec");
+    let Some(xemu) = mega65::find_xemu() else {
+        return;
+    };
+    if !mega65::xemu_supports_type_in(&xemu) {
+        eprintln!("skipping: this Xemu build has no -typein option");
+        return;
+    }
+    let run = mega65::run_rom_with(
+        &xemu,
+        &dir,
+        &rom,
+        &mega65::XemuOptions {
+            type_in: Some(
+                "S:\rRUN HELLO\rhello.prg\rRUN NOTPROG.PRG\rMISSING\rREBOOT\r".to_owned(),
+            ),
+            sd_files: vec![
+                ("HELLO.PRG".to_owned(), program),
+                ("NOTPROG.PRG".to_owned(), b"just some text\r\n".to_vec()),
+            ],
+            ..mega65::XemuOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(!run.timed_out, "REBOOT should end the run:\n{}", run.screen);
+    let expected = "S> RUN HELLO\nHello from a program\nBSS was cleared\nExit status $2A\n\
+                    S> hello.prg\nHello from a program\nBSS was cleared\nExit status $2A\n\
+                    S> RUN NOTPROG.PRG\nNot a program\n\
+                    S> MISSING\nProgram not found\n";
     assert!(run.screen.contains(expected), "screen:\n{}", run.screen);
 }
 
