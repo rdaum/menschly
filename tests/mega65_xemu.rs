@@ -2794,6 +2794,12 @@ fn actors_draw_hardware_sprites_and_raster_rewrite_characters() {
             actor_draw(h, 10, 20, 0, 1)
             actors_frame()
             dma_copy(COLOUR_RAM, $0f00, 6 * 18)
+            dma_copy($50000, $0e80, 6 * 18)
+            # Frame 2: a moves along its rows, b goes, c moves down a row.
+            actor_draw(a, 120, 13, 0, 0)
+            actor_hide(b)
+            actor_draw(c, 200, 24, 0, 1)
+            actors_frame()
             out[0] = sprite_xy[0]
             out[1] = sprite_xy[1]
             out[2] = sprite_enable
@@ -2814,7 +2820,7 @@ fn actors_draw_hardware_sprites_and_raster_rewrite_characters() {
     let memory = &run.memory;
     // Rows are 4 background characters, 2 slots of 2 and a closing token:
     // 18 bytes. Slot s of row r is at r * 18 + 8 + s * 4.
-    let screen = |at: usize| &memory[0x50000 + at..0x50000 + at + 4];
+    let screen = |at: usize| &memory[0x0e80 + at..0x0e80 + at + 4];
     let colour = |at: usize| &memory[0x0f00 + at..0x0f00 + at + 4];
     // a: x 100, y 13 = row 1 line 5; characters $1180-$1181 ($46000 / 64),
     // palette group 1. Row 1 shifts the top character down 5 and shows
@@ -2837,6 +2843,16 @@ fn actors_draw_hardware_sprites_and_raster_rewrite_characters() {
     assert_eq!(&screen(30)[..2], &[0x40, 0x01]);
     assert_eq!(&screen(34)[..2], &[0x40, 0x01]);
     assert_eq!(&colour(34)[..2], &[0x98, 0xff]);
+    // Frame 2. a keeps its slots with the new x; b's slots are off screen;
+    // c freed row 5 and took the slot b left in row 3, and one in row 4.
+    let now = |at: usize| &memory[0x50000 + at..0x50000 + at + 4];
+    assert_eq!(now(26), &[120, 0xb0, 0x80, 0x11]);
+    assert_eq!(now(44), &[120, 0x60, 0x80, 0x11]);
+    assert_eq!(now(62), &[120, 0x60, 0x81, 0x11]);
+    assert_eq!(&now(48)[..2], &[0x40, 0x01]);
+    assert_eq!(now(66), &[200, 0x00, 0x80, 0x11]);
+    assert_eq!(now(80), &[200, 0x00, 0x81, 0x11]);
+    assert_eq!(&now(98)[..2], &[0x40, 0x01]);
     // The pool holds each cell's image once, each byte's pixels swapped.
     assert_eq!(&memory[0x46000..0x46008], &[0x21, 0, 0, 0, 0, 0, 0, 0x43]);
     // The hardware actor's buffer holds the image mirrored, and sprite 0

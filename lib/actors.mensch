@@ -28,8 +28,11 @@ import Vic4
 # row ends with `slots` overlay slots after the background's `columns`
 # characters: a GOTOX token that moves the drawing position to the actor's x
 # and shifts the character rows to its y, then the character. An actor
-# covers two or three text rows, one slot in each; a row with more actors
-# than slots drops the extra ones. Software actors showing the same cell share
+# covers two or three text rows and keeps a slot in each from frame to frame:
+# actors_frame only rewrites the slots of actors that changed, and moves an
+# actor's slots only when it changes rows. Slots in a row draw in slot order,
+# not actor order. A row with no free slot leaves that part of an actor out
+# until the actor next moves. Software actors showing the same cell share
 # its characters: a pool of 128-byte entries in chip RAM (two characters, top
 # and bottom) holds each cell in use once, with the nibbles swapped, as
 # 16-colour characters keep the left pixel in the low nibble. The hardware
@@ -44,6 +47,8 @@ export const NO_ACTOR = $ff
 const MAX_ACTORS = 32
 const HARDWARE_SPRITES = 8
 const MAX_ROWS = 32
+const MAX_SLOTS = 32
+const NO_SLOT = $ff
 const MAX_ENTRIES = 64
 const NO_ENTRY = $ff
 const GROUPS = 16
@@ -78,6 +83,9 @@ type Actor = record(
     sprite: u8,
     group: u8,
     entry: u8,
+    dirty: u8,
+    first_row: u8,
+    rows: u8,
     x: u16,
     y: u16,
     cell: u16,
@@ -110,7 +118,10 @@ var entry_cell: [MAX_ENTRIES]u16
 var entry_users: [MAX_ENTRIES]u8
 var entry_mirrored: [MAX_ENTRIES]u8
 var entry_palette: [MAX_ENTRIES]u16
-var slots_used: [MAX_ROWS]u8
+# Which slots are taken, MAX_SLOTS per row, and each software actor's slot
+# in each of the up to three rows it holds.
+var slot_taken: [MAX_ROWS * MAX_SLOTS]u8
+var held: [MAX_ACTORS * 3]u8
 # Where each row's first slot is, in the screen and in colour RAM.
 var row_screen: [MAX_ROWS]u32
 var row_colour: [MAX_ROWS]u32
@@ -165,7 +176,7 @@ export procedure actors_hardware(table: u32, buffers: u32, bank: u8, x0: u16, y0
 end
 
 # The text screen at `screen`, with `columns` background characters and
-# `slots` software-actor slots per row, `rows` rows shown, and a pool of
+# `slots` (up to 32) software-actor slots per row, `rows` rows shown, and a pool of
 # `entries` (up to 64) cells' characters at `characters` (128 bytes each,
 # 64-byte aligned, in chip RAM below $80000): as many distinct cells as
 # software actors may show at once. Clears the screen: draw the background
@@ -197,10 +208,12 @@ export procedure actors_software(screen: u32, columns: u8, rows: u8, slots: u8, 
     for row = 0 to rows - 1
         row_screen[row] = screen + u32(u16(row) * row_bytes + first)
         row_colour[row] = COLOUR_RAM + u32(u16(row) * row_bytes + first)
-        slots_used[row] = 0
         # Every slot, and the closing token after them, starts off screen.
         for slot = 0 to slots
             put_token(row, slot, OFFSCREEN, 0, $ff)
+            if slot != slots
+                slot_taken[(u16(row) << 5) + u16(slot)] = 0
+            end
         end
     end
     for group = 0 to GROUPS - 1
@@ -233,6 +246,8 @@ export function actor_new(kind: u8): u8
     actors[actor].palette = NOTHING
     actors[actor].group = 0
     actors[actor].entry = NO_ENTRY
+    actors[actor].dirty = 0
+    actors[actor].rows = 0
     actor_count = actor_count + 1
     return actor
 end
@@ -242,6 +257,9 @@ end
 export procedure actor_draw(actor: u8, x: u16, y: u16, cell: u16, mirrored: u8)
     if mirrored
         mirrored = 1
+    end
+    if actors[actor].x != x or actors[actor].y != y or actors[actor].cell != cell or actors[actor].mirrored != mirrored or actors[actor].visible == 0
+        actors[actor].dirty = 1
     end
     actors[actor].x = x
     actors[actor].y = y
@@ -256,6 +274,7 @@ end
 
 export procedure actor_hide(actor: u8)
     actors[actor].visible = 0
+    actors[actor].dirty = 1
     if actors[actor].kind == ACTOR_HARDWARE
         sprites_shown = sprites_shown & (sprite_bit(actors[actor].sprite) xor $ff)
         vic4_sprites_on(sprites_shown)
@@ -263,27 +282,20 @@ export procedure actor_hide(actor: u8)
     return
 end
 
-# Rebuilds the software actors' slots. Call once per frame, ideally while the
-# raster is below the text area.
+# Brings the software actors' slots up to date with what changed since the
+# last call. Call once per frame, ideally while the raster is below the text
+# area.
 export procedure actors_frame()
-    var row: u8
-    var slot: u8
     var actor: u8
-    if overlay_rows == 0
-        return
-    end
-    for row = 0 to overlay_rows - 1
-        slot = 0
-        while slot != slots_used[row]
-            hide_token(row, slot)
-            slot = slot + 1
-        end
-        slots_used[row] = 0
-    end
     actor = 0
     while actor != actor_count
-        if actors[actor].kind == ACTOR_SOFTWARE and actors[actor].visible
-            place(actor)
+        if actors[actor].kind == ACTOR_SOFTWARE and actors[actor].dirty
+            actors[actor].dirty = 0
+            if actors[actor].visible
+                place(actor)
+            else
+                free_slots(actor)
+            end
         end
         actor = actor + 1
     end
@@ -491,16 +503,25 @@ procedure release_group(group: u8)
     return
 end
 
-# Puts a software actor in the slots of the two or three rows it covers.
+# Puts a software actor in the slots of the two or three rows it covers,
+# keeping the slots it holds while those rows stay the same.
 procedure place(actor: u8)
     var y: u16
     var row: u8
     var line: u8
     var lift: u8
     var entry: u8
+    var count: u8
     load_character(actor)
     entry = actors[actor].entry
-    if entry == NO_ENTRY or actors[actor].x >= OFFSCREEN
+    if entry == NO_ENTRY
+        # No pool entry free: off screen, and try again next frame.
+        free_slots(actor)
+        actors[actor].dirty = 1
+        return
+    end
+    if actors[actor].x >= OFFSCREEN
+        free_slots(actor)
         return
     end
     placing_x = actors[actor].x
@@ -513,38 +534,92 @@ procedure place(actor: u8)
     y = actors[actor].y
     row = u8(y >> 3)
     line = u8(y) & 7
+    count = 3
     if line == 0
-        use_slot(row, 0, $ff, 0)
-        use_slot(row + 1, 0, $ff, 1)
+        count = 2
+    end
+    if actors[actor].rows != count or actors[actor].first_row != row
+        free_slots(actor)
+        take_slots(actor, row, count)
+    end
+    if line == 0
+        write_slot(actor, 0, 0, $ff, 0)
+        write_slot(actor, 1, 0, $ff, 1)
         return
     end
     # The top row shows the top character shifted down by `line`; the next
     # shows it shifted up by 8 - line, running on into the bottom character;
     # the last shows the bottom character the same way, down to `line`.
     lift = (8 - line) << 5
-    use_slot(row, NEGATIVE | line << 5, FROM_LINE[line], 0)
-    use_slot(row + 1, lift, $ff, 0)
-    use_slot(row + 2, lift, ABOVE_LINE[line], 1)
+    write_slot(actor, 0, NEGATIVE | line << 5, FROM_LINE[line], 0)
+    write_slot(actor, 1, lift, $ff, 0)
+    write_slot(actor, 2, lift, ABOVE_LINE[line], 1)
     return
 end
 
-# Fills the next free slot of `row` with the placing actor's character
-# (`half` 0 for the top one, 1 for the bottom), shifted by `shift` (a
-# token's high-byte shift bits) and drawing the lines in `mask`.
-procedure use_slot(row: u8, shift: u8, mask: u8, half: u8)
+# Gives `actor` a free slot in each of the `count` rows from `row`
+# (NO_SLOT where a row is full or off the screen).
+procedure take_slots(actor: u8, row: u8, count: u8)
+    var k: u8
     var slot: u8
+    var at: u16
+    actors[actor].first_row = row
+    actors[actor].rows = count
+    k = 0
+    while k != count
+        slot = NO_SLOT
+        if row + k < overlay_rows
+            at = u16(row + k) << 5
+            slot = 0
+            while slot != overlay_slots and slot_taken[at + u16(slot)]
+                slot = slot + 1
+            end
+            if slot == overlay_slots
+                slot = NO_SLOT
+            else
+                slot_taken[at + u16(slot)] = 1
+            end
+        end
+        held[actor * 3 + k] = slot
+        k = k + 1
+    end
+    return
+end
+
+# Gives up `actor`'s slots, moving them off screen.
+procedure free_slots(actor: u8)
+    var k: u8
+    var slot: u8
+    var row: u8
+    k = 0
+    while k != actors[actor].rows
+        slot = held[actor * 3 + k]
+        if slot != NO_SLOT
+            row = actors[actor].first_row + k
+            slot_taken[(u16(row) << 5) + u16(slot)] = 0
+            hide_token(row, slot)
+        end
+        k = k + 1
+    end
+    actors[actor].rows = 0
+    return
+end
+
+# Fills `actor`'s slot in its row `k` with the placing character (`half` 0
+# for the top one, 1 for the bottom), shifted by `shift` (a token's high-byte
+# shift bits) and drawing the lines in `mask`.
+procedure write_slot(actor: u8, k: u8, shift: u8, mask: u8, half: u8)
+    var slot: u8
+    var row: u8
     var cell: far ^u8
     var colour: far ^u8
     var character: u16
     var offset: u32
-    if row >= overlay_rows
+    slot = held[actor * 3 + k]
+    if slot == NO_SLOT
         return
     end
-    slot = slots_used[row]
-    if slot == overlay_slots
-        return
-    end
-    slots_used[row] = slot + 1
+    row = actors[actor].first_row + k
     character = placing_character + u16(half)
     offset = u32(u16(slot) << 2)
     cell = row_screen[row] + offset
