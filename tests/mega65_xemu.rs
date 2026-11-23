@@ -2871,7 +2871,7 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
     let caller = "
         module PhysicsTest
         import BubblePhysics
-        fixed($0e00) volatile var out: [12]i16
+        fixed($0e00) volatile var out: [16]i16
         var room_map: [832]u8
 
         # Side walls; ceiling and floor with a gap at columns 14-17; one
@@ -2960,6 +2960,15 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
             out[10] = i16(bodies_touch(4, 5, 3))
             body_place(5, 60, 50)
             out[11] = i16(bodies_touch(4, 5, 3))
+            # 7. Falling in mid-air, then launched upward (a bounce).
+            body_place(6, 40, 60)
+            steps(6, 10)
+            out[12] = i16(body_falling(6))
+            out[13] = body_y(6)
+            body_launch(6, JUMP)
+            steps(6, 4)
+            out[14] = i16(body_falling(6))
+            out[15] = body_y(6)
             return 0
         end
         ";
@@ -2988,7 +2997,7 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
     };
     let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
     assert_eq!(run.exit_code, 0);
-    let out: Vec<i16> = (0..12)
+    let out: Vec<i16> = (0..16)
         .map(|i| i16::from_le_bytes([run.memory[0x0e00 + 2 * i], run.memory[0x0e01 + 2 * i]]))
         .collect();
     assert_eq!(&out[0..2], &[184, 1], "drop onto the floor");
@@ -3012,6 +3021,14 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
         &out[10..12],
         &[1, 0],
         "overlap inside and outside the margin"
+    );
+    assert_eq!(out[12], 1, "falling in mid-air");
+    assert_eq!(out[14], 0, "no longer falling after a launch");
+    assert!(
+        out[15] < out[13],
+        "launched upward: {} -> {}",
+        out[13],
+        out[15]
     );
 }
 

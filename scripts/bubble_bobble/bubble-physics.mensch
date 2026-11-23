@@ -165,6 +165,22 @@ export function body_jump(body: u8, speed: i16): u8
     return 1
 end
 
+# Whether `body` is in the air and moving down.
+export function body_falling(body: u8): u8
+    if bodies[body].ground == 0 and bodies[body].vy > 0
+        return 1
+    end
+    return 0
+end
+
+# Sends `body` upward at `speed` sixteenths of a pixel per frame, standing
+# or not (a bounce off something in mid-air).
+export procedure body_launch(body: u8, speed: i16)
+    bodies[body].vy = 0 - speed
+    bodies[body].ground = 0
+    return
+end
+
 # One frame of gravity for `body`: rising, falling, landing on what is under
 # it, starting to fall when it walks off an edge, and coming back in at the
 # top after falling out of the bottom.

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Build the playable Bubble Bobble room and boot it in Xemu (joystick 2:
-# left/right to walk, up to jump, fire to blow a bubble). Xemu takes the
-# arrow keys as the joystick and Right Ctrl as fire.
+# Build the playable Bubble Bobble room and boot it in Xemu. Joystick 2:
+# left/right to walk, up to jump (and, held, to bounce off bubbles), fire to
+# blow a bubble. Xemu takes the arrow keys as the joystick and Right Ctrl as
+# fire.
 #
 #   scripts/bubble_bobble/run-game.sh              build and run
 #   scripts/bubble_bobble/run-game.sh --rom F.rom  also keep the ROM image

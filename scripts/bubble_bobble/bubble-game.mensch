@@ -3,7 +3,8 @@ module BubbleGame
 # A playable Bubble Bobble-style room on the MEGA65: Bub on joystick 2 in
 # room 1, with three Zen-chans that drop in, walk, turn at walls and now and
 # then jump after him. Fire blows a bubble, which traps a Zen-chan it hits;
-# touching a floating bubble pops it, and a Zen-chan popped that way is gone.
+# touching a floating bubble pops it, and a Zen-chan popped that way is gone;
+# landing on one with up held bounces Bub off it instead.
 # A Zen-chan left in its bubble too long breaks out angry, and faster. When
 # all three are gone the round starts again. Touching a Zen-chan spins Bub
 # and puts him back at the start.
@@ -46,6 +47,14 @@ const CAUGHT_FRAMES = 60
 const SAFE_FRAMES = 90
 # Frames between bubbles, and of the blowing animation.
 const BLOW_FRAMES = 16
+# Coming down with up held onto a bubble bounces off it: feet from
+# BOUNCE_ABOVE pixels above its top to BOUNCE_BELOW below, and within
+# BOUNCE_SIDE pixels of it sideways.
+const BOUNCE_ABOVE = 2
+const BOUNCE_BELOW = 10
+const BOUNCE_SIDE = 12
+# Otherwise Bub pops a bubble he overlaps by this margin on every side.
+const POP_MARGIN = 5
 
 const BUB_WALK: [6]u16 = [
     BUBBLUN_WALK_01, BUBBLUN_WALK_02, BUBBLUN_WALK_03,
@@ -67,6 +76,7 @@ var caught: u8
 var safe: u8
 var blowing: u8
 var buttons_before: u8
+var buttons_now: u8
 
 # ---------------------------------------------------------------- Zen-chans
 
@@ -237,7 +247,26 @@ procedure move_enemy(i: u8)
     return
 end
 
-# Bubbles against Zen-chans and Bub: trapping, popping and breaking out.
+# Whether Bub is coming down with his feet on the top of bubble `b`.
+function lands_on(b: u8): u8
+    var feet: i16
+    var dx: i16
+    if body_falling(PLAYER) == 0
+        return 0
+    end
+    dx = body_x(PLAYER) - bubble_x(b)
+    if dx <= 0 - BOUNCE_SIDE or dx >= BOUNCE_SIDE
+        return 0
+    end
+    feet = body_y(PLAYER) + 16
+    if feet >= bubble_y(b) - BOUNCE_ABOVE and feet < bubble_y(b) + BOUNCE_BELOW
+        return 1
+    end
+    return 0
+end
+
+# Bubbles against Zen-chans and Bub: trapping, popping, bouncing and
+# breaking out.
 procedure bubbles_meet()
     var b: u8
     var i: u8
@@ -255,7 +284,9 @@ procedure bubbles_meet()
                 end
             end
         elsif bubble_state(b) == BUBBLE_FLOAT and caught == 0
-            if boxes_touch(bubble_x(b), bubble_y(b), body_x(PLAYER), body_y(PLAYER), 3)
+            if lands_on(b) and (buttons_now & JOY_UP)
+                body_launch(PLAYER, JUMP)
+            elsif boxes_touch(bubble_x(b), bubble_y(b), body_x(PLAYER), body_y(PLAYER), POP_MARGIN)
                 enemy = bubble_pop(b)
                 if enemy != NO_CAPTIVE
                     enemy_state[enemy] = GONE
@@ -407,6 +438,7 @@ export function main(): u8
     repeat
         vic4_wait_line(QUIET_LINE)
         buttons = joystick(2)
+        buttons_now = buttons
         move_bub(buttons)
         for i = 0 to ENEMIES - 1
             move_enemy(i)
