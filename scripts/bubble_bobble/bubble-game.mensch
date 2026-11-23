@@ -1,0 +1,252 @@
+module BubbleGame
+
+# A playable Bubble Bobble-style room on the MEGA65: Bub on joystick 2 in
+# room 1, with three Zen-chans that drop in, walk, turn at walls and now and
+# then jump after him. Touching one spins Bub and puts him back at the start.
+#
+# Movement and collision are BubblePhysics'; drawing is lib/actors.mensch's.
+# Run it with scripts/bubble_bobble/run-game.sh.
+
+import Vic4
+import Actors
+import BubbleDemoData
+import BubbleVideo
+import BubblePhysics
+
+# Chip RAM, as in the animation demo.
+const ROOM_TILES: u32 = $44000
+const SPRITE_TABLE: u32 = $45000
+const SPRITE_BUFFERS: u32 = $46000
+const ACTOR_CHARACTERS: u32 = $48000
+const SCREEN: u32 = $50000
+
+const COLUMNS = 40
+const ROWS = 26
+const SLOTS = 24
+const ENTRIES = 32
+const ROOM_LEFT = (COLUMNS - 32) / 2
+const ROOM_X = ROOM_LEFT * 8
+const SPRITE_X0 = 24
+const SPRITE_Y0 = 46
+const QUIET_LINE = 256
+
+# ---------------------------------------------------------------- Bub
+
+const PLAYER = 0
+const WALK_SPEED = 16
+const START_X = 24
+const START_Y = 184
+# Frames Bub spins when caught, then frames he cannot be caught again.
+const CAUGHT_FRAMES = 60
+const SAFE_FRAMES = 90
+
+const BUB_WALK: [6]u16 = [
+    BUBBLUN_WALK_01, BUBBLUN_WALK_02, BUBBLUN_WALK_03,
+    BUBBLUN_WALK_04, BUBBLUN_WALK_05, BUBBLUN_WALK_06
+]
+const BUB_SPIN: [6]u16 = [
+    BUBBLUN_SPIN_01, BUBBLUN_SPIN_02, BUBBLUN_SPIN_03,
+    BUBBLUN_SPIN_04, BUBBLUN_SPIN_05, BUBBLUN_SPIN_06
+]
+
+var bub: u8
+var facing_left: u8
+var walk_step: u8
+var caught: u8
+var safe: u8
+var buttons_before: u8
+
+# ---------------------------------------------------------------- Zen-chans
+
+const ENEMIES = 3
+const FIRST_ENEMY = 1
+const ENEMY_SPEED = 12
+const DROP_X = 120
+# Round 1's stagger: each drops in this many frames after the round starts.
+const DROP_DELAY: [ENEMIES]u8 = [1, 21, 41]
+
+const ZEN_WALK: [4]u16 = [
+    ZEN_CHAN_WALK_01, ZEN_CHAN_WALK_02, ZEN_CHAN_WALK_03, ZEN_CHAN_WALK_04
+]
+
+var enemy_actor: [ENEMIES]u8
+var enemy_delay: [ENEMIES]u8
+var enemy_left: [ENEMIES]u8
+
+var seed: u16
+var tick: u16
+
+# A pseudo-random byte (16-bit Galois shift register).
+function random(): u8
+    var low: u8
+    low = u8(seed) & 1
+    seed = seed >> 1
+    if low
+        seed = seed xor $b400
+    end
+    return u8(seed)
+end
+
+# ---------------------------------------------------------------- per frame
+
+procedure move_bub(buttons: u8)
+    var dx: i16
+    var pressed: u8
+    if caught
+        caught = caught - 1
+        if caught == 0
+            body_place(PLAYER, START_X, START_Y)
+            safe = SAFE_FRAMES
+        end
+        return
+    end
+    if safe
+        safe = safe - 1
+    end
+    dx = 0
+    if buttons & JOY_LEFT
+        dx = 0 - WALK_SPEED
+        facing_left = 1
+    elsif buttons & JOY_RIGHT
+        dx = WALK_SPEED
+        facing_left = 0
+    end
+    if body_walk(PLAYER, dx) == 0 and dx != 0
+        walk_step = walk_step + 1
+    end
+    pressed = buttons & (buttons_before xor $ff)
+    if pressed & (JOY_FIRE | JOY_UP)
+        if body_jump(PLAYER, JUMP)
+            walk_step = 0
+        end
+    end
+    body_step(PLAYER)
+    return
+end
+
+procedure move_enemy(i: u8)
+    var body: u8
+    var dx: i16
+    var dy: i16
+    body = FIRST_ENEMY + i
+    if enemy_delay[i]
+        enemy_delay[i] = enemy_delay[i] - 1
+        if enemy_delay[i] == 0
+            body_place(body, DROP_X, -16)
+        end
+        return
+    end
+    dx = ENEMY_SPEED
+    if enemy_left[i]
+        dx = 0 - ENEMY_SPEED
+    end
+    if body_walk(body, dx)
+        enemy_left[i] = enemy_left[i] xor 1
+    end
+    if body_on_ground(body)
+        dy = body_y(PLAYER) - body_y(body)
+        # Bub well above: now and then jump for him.
+        if dy < -24 and (random() & 63) == 0
+            if body_jump(body, JUMP)
+                dy = 0
+            end
+        end
+        # Bub on the same level: now and then turn to face him.
+        if dy > -8 and dy < 8 and (random() & 127) == 0
+            enemy_left[i] = 0
+            if body_x(PLAYER) < body_x(body)
+                enemy_left[i] = 1
+            end
+        end
+    end
+    body_step(body)
+    return
+end
+
+procedure check_caught()
+    var i: u8
+    if caught or safe
+        return
+    end
+    for i = 0 to ENEMIES - 1
+        if enemy_delay[i] == 0 and bodies_touch(PLAYER, FIRST_ENEMY + i, 3)
+            caught = CAUGHT_FRAMES
+        end
+    end
+    return
+end
+
+# Draws `actor` for body `body` with `cell`, hidden while above the room.
+# The sprites face left; `mirrored` turns them to face right.
+procedure draw_body(actor: u8, body: u8, cell: u16, mirrored: u8)
+    if body_y(body) < 0
+        actor_hide(actor)
+        return
+    end
+    actor_draw(actor, u16(ROOM_X + body_x(body)), u16(body_y(body)), cell, mirrored)
+    return
+end
+
+procedure draw()
+    var i: u8
+    var cell: u16
+    if caught
+        cell = BUB_SPIN[u8(tick >> 2) % 6]
+    elsif body_on_ground(PLAYER) == 0
+        cell = BUB_WALK[2]
+    elsif walk_step == 0 or (buttons_before & (JOY_LEFT | JOY_RIGHT)) == 0
+        cell = BUBBLUN_STAND
+    else
+        cell = BUB_WALK[(walk_step >> 2) % 6]
+    end
+    # Blink while safe after being caught.
+    if safe and (u8(tick) & 4)
+        actor_hide(bub)
+    else
+        draw_body(bub, PLAYER, cell, facing_left xor 1)
+    end
+    for i = 0 to ENEMIES - 1
+        if enemy_delay[i] == 0
+            draw_body(enemy_actor[i], FIRST_ENEMY + i,
+                      ZEN_WALK[u8(tick >> 3) % 4], enemy_left[i] xor 1)
+        end
+    end
+    return
+end
+
+export function main(): u8
+    var i: u8
+    var buttons: u8
+    vic4_init()
+    actors_sheet(u32(addr(DEMO_IMAGES)), u32(addr(DEMO_PALETTES)), u32(addr(DEMO_CELLS)))
+    actors_software(SCREEN, COLUMNS, ROWS, SLOTS, ACTOR_CHARACTERS, ENTRIES)
+    actors_hardware(SPRITE_TABLE, SPRITE_BUFFERS, 1, SPRITE_X0, SPRITE_Y0)
+    vic4_border(0)
+    vic4_background(0)
+    bb_draw_room(1, 0, u32(addr(DEMO_ROOM_TILES)), u32(addr(DEMO_ROOM_PALETTES)),
+                 u32(addr(DEMO_ROOM_MAP)), ROOM_TILES, ROOM_LEFT)
+    physics_room(u32(addr(DEMO_ROOM_MAP)))
+    bub = actor_new(ACTOR_HARDWARE)
+    body_place(PLAYER, START_X, START_Y)
+    for i = 0 to ENEMIES - 1
+        enemy_actor[i] = actor_new(ACTOR_SOFTWARE)
+        enemy_delay[i] = DROP_DELAY[i]
+        enemy_left[i] = i & 1
+    end
+    seed = $ace1
+    tick = 0
+    repeat
+        vic4_wait_line(QUIET_LINE)
+        buttons = joystick(2)
+        move_bub(buttons)
+        for i = 0 to ENEMIES - 1
+            move_enemy(i)
+        end
+        check_caught()
+        buttons_before = buttons
+        draw()
+        actors_frame()
+        tick = tick + 1
+    until 0
+    return 0
+end

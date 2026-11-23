@@ -1,0 +1,239 @@
+module BubblePhysics
+
+# Bubble Bobble-style platform physics for 16x16 bodies in a 32x26-cell room.
+#
+# Positions are room pixels, x to the right and y down from the room's top
+# left, kept in sixteenths of a pixel so that speeds and gravity can be
+# fractional. Terrain comes from a room map (levels.py's format: one byte
+# per 8x8 cell, 26 rows of 32):
+#
+# - wall cells (1-4, the side walls) stop bodies from every direction;
+# - platform cells (5) are one-way: a body rising through one carries on, a
+#   body coming down onto one lands on it. The top row is the exception: it
+#   stops a body leaving through the ceiling, and a body coming in from
+#   above (dropping in, or wrapping round from the bottom) passes through;
+# - everything else (0, and the shadows 6-11) is empty.
+#
+# A body that falls out of the bottom of the room comes back in at the top.
+#
+# Each frame a game moves a body sideways with body_walk (walls stop it) and
+# then calls body_step for gravity, landing and walking off edges.
+
+export const ROOM_COLUMNS = 32
+export const ROOM_ROWS = 26
+export const ROOM_WIDTH = ROOM_COLUMNS * 8
+export const ROOM_HEIGHT = ROOM_ROWS * 8
+
+# Terrain kinds (terrain).
+export const EMPTY = 0
+export const PLATFORM = 1
+export const WALL = 2
+
+# Speeds are in sixteenths of a pixel per frame.
+export const SUBPIXELS = 16
+export const GRAVITY = 2
+export const TERMINAL = 24
+# Rises about 49 px: enough to jump up through a platform 5 rows above.
+export const JUMP = 56
+
+export const MAX_BODIES = 16
+
+const SIZE = 16
+# The feet test the terrain under these columns of the body.
+const LEFT_FOOT = 3
+const RIGHT_FOOT = 12
+# A side tests the terrain at these rows of the body.
+const HEAD = 2
+const KNEES = 13
+
+type Body = record(x: i16, y: i16, vy: i16, ground: u8)
+
+var bodies: parallel [MAX_BODIES]Body
+var cells: [ROOM_ROWS * ROOM_COLUMNS]u8
+
+# ---------------------------------------------------------------- terrain
+
+# Reads a room map of ROOM_ROWS * ROOM_COLUMNS bytes at `map` (any address
+# DMA or a far pointer reaches) into the terrain.
+export procedure physics_room(map: u32)
+    var cell: far ^u8
+    var i: u16
+    var kind: u8
+    cell = map
+    i = 0
+    while i != ROOM_ROWS * ROOM_COLUMNS
+        kind = cell[i]
+        if kind >= 1 and kind <= 4
+            cells[i] = WALL
+        elsif kind == 5
+            cells[i] = PLATFORM
+        else
+            cells[i] = EMPTY
+        end
+        i = i + 1
+    end
+    return
+end
+
+# The terrain at room pixel (px, py). Above and below the room is empty;
+# left and right of it is wall.
+export function terrain(px: i16, py: i16): u8
+    if py < 0 or py >= ROOM_HEIGHT
+        return EMPTY
+    end
+    if px < 0 or px >= ROOM_WIDTH
+        return WALL
+    end
+    return cells[(u16(py) >> 3 << 5) + (u16(px) >> 3)]
+end
+
+# Whether a body at pixel x has ground under its feet at pixel row `feet`.
+function supported(px: i16, feet: i16): u8
+    if terrain(px + LEFT_FOOT, feet) != EMPTY
+        return 1
+    end
+    if terrain(px + RIGHT_FOOT, feet) != EMPTY
+        return 1
+    end
+    return 0
+end
+
+# Whether pixel column `edge` is wall beside a body at pixel row y.
+function blocked(edge: i16, py: i16): u8
+    if terrain(edge, py + HEAD) == WALL
+        return 1
+    end
+    if terrain(edge, py + KNEES) == WALL
+        return 1
+    end
+    return 0
+end
+
+# ---------------------------------------------------------------- bodies
+
+# Puts body `body` at room pixel (x, y), at rest and not yet on the ground.
+export procedure body_place(body: u8, x: i16, y: i16)
+    bodies[body].x = x << 4
+    bodies[body].y = y << 4
+    bodies[body].vy = 0
+    bodies[body].ground = 0
+    return
+end
+
+export function body_x(body: u8): i16
+    return bodies[body].x >> 4
+end
+
+export function body_y(body: u8): i16
+    return bodies[body].y >> 4
+end
+
+export function body_on_ground(body: u8): u8
+    return bodies[body].ground
+end
+
+# Moves `body` `dx` sixteenths of a pixel sideways, unless a wall is in the
+# way. 1 when a wall stopped it.
+export function body_walk(body: u8, dx: i16): u8
+    var x: i16
+    var px: i16
+    var edge: i16
+    if dx == 0
+        return 0
+    end
+    x = bodies[body].x + dx
+    px = x >> 4
+    edge = px
+    if dx > 0
+        edge = px + SIZE - 1
+    end
+    if blocked(edge, bodies[body].y >> 4)
+        return 1
+    end
+    bodies[body].x = x
+    return 0
+end
+
+# Jumps `body` upward at `speed` sixteenths of a pixel per frame, if it is
+# standing on something. 1 when it jumped.
+export function body_jump(body: u8, speed: i16): u8
+    if bodies[body].ground == 0
+        return 0
+    end
+    bodies[body].vy = 0 - speed
+    bodies[body].ground = 0
+    return 1
+end
+
+# One frame of gravity for `body`: rising, falling, landing on what is under
+# it, starting to fall when it walks off an edge, and coming back in at the
+# top after falling out of the bottom.
+export procedure body_step(body: u8)
+    var px: i16
+    var y: i16
+    var vy: i16
+    var feet_before: i16
+    var feet_after: i16
+    var top: i16
+    px = bodies[body].x >> 4
+    if bodies[body].ground
+        if not supported(px, (bodies[body].y >> 4) + SIZE)
+            bodies[body].ground = 0
+            bodies[body].vy = 0
+        end
+        return
+    end
+    vy = bodies[body].vy + GRAVITY
+    if vy > TERMINAL
+        vy = TERMINAL
+    end
+    y = bodies[body].y + vy
+    if vy < 0
+        # Rising: through platforms, but not out through the ceiling.
+        if (y >> 4) < 8 and (bodies[body].y >> 4) >= 8
+            if supported(px, 0)
+                y = 8 << 4
+                vy = 0
+            end
+        end
+    else
+        # Falling: land on terrain whose top the feet reach, having started
+        # at or above it (so a body inside a platform falls on through).
+        feet_before = (bodies[body].y >> 4) + SIZE
+        feet_after = (y >> 4) + SIZE
+        top = (feet_after >> 3) << 3
+        # The top row is never landed on: bodies come in through it.
+        if feet_before <= top and top > 0
+            if supported(px, top)
+                y = (top - SIZE) << 4
+                vy = 0
+                bodies[body].ground = 1
+            end
+        end
+        if (y >> 4) >= ROOM_HEIGHT
+            y = y - ((ROOM_HEIGHT + SIZE) << 4)
+        end
+    end
+    bodies[body].y = y
+    bodies[body].vy = vy
+    return
+end
+
+# Whether bodies `a` and `b` overlap, each shrunk by `margin` pixels on
+# every side.
+export function bodies_touch(a: u8, b: u8, margin: i16): u8
+    var dx: i16
+    var dy: i16
+    dx = (bodies[a].x >> 4) - (bodies[b].x >> 4)
+    dy = (bodies[a].y >> 4) - (bodies[b].y >> 4)
+    if dx < 0
+        dx = 0 - dx
+    end
+    if dy < 0
+        dy = 0 - dy
+    end
+    if dx < SIZE - (margin << 1) and dy < SIZE - (margin << 1)
+        return 1
+    end
+    return 0
+end

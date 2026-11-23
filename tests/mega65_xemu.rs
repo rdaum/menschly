@@ -2860,3 +2860,157 @@ fn actors_draw_hardware_sprites_and_raster_rewrite_characters() {
     assert_eq!(&memory[0x47000..0x47008], &[0x43, 0, 0, 0, 0, 0, 0, 0x21]);
     assert_eq!(&memory[0x0e00..0x0e05], &[34, 66, 0x01, 0x65, 2]);
 }
+
+#[test]
+fn bubble_physics_walks_jumps_lands_and_wraps() {
+    let physics = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts/bubble_bobble/bubble-physics.mensch"),
+    )
+    .expect("physics module should be readable");
+    let caller = "
+        module PhysicsTest
+        import BubblePhysics
+        fixed($0e00) volatile var out: [12]i16
+        var room_map: [832]u8
+
+        # Side walls; ceiling and floor with a gap at columns 14-17; one
+        # platform on row 20, columns 8-15.
+        procedure build()
+            var row: u8
+            var col: u8
+            var i: u16
+            i = 0
+            for row = 0 to 25
+                for col = 0 to 31
+                    room_map[i] = 0
+                    if col < 2 or col >= 30
+                        room_map[i] = 1
+                    elsif (row == 0 or row == 25) and (col < 14 or col > 17)
+                        room_map[i] = 5
+                    elsif row == 20 and col >= 8 and col <= 15
+                        room_map[i] = 5
+                    end
+                    i = i + 1
+                end
+            end
+            return
+        end
+
+        procedure steps(body: u8, frames: u16)
+            while frames
+                body_step(body)
+                frames = frames - 1
+            end
+            return
+        end
+
+        procedure walks(body: u8, dx: i16, frames: u16)
+            var stopped: u8
+            while frames
+                stopped = body_walk(body, dx)
+                body_step(body)
+                frames = frames - 1
+            end
+            return
+        end
+
+        export function main(): u8
+            var frame: u16
+            var went_above: i16
+            build()
+            physics_room(u32(addr(room_map)))
+            # 1. A drop lands on the floor (row 25, top at y 200).
+            body_place(0, 40, 100)
+            steps(0, 200)
+            out[0] = body_y(0)
+            out[1] = i16(body_on_ground(0))
+            # 2. Walking right stops at the wall (column 30, x 240).
+            body_place(1, 200, 184)
+            walks(1, 16, 60)
+            out[2] = body_x(1)
+            # 3. A jump from the floor goes up through the platform and
+            #    lands on it (row 20, top at y 160).
+            body_place(2, 80, 184)
+            steps(2, 1)
+            out[3] = i16(body_jump(2, JUMP))
+            steps(2, 120)
+            out[4] = body_y(2)
+            out[5] = i16(body_on_ground(2))
+            # 4. Walking left off the platform falls to the floor and on to
+            #    the left wall (column 1 ends at x 16).
+            walks(2, -16, 160)
+            out[6] = body_x(2)
+            out[7] = body_y(2)
+            # 5. Over the floor gap: out of the bottom, in through the
+            #    ceiling gap, onto the platform.
+            body_place(3, 116, 184)
+            went_above = 0
+            for frame = 1 to 600
+                body_step(3)
+                if body_y(3) < 0
+                    went_above = 1
+                end
+            end
+            out[8] = went_above
+            out[9] = body_y(3)
+            # 6. Overlap, with 3 px margins: 8 px apart touch, 10 do not.
+            body_place(4, 50, 50)
+            body_place(5, 58, 50)
+            out[10] = i16(bodies_touch(4, 5, 3))
+            body_place(5, 60, 50)
+            out[11] = i16(bodies_touch(4, 5, 3))
+            return 0
+        end
+        ";
+    let sources = [
+        mega65::KernelModule {
+            name: "0-caller".to_owned(),
+            source: caller.to_owned(),
+            window: None,
+        },
+        mega65::KernelModule {
+            name: "1-physics".to_owned(),
+            source: physics,
+            window: None,
+        },
+    ];
+    let modules = mega65::compile_kernel_modules(&sources).expect("modules should compile");
+    let refs = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect::<Vec<_>>();
+    let dir = temp_dir("bubble-physics");
+    let rom = mega65::build_rom(&dir, &refs).expect("modules should link");
+    let Some(xemu) = mega65::find_xemu() else {
+        eprintln!("skipping bubble-physics: Xemu not found (set MENSCH_XMEGA65)");
+        return;
+    };
+    let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
+    assert_eq!(run.exit_code, 0);
+    let out: Vec<i16> = (0..12)
+        .map(|i| i16::from_le_bytes([run.memory[0x0e00 + 2 * i], run.memory[0x0e01 + 2 * i]]))
+        .collect();
+    assert_eq!(&out[0..2], &[184, 1], "drop onto the floor");
+    assert_eq!(out[2], 224, "walk into the right wall");
+    assert_eq!(
+        &out[3..6],
+        &[1, 144, 1],
+        "jump up through the platform onto it"
+    );
+    assert_eq!(
+        &out[6..8],
+        &[16, 184],
+        "walk off the platform to the floor and the left wall"
+    );
+    assert_eq!(
+        &out[8..10],
+        &[1, 144],
+        "wrap through the floor and ceiling gaps"
+    );
+    assert_eq!(
+        &out[10..12],
+        &[1, 0],
+        "overlap inside and outside the margin"
+    );
+}

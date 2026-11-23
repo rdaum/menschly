@@ -39,7 +39,8 @@ ROOM_TILES = 768
 ROOM_PALETTES = 96
 ROOM_MAP = 832
 
-# The cycles the demo animates, in slot order. Names match BubbleAnim's C_*.
+# The cycles the demos use. The first six are BubbleAnim's C_*, in slot
+# order; the rest are the playable demo's (bubble-game.mensch).
 CYCLES = [
     ("BUBBLUN_WALK", [f"BUBBLUN_WALK_{i:02d}" for i in range(1, 7)]),
     ("BOBBLUN_WALK", [f"BOBBLUN_WALK_{i:02d}" for i in range(1, 7)]),
@@ -48,6 +49,8 @@ CYCLES = [
     ("MAITA_MOVE", [f"MAITA_MOVE_{i:02d}" for i in range(1, 8)]),
     ("ZEN_CHAN_MOVE", [f"ZEN_CHAN_WALK_{i:02d}" for i in range(1, 5)]),
     ("BUBBLE_BLUE", [f"BUBBLE_BLUE_{i:02d}" for i in range(1, 4)]),
+    ("BUBBLUN_STAND", ["BUBBLUN_STAND"]),
+    ("BUBBLUN_SPIN", [f"BUBBLUN_SPIN_{i:02d}" for i in range(1, 7)]),
 ]
 
 
