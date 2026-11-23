@@ -1,0 +1,223 @@
+module BubbleBubbles
+
+# Bubbles, Bubble Bobble-style: blown from in front of the player, they
+# shoot sideways, then float up to just under the ceiling and drift toward
+# the middle of the room, and in the end burst. A shooting bubble can trap
+# an enemy; a trapped enemy breaks out (the bubble bursts) if the bubble is
+# left too long. The game decides what touches what: this module keeps the
+# bubbles moving and answers for them.
+#
+# Positions are room pixels (as BubblePhysics'), kept in sixteenths.
+
+import BubblePhysics
+
+export const MAX_BUBBLES = 20
+export const NO_BUBBLE = $ff
+export const NO_CAPTIVE = $ff
+
+# A bubble's state.
+export const BUBBLE_FREE = 0
+export const BUBBLE_SHOT = 1
+export const BUBBLE_FLOAT = 2
+export const BUBBLE_POP = 3
+
+# Shooting: 3 px per frame for 16 frames, about 48 px.
+export const SHOT_FRAMES = 16
+const SHOT_SPEED = 48
+# Floating: up at half a pixel per frame to just under the top row, then
+# along it toward the middle of the room at a quarter of a pixel.
+const RISE_SPEED = 8
+const DRIFT_SPEED = 4
+const CEILING = 8
+const MIDDLE = 120
+# How long a floating bubble lasts: empty, and with an enemy inside.
+const FLOAT_FRAMES = 600
+const CAPTIVE_FRAMES = 480
+export const POP_FRAMES = 16
+
+const SIZE = 16
+# A bubble appears this far in front of the one blowing it.
+const MOUTH = 8
+
+type Bubble = record(state: u8, captive: u8, escaped: u8, x: i16, y: i16, vx: i16, timer: u16)
+
+var bubbles: parallel [MAX_BUBBLES]Bubble
+
+export procedure bubbles_reset()
+    var b: u8
+    for b = 0 to MAX_BUBBLES - 1
+        bubbles[b].state = BUBBLE_FREE
+    end
+    return
+end
+
+# Blows a bubble from a 16x16 body at pixel (x, y), facing left if `left`:
+# the bubble's number, or NO_BUBBLE if there is no room for one or a wall
+# is in the way.
+export function bubble_blow(x: i16, y: i16, left: u8): u8
+    var b: u8
+    var start: i16
+    start = x + MOUTH
+    if left
+        start = x - MOUTH
+    end
+    if terrain(start, y + 8) == WALL or terrain(start + SIZE - 1, y + 8) == WALL
+        return NO_BUBBLE
+    end
+    for b = 0 to MAX_BUBBLES - 1
+        if bubbles[b].state == BUBBLE_FREE
+            bubbles[b].state = BUBBLE_SHOT
+            bubbles[b].captive = NO_CAPTIVE
+            bubbles[b].escaped = 0
+            bubbles[b].x = start << 4
+            bubbles[b].y = y << 4
+            bubbles[b].vx = SHOT_SPEED
+            if left
+                bubbles[b].vx = 0 - SHOT_SPEED
+            end
+            bubbles[b].timer = SHOT_FRAMES
+            return b
+        end
+    end
+    return NO_BUBBLE
+end
+
+procedure start_float(b: u8)
+    bubbles[b].state = BUBBLE_FLOAT
+    bubbles[b].timer = FLOAT_FRAMES
+    if bubbles[b].captive != NO_CAPTIVE
+        bubbles[b].timer = CAPTIVE_FRAMES
+    end
+    return
+end
+
+procedure start_pop(b: u8)
+    bubbles[b].state = BUBBLE_POP
+    bubbles[b].timer = POP_FRAMES
+    return
+end
+
+procedure shoot(b: u8)
+    var x: i16
+    var px: i16
+    var edge: i16
+    x = bubbles[b].x + bubbles[b].vx
+    px = x >> 4
+    edge = px
+    if bubbles[b].vx > 0
+        edge = px + SIZE - 1
+    end
+    if terrain(edge, (bubbles[b].y >> 4) + 8) == WALL
+        # Up against the wall's cell, then float.
+        if bubbles[b].vx > 0
+            bubbles[b].x = (((edge >> 3) << 3) - SIZE) << 4
+        else
+            bubbles[b].x = (((edge >> 3) << 3) + 8) << 4
+        end
+        start_float(b)
+        return
+    end
+    bubbles[b].x = x
+    bubbles[b].timer = bubbles[b].timer - 1
+    if bubbles[b].timer == 0
+        start_float(b)
+    end
+    return
+end
+
+procedure float(b: u8)
+    var px: i16
+    if (bubbles[b].y >> 4) > CEILING
+        bubbles[b].y = bubbles[b].y - RISE_SPEED
+        if (bubbles[b].y >> 4) < CEILING
+            bubbles[b].y = CEILING << 4
+        end
+    else
+        px = bubbles[b].x >> 4
+        if px < MIDDLE
+            bubbles[b].x = bubbles[b].x + DRIFT_SPEED
+        elsif px > MIDDLE
+            bubbles[b].x = bubbles[b].x - DRIFT_SPEED
+        end
+    end
+    bubbles[b].timer = bubbles[b].timer - 1
+    if bubbles[b].timer == 0
+        if bubbles[b].captive != NO_CAPTIVE
+            bubbles[b].escaped = 1
+        end
+        start_pop(b)
+    end
+    return
+end
+
+# Moves every bubble one frame.
+export procedure bubbles_step()
+    var b: u8
+    for b = 0 to MAX_BUBBLES - 1
+        if bubbles[b].state == BUBBLE_SHOT
+            shoot(b)
+        elsif bubbles[b].state == BUBBLE_FLOAT
+            float(b)
+        elsif bubbles[b].state == BUBBLE_POP
+            bubbles[b].timer = bubbles[b].timer - 1
+            if bubbles[b].timer == 0
+                bubbles[b].state = BUBBLE_FREE
+            end
+        end
+    end
+    return
+end
+
+# Traps `enemy` in shooting bubble `b`, which starts to float: 1 if it
+# did, 0 if `b` is not a shooting bubble or already holds one.
+export function bubble_capture(b: u8, enemy: u8): u8
+    if bubbles[b].state != BUBBLE_SHOT or bubbles[b].captive != NO_CAPTIVE
+        return 0
+    end
+    bubbles[b].captive = enemy
+    start_float(b)
+    return 1
+end
+
+# Bursts floating bubble `b`: the enemy it held, or NO_CAPTIVE.
+export function bubble_pop(b: u8): u8
+    var enemy: u8
+    enemy = bubbles[b].captive
+    bubbles[b].captive = NO_CAPTIVE
+    start_pop(b)
+    return enemy
+end
+
+# The enemy that broke out of bubble `b` since the last call, or
+# NO_CAPTIVE.
+export function bubble_escapee(b: u8): u8
+    var enemy: u8
+    if bubbles[b].escaped == 0
+        return NO_CAPTIVE
+    end
+    bubbles[b].escaped = 0
+    enemy = bubbles[b].captive
+    bubbles[b].captive = NO_CAPTIVE
+    return enemy
+end
+
+export function bubble_state(b: u8): u8
+    return bubbles[b].state
+end
+
+export function bubble_captive(b: u8): u8
+    return bubbles[b].captive
+end
+
+export function bubble_x(b: u8): i16
+    return bubbles[b].x >> 4
+end
+
+export function bubble_y(b: u8): i16
+    return bubbles[b].y >> 4
+end
+
+# Frames left in the bubble's current state (for its animation).
+export function bubble_timer(b: u8): u16
+    return bubbles[b].timer
+end

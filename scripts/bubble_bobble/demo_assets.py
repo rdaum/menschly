@@ -51,6 +51,11 @@ CYCLES = [
     ("BUBBLE_BLUE", [f"BUBBLE_BLUE_{i:02d}" for i in range(1, 4)]),
     ("BUBBLUN_STAND", ["BUBBLUN_STAND"]),
     ("BUBBLUN_SPIN", [f"BUBBLUN_SPIN_{i:02d}" for i in range(1, 7)]),
+    ("BUBBLE_FORM_GREEN", [f"BUBBLE_FORM_GREEN_{i:02d}" for i in range(1, 7)]),
+    ("BUBBLE_GREEN", [f"BUBBLE_GREEN_{i:02d}" for i in range(1, 4)]),
+    ("BUBBLE_DOTTED", [f"BUBBLE_DOTTED_{i:02d}" for i in range(1, 4)]),
+    ("ZEN_CHAN_BUBBLE_GREEN", [f"ZEN_CHAN_BUBBLE_GREEN_{i:02d}" for i in range(1, 4)]),
+    ("ZEN_CHAN_ANGRY", [f"ZEN_CHAN_ANGRY_{i:02d}" for i in range(1, 5)]),
 ]
 
 

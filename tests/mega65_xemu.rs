@@ -3014,3 +3014,144 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
         "overlap inside and outside the margin"
     );
 }
+
+#[test]
+fn bubble_bubbles_shoot_float_trap_and_burst() {
+    let read = |name: &str| {
+        std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("scripts/bubble_bobble")
+                .join(name),
+        )
+        .expect("module should be readable")
+    };
+    let caller = "
+        module BubblesTest
+        import BubblePhysics
+        import BubbleBubbles
+        fixed($0e00) volatile var out: [16]i16
+        var room_map: [832]u8
+
+        # Side walls and a floor.
+        procedure build()
+            var row: u8
+            var col: u8
+            var i: u16
+            i = 0
+            for row = 0 to 25
+                for col = 0 to 31
+                    room_map[i] = 0
+                    if col < 2 or col >= 30
+                        room_map[i] = 1
+                    elsif row == 25
+                        room_map[i] = 5
+                    end
+                    i = i + 1
+                end
+            end
+            return
+        end
+
+        procedure steps(frames: u16)
+            while frames
+                bubbles_step()
+                frames = frames - 1
+            end
+            return
+        end
+
+        export function main(): u8
+            var b: u8
+            var c: u8
+            build()
+            physics_room(u32(addr(room_map)))
+            bubbles_reset()
+            # 1. Blown right from x 40: starts at 48, shoots 48 px.
+            b = bubble_blow(40, 184, 0)
+            out[0] = i16(b)
+            steps(SHOT_FRAMES)
+            out[1] = bubble_x(b)
+            out[2] = i16(bubble_state(b))
+            # 2. Rises half a pixel a frame to y 8, then drifts to the middle.
+            steps(360)
+            out[3] = bubble_y(b)
+            out[4] = bubble_x(b)
+            # 3. Bursts when its 600 floating frames run out, then is free.
+            steps(240)
+            out[5] = i16(bubble_state(b))
+            steps(POP_FRAMES)
+            out[6] = i16(bubble_state(b))
+            # 4. Blown at the right wall (column 30, x 240): stops at 224.
+            b = bubble_blow(200, 184, 0)
+            steps(8)
+            out[7] = bubble_x(b)
+            out[8] = i16(bubble_state(b))
+            # 5. A trapped enemy floats, then breaks out after 480 frames.
+            bubbles_reset()
+            b = bubble_blow(40, 184, 0)
+            out[9] = i16(bubble_capture(b, 2))
+            out[10] = i16(bubble_state(b))
+            steps(479)
+            out[11] = i16(bubble_escapee(b))
+            steps(1)
+            out[12] = i16(bubble_escapee(b))
+            # 6. Popping an empty floating bubble frees no one.
+            c = bubble_blow(80, 184, 1)
+            steps(SHOT_FRAMES)
+            out[13] = i16(bubble_pop(c))
+            out[14] = i16(bubble_state(c))
+            return 0
+        end
+        ";
+    let sources = [
+        ("0-caller", caller.to_owned()),
+        ("1-physics", read("bubble-physics.mensch")),
+        ("2-bubbles", read("bubble-bubbles.mensch")),
+    ]
+    .map(|(name, source)| mega65::KernelModule {
+        name: name.to_owned(),
+        source,
+        window: None,
+    });
+    let modules = mega65::compile_kernel_modules(&sources).expect("modules should compile");
+    let refs = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect::<Vec<_>>();
+    let dir = temp_dir("bubble-bubbles");
+    let rom = mega65::build_rom(&dir, &refs).expect("modules should link");
+    let Some(xemu) = mega65::find_xemu() else {
+        eprintln!("skipping bubble-bubbles: Xemu not found (set MENSCH_XMEGA65)");
+        return;
+    };
+    let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
+    assert_eq!(run.exit_code, 0);
+    let out: Vec<i16> = (0..15)
+        .map(|i| i16::from_le_bytes([run.memory[0x0e00 + 2 * i], run.memory[0x0e01 + 2 * i]]))
+        .collect();
+    // States: free 0, shot 1, float 2, pop 3; no captive is $FF (-1 as i16 of u8 is 255).
+    assert_eq!(
+        &out[0..3],
+        &[0, 96, 2],
+        "shoots 48 px from x 48, then floats"
+    );
+    assert_eq!(out[3], 8, "rises to just under the ceiling");
+    assert!(
+        out[4] > 96 && out[4] <= 120,
+        "drifts toward the middle: {}",
+        out[4]
+    );
+    assert_eq!(&out[5..7], &[3, 0], "bursts, then is free");
+    assert_eq!(&out[7..9], &[224, 2], "stops at the wall and floats");
+    assert_eq!(&out[9..11], &[1, 2], "traps an enemy and floats");
+    assert_eq!(
+        &out[11..13],
+        &[255, 2],
+        "the enemy breaks out at 480 frames"
+    );
+    assert_eq!(
+        &out[13..15],
+        &[255, 3],
+        "an empty bubble pops with no captive"
+    );
+}

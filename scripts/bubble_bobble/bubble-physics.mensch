@@ -219,13 +219,13 @@ export procedure body_step(body: u8)
     return
 end
 
-# Whether bodies `a` and `b` overlap, each shrunk by `margin` pixels on
-# every side.
-export function bodies_touch(a: u8, b: u8, margin: i16): u8
+# Whether 16x16 boxes at pixels (ax, ay) and (bx, by) overlap, each shrunk
+# by `margin` pixels on every side.
+export function boxes_touch(ax: i16, ay: i16, bx: i16, by: i16, margin: i16): u8
     var dx: i16
     var dy: i16
-    dx = (bodies[a].x >> 4) - (bodies[b].x >> 4)
-    dy = (bodies[a].y >> 4) - (bodies[b].y >> 4)
+    dx = ax - bx
+    dy = ay - by
     if dx < 0
         dx = 0 - dx
     end
@@ -236,4 +236,10 @@ export function bodies_touch(a: u8, b: u8, margin: i16): u8
         return 1
     end
     return 0
+end
+
+# Whether bodies `a` and `b` overlap, each shrunk by `margin` pixels on
+# every side.
+export function bodies_touch(a: u8, b: u8, margin: i16): u8
+    return boxes_touch(bodies[a].x >> 4, bodies[a].y >> 4, bodies[b].x >> 4, bodies[b].y >> 4, margin)
 end

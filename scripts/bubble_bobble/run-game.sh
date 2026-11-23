@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the playable Bubble Bobble room and boot it in Xemu (joystick 2:
-# left/right to walk, fire or up to jump). Xemu takes the arrow keys as the
-# joystick and Right Ctrl as fire.
+# left/right to walk, up to jump, fire to blow a bubble). Xemu takes the
+# arrow keys as the joystick and Right Ctrl as fire.
 #
 #   scripts/bubble_bobble/run-game.sh              build and run
 #   scripts/bubble_bobble/run-game.sh --rom F.rom  also keep the ROM image
@@ -45,6 +45,7 @@ cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- 
   --work-dir "$assets/build-game" \
   "$here/bubble-game.mensch" \
   "$here/bubble-physics.mensch" \
+  "$here/bubble-bubbles.mensch" \
   "$here/bubble-video.mensch" \
   "$root/lib/vic4.mensch" \
   "$root/lib/actors.mensch" \

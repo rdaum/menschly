@@ -2,16 +2,21 @@ module BubbleGame
 
 # A playable Bubble Bobble-style room on the MEGA65: Bub on joystick 2 in
 # room 1, with three Zen-chans that drop in, walk, turn at walls and now and
-# then jump after him. Touching one spins Bub and puts him back at the start.
+# then jump after him. Fire blows a bubble, which traps a Zen-chan it hits;
+# touching a floating bubble pops it, and a Zen-chan popped that way is gone.
+# A Zen-chan left in its bubble too long breaks out angry, and faster. When
+# all three are gone the round starts again. Touching a Zen-chan spins Bub
+# and puts him back at the start.
 #
-# Movement and collision are BubblePhysics'; drawing is lib/actors.mensch's.
-# Run it with scripts/bubble_bobble/run-game.sh.
+# Movement and collision are BubblePhysics', bubbles BubbleBubbles', drawing
+# lib/actors.mensch's. Run it with scripts/bubble_bobble/run-game.sh.
 
 import Vic4
 import Actors
 import BubbleDemoData
 import BubbleVideo
 import BubblePhysics
+import BubbleBubbles
 
 # Chip RAM, as in the animation demo.
 const ROOM_TILES: u32 = $44000
@@ -39,6 +44,8 @@ const START_Y = 184
 # Frames Bub spins when caught, then frames he cannot be caught again.
 const CAUGHT_FRAMES = 60
 const SAFE_FRAMES = 90
+# Frames between bubbles, and of the blowing animation.
+const BLOW_FRAMES = 16
 
 const BUB_WALK: [6]u16 = [
     BUBBLUN_WALK_01, BUBBLUN_WALK_02, BUBBLUN_WALK_03,
@@ -48,12 +55,17 @@ const BUB_SPIN: [6]u16 = [
     BUBBLUN_SPIN_01, BUBBLUN_SPIN_02, BUBBLUN_SPIN_03,
     BUBBLUN_SPIN_04, BUBBLUN_SPIN_05, BUBBLUN_SPIN_06
 ]
+const BUB_BLOW: [8]u16 = [
+    BUBBLUN_BLOW_01, BUBBLUN_BLOW_02, BUBBLUN_BLOW_03, BUBBLUN_BLOW_04,
+    BUBBLUN_BLOW_05, BUBBLUN_BLOW_06, BUBBLUN_BLOW_07, BUBBLUN_BLOW_08
+]
 
 var bub: u8
 var facing_left: u8
 var walk_step: u8
 var caught: u8
 var safe: u8
+var blowing: u8
 var buttons_before: u8
 
 # ---------------------------------------------------------------- Zen-chans
@@ -61,17 +73,47 @@ var buttons_before: u8
 const ENEMIES = 3
 const FIRST_ENEMY = 1
 const ENEMY_SPEED = 12
+const ANGRY_SPEED = 20
 const DROP_X = 120
 # Round 1's stagger: each drops in this many frames after the round starts.
 const DROP_DELAY: [ENEMIES]u8 = [1, 21, 41]
+# Frames between the last Zen-chan going and the round starting again.
+const CLEAR_FRAMES = 120
+
+# A Zen-chan's state.
+const WAITING = 0
+const ACTIVE = 1
+const TRAPPED = 2
+const GONE = 3
 
 const ZEN_WALK: [4]u16 = [
     ZEN_CHAN_WALK_01, ZEN_CHAN_WALK_02, ZEN_CHAN_WALK_03, ZEN_CHAN_WALK_04
 ]
+const ZEN_ANGRY: [4]u16 = [
+    ZEN_CHAN_ANGRY_01, ZEN_CHAN_ANGRY_02, ZEN_CHAN_ANGRY_03, ZEN_CHAN_ANGRY_04
+]
 
 var enemy_actor: [ENEMIES]u8
+var enemy_state: [ENEMIES]u8
 var enemy_delay: [ENEMIES]u8
 var enemy_left: [ENEMIES]u8
+var enemy_angry: [ENEMIES]u8
+var clearing: u8
+
+# ---------------------------------------------------------------- bubbles
+
+const BUBBLE_FORM: [6]u16 = [
+    BUBBLE_FORM_GREEN_01, BUBBLE_FORM_GREEN_02, BUBBLE_FORM_GREEN_03,
+    BUBBLE_FORM_GREEN_04, BUBBLE_FORM_GREEN_05, BUBBLE_FORM_GREEN_06
+]
+const BUBBLE_FLOAT_FRAMES: [3]u16 = [BUBBLE_GREEN_01, BUBBLE_GREEN_02, BUBBLE_GREEN_03]
+const BUBBLE_TRAPPED: [3]u16 = [
+    ZEN_CHAN_BUBBLE_GREEN_01, ZEN_CHAN_BUBBLE_GREEN_02, ZEN_CHAN_BUBBLE_GREEN_03
+]
+# A popped bubble: a dotted ring breaking up.
+const BUBBLE_POPPED: [3]u16 = [BUBBLE_DOTTED_01, BUBBLE_DOTTED_02, BUBBLE_DOTTED_03]
+
+var bubble_actor: [MAX_BUBBLES]u8
 
 var seed: u16
 var tick: u16
@@ -89,9 +131,24 @@ end
 
 # ---------------------------------------------------------------- per frame
 
+procedure start_round()
+    var i: u8
+    for i = 0 to ENEMIES - 1
+        enemy_state[i] = WAITING
+        enemy_delay[i] = DROP_DELAY[i]
+        enemy_left[i] = i & 1
+        enemy_angry[i] = 0
+        actor_hide(enemy_actor[i])
+    end
+    bubbles_reset()
+    clearing = 0
+    return
+end
+
 procedure move_bub(buttons: u8)
     var dx: i16
     var pressed: u8
+    var b: u8
     if caught
         caught = caught - 1
         if caught == 0
@@ -102,6 +159,9 @@ procedure move_bub(buttons: u8)
     end
     if safe
         safe = safe - 1
+    end
+    if blowing
+        blowing = blowing - 1
     end
     dx = 0
     if buttons & JOY_LEFT
@@ -115,10 +175,14 @@ procedure move_bub(buttons: u8)
         walk_step = walk_step + 1
     end
     pressed = buttons & (buttons_before xor $ff)
-    if pressed & (JOY_FIRE | JOY_UP)
+    if pressed & JOY_UP
         if body_jump(PLAYER, JUMP)
             walk_step = 0
         end
+    end
+    if (pressed & JOY_FIRE) and blowing == 0
+        b = bubble_blow(body_x(PLAYER), body_y(PLAYER), facing_left)
+        blowing = BLOW_FRAMES
     end
     body_step(PLAYER)
     return
@@ -128,17 +192,27 @@ procedure move_enemy(i: u8)
     var body: u8
     var dx: i16
     var dy: i16
+    var chance: u8
     body = FIRST_ENEMY + i
-    if enemy_delay[i]
+    if enemy_state[i] == WAITING
         enemy_delay[i] = enemy_delay[i] - 1
         if enemy_delay[i] == 0
             body_place(body, DROP_X, -16)
+            enemy_state[i] = ACTIVE
         end
         return
     end
+    if enemy_state[i] != ACTIVE
+        return
+    end
     dx = ENEMY_SPEED
+    chance = 63
+    if enemy_angry[i]
+        dx = ANGRY_SPEED
+        chance = 31
+    end
     if enemy_left[i]
-        dx = 0 - ENEMY_SPEED
+        dx = 0 - dx
     end
     if body_walk(body, dx)
         enemy_left[i] = enemy_left[i] xor 1
@@ -146,7 +220,7 @@ procedure move_enemy(i: u8)
     if body_on_ground(body)
         dy = body_y(PLAYER) - body_y(body)
         # Bub well above: now and then jump for him.
-        if dy < -24 and (random() & 63) == 0
+        if dy < -24 and (random() & chance) == 0
             if body_jump(body, JUMP)
                 dy = 0
             end
@@ -163,35 +237,89 @@ procedure move_enemy(i: u8)
     return
 end
 
+# Bubbles against Zen-chans and Bub: trapping, popping and breaking out.
+procedure bubbles_meet()
+    var b: u8
+    var i: u8
+    var enemy: u8
+    for b = 0 to MAX_BUBBLES - 1
+        if bubble_state(b) == BUBBLE_SHOT
+            for i = 0 to ENEMIES - 1
+                if enemy_state[i] == ACTIVE
+                    if boxes_touch(bubble_x(b), bubble_y(b), body_x(FIRST_ENEMY + i), body_y(FIRST_ENEMY + i), 2)
+                        if bubble_capture(b, i)
+                            enemy_state[i] = TRAPPED
+                            actor_hide(enemy_actor[i])
+                        end
+                    end
+                end
+            end
+        elsif bubble_state(b) == BUBBLE_FLOAT and caught == 0
+            if boxes_touch(bubble_x(b), bubble_y(b), body_x(PLAYER), body_y(PLAYER), 3)
+                enemy = bubble_pop(b)
+                if enemy != NO_CAPTIVE
+                    enemy_state[enemy] = GONE
+                end
+            end
+        end
+        enemy = bubble_escapee(b)
+        if enemy != NO_CAPTIVE
+            body_place(FIRST_ENEMY + enemy, bubble_x(b), bubble_y(b))
+            enemy_state[enemy] = ACTIVE
+            enemy_angry[enemy] = 1
+        end
+    end
+    return
+end
+
 procedure check_caught()
     var i: u8
     if caught or safe
         return
     end
     for i = 0 to ENEMIES - 1
-        if enemy_delay[i] == 0 and bodies_touch(PLAYER, FIRST_ENEMY + i, 3)
+        if enemy_state[i] == ACTIVE and bodies_touch(PLAYER, FIRST_ENEMY + i, 3)
             caught = CAUGHT_FRAMES
         end
     end
     return
 end
 
-# Draws `actor` for body `body` with `cell`, hidden while above the room.
-# The sprites face left; `mirrored` turns them to face right.
-procedure draw_body(actor: u8, body: u8, cell: u16, mirrored: u8)
-    if body_y(body) < 0
-        actor_hide(actor)
+procedure check_cleared()
+    var i: u8
+    if clearing
+        clearing = clearing - 1
+        if clearing == 0
+            start_round()
+        end
         return
     end
-    actor_draw(actor, u16(ROOM_X + body_x(body)), u16(body_y(body)), cell, mirrored)
+    for i = 0 to ENEMIES - 1
+        if enemy_state[i] != GONE
+            return
+        end
+    end
+    clearing = CLEAR_FRAMES
     return
 end
 
-procedure draw()
-    var i: u8
+# Draws `actor` at room pixel (x, y) with `cell`, hidden while above the
+# room. The sprites face left; `mirrored` turns them to face right.
+procedure draw_at(actor: u8, x: i16, y: i16, cell: u16, mirrored: u8)
+    if y < 0
+        actor_hide(actor)
+        return
+    end
+    actor_draw(actor, u16(ROOM_X + x), u16(y), cell, mirrored)
+    return
+end
+
+procedure draw_bub()
     var cell: u16
     if caught
         cell = BUB_SPIN[u8(tick >> 2) % 6]
+    elsif blowing
+        cell = BUB_BLOW[(BLOW_FRAMES - blowing) >> 1]
     elsif body_on_ground(PLAYER) == 0
         cell = BUB_WALK[2]
     elsif walk_step == 0 or (buttons_before & (JOY_LEFT | JOY_RIGHT)) == 0
@@ -203,12 +331,51 @@ procedure draw()
     if safe and (u8(tick) & 4)
         actor_hide(bub)
     else
-        draw_body(bub, PLAYER, cell, facing_left xor 1)
+        draw_at(bub, body_x(PLAYER), body_y(PLAYER), cell, facing_left xor 1)
     end
+    return
+end
+
+procedure draw_enemies()
+    var i: u8
+    var cell: u16
     for i = 0 to ENEMIES - 1
-        if enemy_delay[i] == 0
-            draw_body(enemy_actor[i], FIRST_ENEMY + i,
-                      ZEN_WALK[u8(tick >> 3) % 4], enemy_left[i] xor 1)
+        if enemy_state[i] == ACTIVE
+            cell = ZEN_WALK[u8(tick >> 3) % 4]
+            if enemy_angry[i]
+                cell = ZEN_ANGRY[u8(tick >> 2) % 4]
+            end
+            draw_at(enemy_actor[i], body_x(FIRST_ENEMY + i), body_y(FIRST_ENEMY + i),
+                    cell, enemy_left[i] xor 1)
+        else
+            actor_hide(enemy_actor[i])
+        end
+    end
+    return
+end
+
+procedure draw_bubbles()
+    var b: u8
+    var cell: u16
+    var step: u8
+    for b = 0 to MAX_BUBBLES - 1
+        if bubble_state(b) == BUBBLE_FREE
+            actor_hide(bubble_actor[b])
+        else
+            if bubble_state(b) == BUBBLE_SHOT
+                step = u8(SHOT_FRAMES - bubble_timer(b)) >> 1
+                if step > 5
+                    step = 5
+                end
+                cell = BUBBLE_FORM[step]
+            elsif bubble_state(b) == BUBBLE_POP
+                cell = BUBBLE_POPPED[u8(POP_FRAMES - bubble_timer(b)) / 6]
+            elsif bubble_captive(b) != NO_CAPTIVE
+                cell = BUBBLE_TRAPPED[u8(tick >> 3) % 3]
+            else
+                cell = BUBBLE_FLOAT_FRAMES[u8(tick >> 3) % 3]
+            end
+            draw_at(bubble_actor[b], bubble_x(b), bubble_y(b), cell, 0)
         end
     end
     return
@@ -230,11 +397,13 @@ export function main(): u8
     body_place(PLAYER, START_X, START_Y)
     for i = 0 to ENEMIES - 1
         enemy_actor[i] = actor_new(ACTOR_SOFTWARE)
-        enemy_delay[i] = DROP_DELAY[i]
-        enemy_left[i] = i & 1
+    end
+    for i = 0 to MAX_BUBBLES - 1
+        bubble_actor[i] = actor_new(ACTOR_SOFTWARE)
     end
     seed = $ace1
     tick = 0
+    start_round()
     repeat
         vic4_wait_line(QUIET_LINE)
         buttons = joystick(2)
@@ -242,9 +411,14 @@ export function main(): u8
         for i = 0 to ENEMIES - 1
             move_enemy(i)
         end
+        bubbles_step()
+        bubbles_meet()
         check_caught()
+        check_cleared()
         buttons_before = buttons
-        draw()
+        draw_bub()
+        draw_enemies()
+        draw_bubbles()
         actors_frame()
         tick = tick + 1
     until 0
