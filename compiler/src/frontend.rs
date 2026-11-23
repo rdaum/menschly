@@ -4377,14 +4377,44 @@ impl RoutineSig {
 /// module-level symbols.
 const ASSEMBLER_RESERVED: [&str; 7] = ["a", "x", "y", "z", "s", "q", "sp"];
 
-fn check_symbol_name(kind: &str, name: &str) -> Result<(), FrontendError> {
-    if ASSEMBLER_RESERVED.contains(&name.to_ascii_lowercase().as_str()) {
-        Err(FrontendError::Type(format!(
-            "{kind} name `{name}` is reserved by the assembler (a register name)"
-        )))
-    } else {
-        Ok(())
+/// Instruction names of the 6502 family (65C02, 65816, 45GS02, with the
+/// numbered `bbr`/`bbs`/`rmb`/`smb` forms checked separately): a label with
+/// one of these names reads as an instruction.
+const ASSEMBLER_MNEMONICS: &[&str] = &[
+    "adc", "adcq", "and", "andq", "asl", "aslq", "asr", "asrq", "asw", "aug", "bcc", "bcs", "beq",
+    "bit", "bitq", "bmi", "bne", "bpl", "bra", "brk", "brl", "bsr", "bvc", "bvs", "clc", "cld",
+    "cle", "cli", "clv", "cmp", "cmpq", "cop", "cpq", "cpx", "cpy", "cpz", "dec", "deq", "dew",
+    "dex", "dey", "dez", "eom", "eor", "eorq", "inc", "inq", "inw", "inx", "iny", "inz", "jml",
+    "jmp", "jsl", "jsr", "lda", "ldq", "ldx", "ldy", "ldz", "lsr", "lsrq", "map", "mvn", "mvp",
+    "neg", "nop", "ora", "orq", "pea", "pei", "per", "pha", "phb", "phd", "phk", "php", "phw",
+    "phx", "phy", "phz", "pla", "plb", "pld", "plp", "plx", "ply", "plz", "rep", "rol", "rolq",
+    "ror", "rorq", "row", "rti", "rtl", "rtn", "rts", "sbc", "sbcq", "sec", "sed", "see", "sei",
+    "sep", "sta", "stp", "stq", "stx", "sty", "stz", "tab", "tax", "tay", "taz", "tba", "tcd",
+    "tcs", "tdc", "trb", "tsb", "tsc", "tsx", "tsy", "txa", "txs", "txy", "tya", "tys", "tyx",
+    "tza", "wai", "wdm", "xba", "xce",
+];
+
+fn is_mnemonic(name: &str) -> bool {
+    if ASSEMBLER_MNEMONICS.contains(&name) {
+        return true;
     }
+    let numbered = ["bbr", "bbs", "rmb", "smb"];
+    name.len() == 4 && numbered.contains(&&name[..3]) && matches!(name.as_bytes()[3], b'0'..=b'7')
+}
+
+fn check_symbol_name(kind: &str, name: &str) -> Result<(), FrontendError> {
+    let lower = name.to_ascii_lowercase();
+    if ASSEMBLER_RESERVED.contains(&lower.as_str()) {
+        return Err(FrontendError::Type(format!(
+            "{kind} name `{name}` is reserved by the assembler (a register name)"
+        )));
+    }
+    if is_mnemonic(&lower) {
+        return Err(FrontendError::Type(format!(
+            "{kind} name `{name}` is reserved by the assembler (an instruction name)"
+        )));
+    }
+    Ok(())
 }
 
 fn insert_binding(
@@ -5993,6 +6023,18 @@ mod tests {
             ",
         );
         assert!(error.contains("reserved by the assembler"), "{error}");
+        for name in ["BIT", "lda", "smb3", "Rtn"] {
+            let error = compile_error(&format!(
+                "
+                module Names
+                const {name}: [2]u8 = [1, 2]
+                export procedure main()
+                    return
+                end
+                "
+            ));
+            assert!(error.contains("an instruction name"), "{name}: {error}");
+        }
     }
 
     #[test]

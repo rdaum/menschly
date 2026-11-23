@@ -1,0 +1,231 @@
+module Vic4Demo
+vector irq = sky
+
+# A first look at lib/vic4.mensch: a 40x25 screen of full-colour tiles
+# drawn in code, a sky gradient changed every 8 raster lines by a raster
+# interrupt (it shows through the tiles' transparent pixels), and a sprite
+# moved with the joystick in port 2. Run it with scripts/run-vic4-demo.sh.
+
+external procedure vic4_init()
+external procedure vic4_text16(screen: u32, row_chars: u16, colour_offset: u16)
+external procedure vic4_put(column: u8, row: u8, tile: u16)
+external procedure vic4_fill_screen(tile: u16, cells: u16)
+external procedure vic4_fill_colour(offset: u16, low: u8, high: u8, cells: u16)
+external procedure vic4_border(colour: u8)
+external procedure vic4_palette_set(index: u8, red: u8, green: u8, blue: u8)
+external function vic4_tile_at(address: u32): u16
+external procedure dma_fill(dest: u32, value: u8, count: u16)
+external procedure dma_copy(source: u32, dest: u32, count: u16)
+external procedure vic4_wait_line(line: u16)
+external reentrant procedure vic4_raster_irq(line: u16)
+external function joystick(port: u8): u8
+external procedure vic4_sprite_table(table: u32)
+external procedure vic4_sprite_image(sprite: u8, data: u32)
+external procedure vic4_sprite_place(sprite: u8, x: u16, y: u8)
+external procedure vic4_sprite_colour(sprite: u8, colour: u8)
+external procedure vic4_sprites_on(mask: u8)
+
+# Memory: tiles from $40000, sprite pointers at $45000, sprite images at
+# $46000, the screen at $50000; colour RAM from its start.
+const TILES: u32 = $40000
+const SPRITE_TABLE: u32 = $45000
+const SPRITE_IMAGES: u32 = $46000
+const SCREEN: u32 = $50000
+const COLUMNS = 40
+const ROWS = 25
+
+# Palette entries.
+const SKY = 16
+const SKY_BANDS = 25
+const MORTAR = 48
+const BRICK = 49
+const GRASS = 56
+const SOIL = 60
+
+# Tiles, by position in TILES.
+const EMPTY = 0
+const WALL = 1
+const LEDGE = 2
+
+const FIRST_LINE = 50
+const BAND_LINES = 8
+const FRAME_LINE = 251
+
+const JOY_UP = $01
+const JOY_DOWN = $02
+const JOY_LEFT = $04
+const JOY_RIGHT = $08
+const JOY_FIRE = $10
+
+# A 24x21 single-colour sprite: a round creature with two eyes.
+const CREATURE: [63]u8 = [
+    $00, $7e, $00,
+    $03, $ff, $c0,
+    $07, $ff, $e0,
+    $0f, $ff, $f0,
+    $1f, $ff, $f8,
+    $1e, $7e, $78,
+    $3c, $3c, $3c,
+    $3c, $3c, $3c,
+    $7e, $7e, $7e,
+    $7f, $ff, $fe,
+    $7f, $ff, $fe,
+    $7f, $ff, $fe,
+    $7f, $ff, $fe,
+    $3f, $ff, $fc,
+    $3f, $e7, $fc,
+    $1f, $f0, $f8,
+    $0f, $ff, $f0,
+    $07, $ff, $e0,
+    $03, $ff, $c0,
+    $06, $00, $60,
+    $0e, $00, $70
+]
+
+# Platforms: row, first column, last column.
+const LEDGES: [5][3]u8 = [[19, 4, 15], [19, 24, 35], [14, 10, 29], [9, 2, 12], [9, 27, 37]]
+
+fixed($d021) volatile var background: u8
+
+var band: u8
+
+export function main(): u8
+    var x: u16
+    var y: u8
+    var stick: u8
+    vic4_init()
+    make_palette()
+    make_tiles()
+    vic4_text16(SCREEN, COLUMNS, 0)
+    vic4_fill_colour(0, 0, 0, COLUMNS * ROWS)
+    draw_room()
+    vic4_border(MORTAR)
+    dma_copy(u32(addr(CREATURE)), SPRITE_IMAGES, 63)
+    vic4_sprite_table(SPRITE_TABLE)
+    vic4_sprite_image(0, SPRITE_IMAGES)
+    vic4_sprite_colour(0, 7)
+    vic4_sprites_on($01)
+    band = 0
+    vic4_raster_irq(FIRST_LINE)
+    asm "cli"
+    x = 172
+    y = 180
+    while 1
+        vic4_wait_line(FRAME_LINE)
+        stick = joystick(2)
+        if stick & JOY_LEFT and x > 24
+            x = x - 2
+        end
+        if stick & JOY_RIGHT and x < 320
+            x = x + 2
+        end
+        if stick & JOY_UP and y > 50
+            y = y - 2
+        end
+        if stick & JOY_DOWN and y < 229
+            y = y + 2
+        end
+        vic4_sprite_colour(0, 7)
+        if stick & JOY_FIRE
+            vic4_sprite_colour(0, 1)
+        end
+        vic4_sprite_place(0, x, y)
+    end
+    return 0
+end
+
+# The sky: dark blue at the top to dusky violet at the horizon.
+procedure make_palette()
+    var i: u8
+    for i = 0 to SKY_BANDS - 1
+        vic4_palette_set(SKY + i, 8 + i * 6, 4 + i * 3, 64 + i * 4)
+    end
+    vic4_palette_set(MORTAR, 40, 32, 36)
+    vic4_palette_set(BRICK, 150, 52, 40)
+    vic4_palette_set(BRICK + 1, 176, 70, 50)
+    vic4_palette_set(BRICK + 2, 124, 40, 34)
+    vic4_palette_set(GRASS, 60, 200, 70)
+    vic4_palette_set(GRASS + 1, 30, 140, 50)
+    vic4_palette_set(SOIL, 120, 80, 40)
+    vic4_palette_set(SOIL + 1, 96, 60, 30)
+    return
+end
+
+# The address of pixel (column, row) of tile `tile`.
+function pixel(tile: u8, column: u8, row: u8): far ^u8
+    return TILES + u32(u16(tile) << 6) + u32(row << 3 | column)
+end
+
+procedure plot(tile: u8, column: u8, row: u8, colour: u8)
+    var p: far ^u8
+    p = pixel(tile, column, row)
+    p^ = colour
+    return
+end
+
+procedure make_tiles()
+    var row: u8
+    var column: u8
+    dma_fill(TILES, 0, 64 * 3)
+    # A wall brick: mortar lines every four rows, joints staggered.
+    for row = 0 to 7
+        for column = 0 to 7
+            plot(WALL, column, row, BRICK + (row + column) % 3)
+        end
+        plot(WALL, (row & 4) xor 4, row, MORTAR)
+    end
+    for column = 0 to 7
+        plot(WALL, column, 0, MORTAR)
+        plot(WALL, column, 4, MORTAR)
+    end
+    # A ledge: two rows of grass over soil.
+    for row = 0 to 7
+        for column = 0 to 7
+            plot(LEDGE, column, row, SOIL + (row + column) % 2)
+        end
+    end
+    for column = 0 to 7
+        plot(LEDGE, column, 0, GRASS)
+        plot(LEDGE, column, 1, GRASS + 1)
+    end
+    return
+end
+
+function tile(index: u8): u16
+    return vic4_tile_at(TILES + u32(u16(index) << 6))
+end
+
+procedure draw_room()
+    var row: u8
+    var column: u8
+    var i: u8
+    vic4_fill_screen(tile(EMPTY), COLUMNS * ROWS)
+    for row = 0 to ROWS - 1
+        vic4_put(0, row, tile(WALL))
+        vic4_put(1, row, tile(WALL))
+        vic4_put(COLUMNS - 2, row, tile(WALL))
+        vic4_put(COLUMNS - 1, row, tile(WALL))
+    end
+    for column = 0 to COLUMNS - 1
+        vic4_put(column, ROWS - 1, tile(WALL))
+    end
+    for i = 0 to 4
+        for column = LEDGES[i][1] to LEDGES[i][2]
+            vic4_put(column, LEDGES[i][0], tile(LEDGE))
+        end
+    end
+    return
+end
+
+# One sky band per interrupt, BAND_LINES raster lines apart.
+interrupt procedure sky()
+    background = SKY + band
+    band = band + 1
+    if band == SKY_BANDS
+        band = 0
+        vic4_raster_irq(FIRST_LINE)
+        return
+    end
+    vic4_raster_irq(FIRST_LINE + u16(band) * BAND_LINES)
+    return
+end

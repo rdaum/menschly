@@ -1,0 +1,378 @@
+module Vic4
+
+# MEGA65 display, DMA, raster and input library.
+#
+# Covers the parts of the machine a game or a GUI drives every frame:
+#
+# - the VIC-IV text screen in 16-bit character mode, where character numbers
+#   of $100 and up are full-colour (FCM) tiles: 8x8 pixels, one palette index
+#   per byte, 64 bytes each, at linear address `tile * 64`;
+# - the 256-entry palette;
+# - the F018B DMA controller, for fills and copies anywhere in the 28-bit
+#   address space (screen, colour RAM at $FF80000, tiles);
+# - the raster: reading it, waiting for a line, raster interrupts;
+# - the joysticks;
+# - the hardware sprites, with their pointers in a 16-bit table.
+#
+# Addresses are linear 28-bit values in a u32 (bank 0 is $00000-$0FFFF,
+# chip RAM runs to $5FFFF, colour RAM is at $FF80000).
+#
+# `vic4_init` turns off the VIC-IV's "hot registers": with them on, a write
+# to a VIC-II register such as $D011 or $D018 recomputes the screen pointer,
+# line step and borders from VIC-II rules, undoing what this library sets.
+
+const COLOUR_RAM: u32 = $ff80000
+
+const CHR16 = $01
+const FCLRHI = $04
+const HOTREG = $80
+const SPRPTR16 = $80
+const RASTER_HIGH = $80
+const RASTER_IRQ = $01
+const PALETTE_RAM = $04
+
+const DMA_COPY = $00
+const DMA_FILL = $03
+const DMA_F018B = $0b
+const DMA_SOURCE_MB = $80
+const DMA_DEST_MB = $81
+const DMA_DEST_SKIP = $85
+
+const JOY_BITS = $1f
+
+# VIC-II compatible registers.
+fixed($d000) volatile var sprite_xy: [16]u8
+fixed($d010) volatile var sprite_x_high: u8
+fixed($d011) volatile var vic_control1: u8
+fixed($d012) volatile var vic_raster: u8
+fixed($d015) volatile var sprite_enable: u8
+fixed($d019) volatile var vic_irq_status: u8
+fixed($d01a) volatile var vic_irq_mask: u8
+fixed($d020) volatile var vic_border: u8
+fixed($d021) volatile var vic_background: u8
+fixed($d027) volatile var sprite_colours: [8]u8
+
+# VIC-III and VIC-IV registers.
+fixed($d030) volatile var vic3_rom: u8
+fixed($d054) volatile var vic4_control: u8
+fixed($d058) volatile var line_step: u16
+fixed($d05d) volatile var hot_registers: u8
+fixed($d05e) volatile var char_count: u8
+fixed($d060) volatile var screen_pointer: [4]u8
+fixed($d064) volatile var colour_pointer: u16
+fixed($d06b) volatile var sprite_16_colour: u8
+fixed($d06c) volatile var sprite_pointer_address: [3]u8
+fixed($d100) volatile var palette_red: [256]u8
+fixed($d200) volatile var palette_green: [256]u8
+fixed($d300) volatile var palette_blue: [256]u8
+
+# The DMA controller.
+fixed($d701) volatile var dma_list_high: u8
+fixed($d702) volatile var dma_list_bank: u8
+fixed($d704) volatile var dma_list_mb: u8
+fixed($d705) volatile var dma_start_enhanced: u8
+
+# CIAs: joystick ports and interrupt control.
+fixed($dc00) volatile var cia1_port_a: u8
+fixed($dc01) volatile var cia1_port_b: u8
+fixed($dc02) volatile var cia1_ddr_a: u8
+fixed($dc03) volatile var cia1_ddr_b: u8
+fixed($dc0d) volatile var cia1_icr: u8
+fixed($dd0d) volatile var cia2_icr: u8
+
+const BITS: [8]u8 = [$01, $02, $04, $08, $10, $20, $40, $80]
+
+# An enhanced DMA job: option bytes, then one F018B list entry.
+type DmaJob = record(
+    format: u8,
+    source_mb_option: u8,
+    source_mb: u8,
+    dest_mb_option: u8,
+    dest_mb: u8,
+    skip_option: u8,
+    skip: u8,
+    end_of_options: u8,
+    command: u8,
+    count: u16,
+    source: u16,
+    source_bank: u8,
+    dest: u16,
+    dest_bank: u8,
+    sub_command: u8,
+    modulo: u16
+)
+
+var job: DmaJob
+var screen_base: u32
+var row_bytes: u16
+var sprite_table: u32
+
+# ---------------------------------------------------------------- display
+
+# Takes over the VIC-IV: hot registers off, interrupts from the VIC and the
+# CIAs off, the RAM palette for every colour, black border and background.
+export procedure vic4_init()
+    hot_registers = hot_registers & (HOTREG xor $ff)
+    vic_irq_mask = 0
+    vic_irq_status = $ff
+    cia1_icr = $7f
+    cia2_icr = $7f
+    vic3_rom = vic3_rom | PALETTE_RAM
+    vic_border = 0
+    vic_background = 0
+    cia1_ddr_a = 0
+    cia1_ddr_b = 0
+    return
+end
+
+# 16-bit character mode with full-colour tiles for character numbers $100
+# and up. Each screen row is `row_chars` two-byte cells starting at `screen`;
+# colour RAM (also two bytes per cell) starts at `colour_offset` within it.
+export procedure vic4_text16(screen: u32, row_chars: u16, colour_offset: u16)
+    vic4_control = vic4_control | CHR16 | FCLRHI
+    screen_base = screen
+    row_bytes = row_chars << 1
+    line_step = row_bytes
+    char_count = u8(row_chars)
+    screen_pointer[0] = u8(screen)
+    screen_pointer[1] = u8(screen >> 8)
+    screen_pointer[2] = u8(screen >> 16)
+    screen_pointer[3] = (screen_pointer[3] & $c0) | (u8(row_chars >> 8) & $03) << 4 | (u8(screen >> 24) & $0f)
+    colour_pointer = colour_offset
+    return
+end
+
+export procedure vic4_border(colour: u8)
+    vic_border = colour
+    return
+end
+
+export procedure vic4_background(colour: u8)
+    vic_background = colour
+    return
+end
+
+# The linear address of screen cell (column, row).
+export function vic4_cell(column: u8, row: u8): u32
+    return screen_base + u32(u16(row) * row_bytes + (u16(column) << 1))
+end
+
+# Puts `tile` (a character number) in screen cell (column, row).
+export procedure vic4_put(column: u8, row: u8, tile: u16)
+    var cell: far ^u8
+    cell = vic4_cell(column, row)
+    cell^ = u8(tile)
+    cell = cell + 1
+    cell^ = u8(tile >> 8)
+    return
+end
+
+# Fills the first `cells` screen cells with `tile`.
+export procedure vic4_fill_screen(tile: u16, cells: u16)
+    dma_fill_step(screen_base, u8(tile), cells, 2)
+    dma_fill_step(screen_base + 1, u8(tile >> 8), cells, 2)
+    return
+end
+
+# Sets the first `cells` colour-RAM cells to (low, high).
+export procedure vic4_fill_colour(offset: u16, low: u8, high: u8, cells: u16)
+    dma_fill_step(COLOUR_RAM + u32(offset), low, cells, 2)
+    dma_fill_step(COLOUR_RAM + u32(offset) + 1, high, cells, 2)
+    return
+end
+
+# The tile number of full-colour tile data at linear `address` (a multiple
+# of 64 below $80000).
+export function vic4_tile_at(address: u32): u16
+    return u16(address >> 6)
+end
+
+# ---------------------------------------------------------------- palette
+
+# The palette registers hold each 8-bit intensity with its nybbles swapped.
+function swapped(value: u8): u8
+    return value << 4 | value >> 4
+end
+
+export procedure vic4_palette_set(index: u8, red: u8, green: u8, blue: u8)
+    palette_red[index] = swapped(red)
+    palette_green[index] = swapped(green)
+    palette_blue[index] = swapped(blue)
+    return
+end
+
+# Loads `count` colours from `rgb` (red, green, blue byte triples) into the
+# palette from entry `first`.
+export procedure vic4_palette_load(first: u8, count: u16, rgb: near ^u8)
+    var index: u8
+    index = first
+    while count
+        palette_red[index] = swapped(rgb^)
+        rgb = rgb + 1
+        palette_green[index] = swapped(rgb^)
+        rgb = rgb + 1
+        palette_blue[index] = swapped(rgb^)
+        rgb = rgb + 1
+        index = index + 1
+        count = count - 1
+    end
+    return
+end
+
+# ---------------------------------------------------------------- DMA
+
+procedure dma_run(command: u8, source: u32, dest: u32, count: u16, skip: u8)
+    job.format = DMA_F018B
+    job.source_mb_option = DMA_SOURCE_MB
+    job.source_mb = u8(source >> 20)
+    job.dest_mb_option = DMA_DEST_MB
+    job.dest_mb = u8(dest >> 20)
+    job.skip_option = DMA_DEST_SKIP
+    job.skip = skip
+    job.end_of_options = 0
+    job.command = command
+    job.count = count
+    job.source = u16(source)
+    job.source_bank = u8(source >> 16) & $0f
+    job.dest = u16(dest)
+    job.dest_bank = u8(dest >> 16) & $0f
+    job.sub_command = 0
+    job.modulo = 0
+    dma_list_bank = 0
+    dma_list_mb = 0
+    dma_list_high = u8(addr(job) >> 8)
+    dma_start_enhanced = u8(addr(job))
+    return
+end
+
+# Sets `count` bytes from `dest` to `value` (a count of 0 means 64 KiB).
+export procedure dma_fill(dest: u32, value: u8, count: u16)
+    dma_run(DMA_FILL, u32(value), dest, count, 1)
+    return
+end
+
+# Sets every `step`-th byte from `dest`, `count` times.
+export procedure dma_fill_step(dest: u32, value: u8, count: u16, step: u8)
+    dma_run(DMA_FILL, u32(value), dest, count, step)
+    return
+end
+
+# Copies `count` bytes from `source` to `dest` (ascending; the ranges must
+# not overlap with `dest` above `source`).
+export procedure dma_copy(source: u32, dest: u32, count: u16)
+    dma_run(DMA_COPY, source, dest, count, 1)
+    return
+end
+
+# ---------------------------------------------------------------- raster
+
+# The current raster line (VIC-II numbering: 0-311 on PAL).
+export function vic4_raster(): u16
+    var low: u8
+    var high: u8
+    repeat
+        low = vic_raster
+        high = vic_control1 & RASTER_HIGH
+    until low == vic_raster
+    if high
+        return u16(low) + 256
+    end
+    return u16(low)
+end
+
+# Waits until the raster reaches `line`, starting from a different line, so
+# a loop that calls it runs once per frame.
+export procedure vic4_wait_line(line: u16)
+    while vic4_raster() == line
+    end
+    while vic4_raster() != line
+    end
+    return
+end
+
+# Asks for a raster interrupt at `line` and acknowledges the current one.
+# Callable from an interrupt handler.
+export reentrant procedure vic4_raster_irq(line: u16)
+    vic_raster = u8(line)
+    if line >= 256
+        vic_control1 = vic_control1 | RASTER_HIGH
+    else
+        vic_control1 = vic_control1 & (RASTER_HIGH xor $ff)
+    end
+    vic_irq_status = $ff
+    vic_irq_mask = RASTER_IRQ
+    return
+end
+
+export procedure vic4_raster_irq_off()
+    vic_irq_mask = 0
+    vic_irq_status = $ff
+    return
+end
+
+# ---------------------------------------------------------------- input
+
+const JOY_UP = $01
+const JOY_DOWN = $02
+const JOY_LEFT = $04
+const JOY_RIGHT = $08
+const JOY_FIRE = $10
+
+# Joystick `port` (1 or 2) as JOY_* bits, set while pressed.
+export function joystick(port: u8): u8
+    if port == 1
+        return (cia1_port_b xor $ff) & JOY_BITS
+    end
+    return (cia1_port_a xor $ff) & JOY_BITS
+end
+
+# ---------------------------------------------------------------- sprites
+
+# Sprite pointers come from a table of eight 16-bit entries at `table`; each
+# entry is a sprite's data address divided by 64.
+export procedure vic4_sprite_table(table: u32)
+    sprite_table = table
+    sprite_pointer_address[0] = u8(table)
+    sprite_pointer_address[1] = u8(table >> 8)
+    sprite_pointer_address[2] = (u8(table >> 16) & $7f) | SPRPTR16
+    return
+end
+
+# Shows sprite `sprite` with the image at linear `data` (a multiple of 64).
+export procedure vic4_sprite_image(sprite: u8, data: u32)
+    var entry: far ^u8
+    entry = sprite_table + u32(sprite << 1)
+    entry^ = u8(data >> 6)
+    entry = entry + 1
+    entry^ = u8(data >> 14)
+    return
+end
+
+export procedure vic4_sprite_place(sprite: u8, x: u16, y: u8)
+    sprite_xy[sprite << 1] = u8(x)
+    sprite_xy[(sprite << 1) + 1] = y
+    if x >= 256
+        sprite_x_high = sprite_x_high | BITS[sprite]
+        return
+    end
+    sprite_x_high = sprite_x_high & (BITS[sprite] xor $ff)
+    return
+end
+
+export procedure vic4_sprite_colour(sprite: u8, colour: u8)
+    sprite_colours[sprite] = colour
+    return
+end
+
+# Turns the sprites in `mask` on (bit n is sprite n), the rest off.
+export procedure vic4_sprites_on(mask: u8)
+    sprite_enable = mask
+    return
+end
+
+# Selects 16-colour mode (16 pixels wide, a nybble per pixel, 8 bytes per
+# row) for the sprites in `mask`.
+export procedure vic4_sprites_16_colour(mask: u8)
+    sprite_16_colour = mask
+    return
+end

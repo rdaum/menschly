@@ -2219,3 +2219,218 @@ fn self_referential_records_field_calls_and_element_addresses() {
         &[53, 31, 14, 251, b'N', b'D', 252]
     );
 }
+
+/// The `external` declarations a program needs to use `lib/vic4.mensch`.
+const VIC4_EXTERNALS: &str = "
+external procedure vic4_init()
+external procedure vic4_text16(screen: u32, row_chars: u16, colour_offset: u16)
+external procedure vic4_put(column: u8, row: u8, tile: u16)
+external procedure vic4_fill_screen(tile: u16, cells: u16)
+external procedure vic4_palette_set(index: u8, red: u8, green: u8, blue: u8)
+external procedure dma_fill(dest: u32, value: u8, count: u16)
+external procedure dma_fill_step(dest: u32, value: u8, count: u16, step: u8)
+external procedure dma_copy(source: u32, dest: u32, count: u16)
+external function vic4_raster(): u16
+external procedure vic4_wait_line(line: u16)
+external reentrant procedure vic4_raster_irq(line: u16)
+external procedure vic4_raster_irq_off()
+external procedure vic4_sprite_table(table: u32)
+external procedure vic4_sprite_image(sprite: u8, data: u32)
+external procedure vic4_sprite_place(sprite: u8, x: u16, y: u8)
+external function vic4_tile_at(address: u32): u16
+";
+
+fn vic4_rom(name: &str, caller: &str) -> (PathBuf, Vec<u8>) {
+    let library =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/vic4.mensch"))
+            .expect("vic4 library should be readable");
+    let sources = [
+        mega65::KernelModule {
+            name: "0-caller".to_owned(),
+            source: caller.replace("#EXTERNALS", VIC4_EXTERNALS),
+            window: None,
+        },
+        mega65::KernelModule {
+            name: "1-vic4".to_owned(),
+            source: library,
+            window: None,
+        },
+    ];
+    let modules = mega65::compile_kernel_modules(&sources).expect("program should compile");
+    let refs = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect::<Vec<_>>();
+    let dir = temp_dir(name);
+    let rom = mega65::build_rom(&dir, &refs).expect("program should link");
+    (dir, rom)
+}
+
+#[test]
+fn vic4_library_sets_up_the_screen_dma_palette_raster_and_sprites() {
+    let (dir, rom) = vic4_rom(
+        "vic4-library",
+        "
+        module Vic4Test
+        vector irq = frame
+        #EXTERNALS
+        fixed($0e00) volatile var out: [32]u8
+        fixed($0e20) volatile var lines: [4]u16
+        fixed($0e28) volatile var frames: u16
+        fixed($d054) volatile var vic4_control: u8
+        fixed($d058) volatile var line_step: u16
+        fixed($d05e) volatile var char_count: u8
+        fixed($d060) volatile var screen_pointer: [4]u8
+        fixed($d06c) volatile var sprite_pointer_address: [3]u8
+        fixed($d114) volatile var red_20: u8
+        fixed($d214) volatile var green_20: u8
+        fixed($d000) volatile var sprite_xy: [4]u8
+        fixed($d010) volatile var sprite_x_high: u8
+
+        const PATTERN: [6]u8 = [1, 2, 3, 4, 5, 6]
+
+        export function main(): u8
+            vic4_init()
+            dma_fill($40000, 0, 0)
+            dma_fill($50000, 0, 0)
+            dma_fill($40000, $5a, 300)
+            dma_fill_step($40200, 7, 4, 2)
+            dma_copy(u32(addr(PATTERN)), $41000, 6)
+            vic4_text16($50000, 40, 0)
+            vic4_fill_screen($1234, 1000)
+            vic4_put(3, 2, $1005)
+            vic4_palette_set(20, $12, $80, $ff)
+            vic4_sprite_table($45000)
+            vic4_sprite_image(1, $46040)
+            vic4_sprite_place(1, 300, 77)
+            out[0] = screen_pointer[0]
+            out[1] = screen_pointer[1]
+            out[2] = screen_pointer[2]
+            out[3] = screen_pointer[3] & $0f
+            out[4] = u8(line_step)
+            out[5] = char_count
+            out[6] = vic4_control & $05
+            out[7] = red_20
+            out[8] = green_20
+            out[9] = sprite_pointer_address[0]
+            out[10] = sprite_pointer_address[1]
+            out[11] = sprite_pointer_address[2]
+            out[12] = sprite_xy[2]
+            out[13] = sprite_xy[3]
+            out[14] = sprite_x_high & 2
+            out[15] = u8(vic4_tile_at($40040))
+            out[16] = u8(vic4_tile_at($40040) >> 8)
+            vic4_wait_line(200)
+            lines[0] = vic4_raster()
+            vic4_wait_line(280)
+            lines[1] = vic4_raster()
+            frames = 0
+            vic4_raster_irq(100)
+            asm \"cli\"
+            vic4_wait_line(50)
+            vic4_wait_line(50)
+            vic4_wait_line(50)
+            asm \"sei\"
+            vic4_raster_irq_off()
+            return 0
+        end
+
+        interrupt procedure frame()
+            frames = frames + 1
+            vic4_raster_irq(100)
+            return
+        end
+        ",
+    );
+    let Some(xemu) = mega65::find_xemu() else {
+        eprintln!("skipping vic4-library: Xemu not found (set MENSCH_XMEGA65)");
+        return;
+    };
+    let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
+    assert_eq!(run.exit_code, 0);
+    let memory = &run.memory;
+    assert!(memory[0x40000..0x4012c].iter().all(|&byte| byte == 0x5a));
+    assert_eq!(memory[0x4012c], 0);
+    assert_eq!(&memory[0x40200..0x40208], &[7, 0, 7, 0, 7, 0, 7, 0]);
+    assert_eq!(&memory[0x41000..0x41006], &[1, 2, 3, 4, 5, 6]);
+    // The screen: 1000 cells of tile $1234, then (3, 2) = $1005.
+    assert_eq!(&memory[0x50000..0x50004], &[0x34, 0x12, 0x34, 0x12]);
+    assert_eq!(&memory[0x507ce..0x507d0], &[0x34, 0x12]);
+    assert_eq!(&memory[0x507d0..0x507d2], &[0, 0]);
+    let cell = 0x50000 + 2 * 80 + 3 * 2;
+    assert_eq!(&memory[cell..cell + 2], &[0x05, 0x10]);
+    // Sprite 1's pointer: $46040 / 64.
+    assert_eq!(&memory[0x45002..0x45004], &[0x81, 0x11]);
+    let out = &memory[0x0e00..0x0e11];
+    assert_eq!(
+        out,
+        &[
+            0x00, 0x00, 0x05, 0x00, 80, 40, 0x05, 0x21, 0x08, 0x00, 0x50, 0x84, 44, 77, 2, 0x01,
+            0x10
+        ]
+    );
+    let line = |i: usize| u16::from_le_bytes([memory[0x0e20 + 2 * i], memory[0x0e21 + 2 * i]]);
+    assert!((200..204).contains(&line(0)), "raster {}", line(0));
+    assert!((280..284).contains(&line(1)), "raster {}", line(1));
+    let frames = u16::from_le_bytes([memory[0x0e28], memory[0x0e29]]);
+    assert!((2..=3).contains(&frames), "{frames} raster interrupts");
+}
+
+#[test]
+fn vic4_demo_draws_its_room_and_sets_up_its_sprite() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).expect("source");
+    let sources = [
+        mega65::KernelModule {
+            name: "0-demo".to_owned(),
+            source: read("examples/vic4-demo.mensch"),
+            window: None,
+        },
+        mega65::KernelModule {
+            name: "1-vic4".to_owned(),
+            source: read("lib/vic4.mensch"),
+            window: None,
+        },
+    ];
+    let modules = mega65::compile_kernel_modules(&sources).expect("demo should compile");
+    let refs = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect::<Vec<_>>();
+    let dir = temp_dir("vic4-demo");
+    let rom = mega65::build_rom(&dir, &refs).expect("demo should link");
+    let Some(xemu) = mega65::find_xemu() else {
+        eprintln!("skipping vic4-demo: Xemu not found (set MENSCH_XMEGA65)");
+        return;
+    };
+    let run = mega65::run_rom_with(
+        &xemu,
+        &dir,
+        &rom,
+        &mega65::XemuOptions {
+            timeout: Duration::from_secs(2),
+            stop_at_timeout: true,
+            ..mega65::XemuOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(run.timed_out, "the demo runs until stopped");
+    let memory = &run.memory;
+    let cell = |column: usize, row: usize| {
+        let at = 0x50000 + (row * 40 + column) * 2;
+        u16::from_le_bytes([memory[at], memory[at + 1]])
+    };
+    // Tiles $1000 (empty), $1001 (wall), $1002 (ledge) at $40000.
+    assert_eq!(cell(0, 0), 0x1001);
+    assert_eq!(cell(39, 12), 0x1001);
+    assert_eq!(cell(20, 24), 0x1001);
+    assert_eq!(cell(20, 5), 0x1000);
+    assert_eq!(cell(4, 19), 0x1002);
+    assert_eq!(cell(29, 14), 0x1002);
+    assert!(memory[0x40000..0x40040].iter().all(|&pixel| pixel == 0));
+    assert_eq!(memory[0x40040], 48, "the wall's top row is mortar");
+    assert_eq!(memory[0x40080], 56, "the ledge's top row is grass");
+    // Sprite 0 points at $46000 / 64, where the creature was copied.
+    assert_eq!(&memory[0x45000..0x45002], &[0x80, 0x11]);
+    assert_eq!(&memory[0x46000..0x46003], &[0x00, 0x7e, 0x00]);
+}
