@@ -253,6 +253,84 @@ fn word_function_results_and_pointer_walks() {
 }
 
 #[test]
+fn constant_array_lengths_and_pointer_indexing() {
+    let Some(run) = run_source(
+        "pointer-index",
+        "
+        module PointerIndex
+        const CYCLES = 6
+        const PAIRS = CYCLES / 2
+        type Pt = record(x: u8, y: u16)
+        type PointIndexCheck = [PAIRS * 2 + 1]u8
+        fixed($0830) volatile var out: [CYCLES + 1]u8
+        fixed($0840) volatile var wout: [PAIRS]u16
+        var cells: [CYCLES]u8
+        var words: [PAIRS + 1]u16
+        var pts: [PAIRS]Pt
+
+        export function main(): u8
+            var i: u8
+            for i = 0 to CYCLES - 1
+                cells[i] = i * 10
+            end
+            out[0] = third(addr(cells))
+            out[1] = at(addr(cells), 4)
+            bump(addr(cells), 5)
+            out[2] = cells[5]
+            words[2] = $1234
+            wout[0] = word_at(addr(words), 2)
+            pts[1].y = $beef
+            pts[2].x = 9
+            wout[1] = pts_y(addr(pts), 1)
+            out[3] = pts_x(addr(pts), 2)
+            out[4] = stack_at(addr(cells), 3)
+            out[5] = u8(size(PointIndexCheck))
+            out[6] = far_at($0830, 1)
+            return CYCLES
+        end
+
+        function third(p: near ^u8): u8
+            return p[2]
+        end
+
+        function at(p: near ^u8, i: u8): u8
+            return p[i]
+        end
+
+        procedure bump(p: near ^u8, i: u8)
+            p[i] = p[i] + 1
+            return
+        end
+
+        function word_at(p: near ^u16, i: u16): u16
+            return p[i]
+        end
+
+        function pts_y(p: near ^Pt, i: u8): u16
+            return p[i].y
+        end
+
+        function pts_x(p: near ^Pt, i: u8): u8
+            return p[i].x
+        end
+
+        stack function stack_at(p: near ^u8, i: u8): u8
+            return p[i]
+        end
+
+        function far_at(p: far ^u8, i: u8): u8
+            return p[i]
+        end
+        ",
+    ) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 6);
+    assert_eq!(&run.memory[0x0830..0x0837], &[20, 40, 51, 9, 30, 7, 40]);
+    assert_eq!(&run.memory[0x0840..0x0844], &[0x34, 0x12, 0xef, 0xbe]);
+}
+
+#[test]
 fn reentrant_stack_parameters_locals_and_results() {
     let Some(run) = run_source(
         "reentrant-basics",

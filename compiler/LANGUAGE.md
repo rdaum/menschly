@@ -14,7 +14,7 @@ each construct is represented on the 65816 and the MEGA65.
 | `near ^T` | 2 | address in the current bank / CPU space |
 | `direct ^T` | 2 | direct-page (base-page) data |
 | `far ^T` | 4 | 32-bit flat address (the 65816 uses 24 bits) |
-| `[N]T` | N × size | arrays, indexed from 0 |
+| `[N]T` | N × size | arrays, indexed from 0; `N` is a constant expression (`[ROWS * 2]u8`) |
 | `parallel [N]R` | N × size | an array of records stored field by field (below) |
 | `record ... end` | sum of fields | fields at fixed offsets, no padding |
 | `procedure(...)`, `function(...): T` | 2 | routine pointers (below) |
@@ -77,7 +77,11 @@ Element and field accesses compose, and can be read or assigned:
 `actors[i].pos.x`, `grid[y][x]`, `p^.speed`, `p^.items[i]`. Indexes are 8- or
 16-bit integers; a constant index is checked against the array's length.
 Arrays indexed by a variable must be global (or reached through a pointer).
-Pointer arithmetic counts bytes: `p = p + size(Actor)`.
+
+A pointer indexes like an array of its target type: for `p: near ^Actor`,
+`p[i]` is the element `i * size(Actor)` bytes past `p^`, and `p[i].x` its
+field. The pointer carries no length, so only a negative constant index is
+rejected. Pointer arithmetic counts bytes: `p = p + size(Actor)`.
 
 `addr(x)` is the 16-bit address of a global, or of an element or field of
 one or of memory reached through a near pointer: `addr(nodes[i])`,

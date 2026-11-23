@@ -1293,6 +1293,58 @@ fn generated_frontend_data_tables_record_elements_and_for_loops_run() {
 }
 
 #[test]
+fn generated_frontend_constant_lengths_and_pointer_indexing_run() {
+    let binary = assemble_source_fixture(
+        "frontend-pointer-index",
+        "
+        module PointerIndex
+        const CYCLES = 6
+        type Pt = record(x: u8, y: u16)
+        fixed($040100) volatile var out: [CYCLES]u8
+        fixed($040120) volatile var wout: [2]u16
+        var cells: [CYCLES]u8
+        var pts: [CYCLES / 2]Pt
+
+        export far procedure main()
+            var i: u8
+            var p: near ^u8
+            var q: near ^Pt
+            for i = 0 to CYCLES - 1
+                cells[i] = i * 10
+            end
+            p = addr(cells)
+            out[0] = p[2]
+            i = 4
+            out[1] = p[i]
+            p[i] = p[i] + 1
+            out[2] = cells[4]
+            q = addr(pts)
+            q[1].y = $beef
+            q[2].x = 9
+            wout[0] = pts[1].y
+            out[3] = q[2].x
+            out[4] = stack_at(addr(cells), 3)
+            out[5] = p[CYCLES - 1]
+            wout[1] = size(Pt) * (CYCLES / 2)
+            return
+        end
+
+        stack function stack_at(p: near ^u8, i: u8): u8
+            return p[i]
+        end
+        ",
+    );
+
+    let (_cpu, memory) = run_long_generated_routine(&binary);
+
+    let out: Vec<u8> = (0..6).map(|i| memory.byte(0x040100 + i)).collect();
+    assert_eq!(out, vec![20, 40, 41, 9, 30, 50]);
+    let word = |at: usize| u16::from_le_bytes([memory.byte(at), memory.byte(at + 1)]);
+    assert_eq!(word(0x040120), 0xbeef);
+    assert_eq!(word(0x040122), 9);
+}
+
+#[test]
 fn generated_frontend_stack_routines_run() {
     let binary = assemble_source_fixture(
         "frontend-stack",

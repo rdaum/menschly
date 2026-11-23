@@ -1325,11 +1325,12 @@ impl<'m> Parser<'m> {
                     element: Box::new(self.parse_type()?),
                 });
             }
-            let len = self
-                .take_number()
-                .ok_or_else(|| self.parse_error("expected array length"))?;
+            let len = self.parse_expr()?;
+            let consts = &self.consts;
+            let len = const_eval(&len, &|name| consts.get(name).copied())
+                .map_err(|error| FrontendError::Parse(format!("array length: {error}")))?;
             self.expect(TokenKind::RBracket)?;
-            if len > u16::MAX as u32 {
+            if !(0..=i64::from(u16::MAX)).contains(&len) {
                 return Err(FrontendError::Parse(format!(
                     "array length {len} is out of range"
                 )));
@@ -3389,11 +3390,16 @@ impl<'a> RoutineLowerer<'a> {
                     // A parallel element: the field's column, then the
                     // element within it.
                     place.add_offset(field.offset * len)?;
-                    self.apply_index(&mut place, &index, len, field.ty.size_bytes())?;
+                    self.apply_index(&mut place, &index, Some(len), field.ty.size_bytes())?;
                 } else {
                     place.add_offset(field.offset)?;
                 }
                 Ok((place, field.ty))
+            }
+            Expr::Index(base, index) if matches!(self.infer_expr(base)?, Type::Pointer { .. }) => {
+                let (mut place, element) = self.place(&Expr::Deref(base.clone()))?;
+                self.apply_index(&mut place, index, None, element.size_bytes())?;
+                Ok((place, element))
             }
             Expr::Index(base, index) => {
                 let (mut place, ty) = self.place(base)?;
@@ -3407,7 +3413,7 @@ impl<'a> RoutineLowerer<'a> {
                 } = ty
                 else {
                     return Err(FrontendError::Type(
-                        "indexed access needs an array".to_owned(),
+                        "indexed access needs an array or a pointer".to_owned(),
                     ));
                 };
                 if parallel {
@@ -3419,7 +3425,7 @@ impl<'a> RoutineLowerer<'a> {
                     *pending = Some((len, (**index).clone()));
                     return Ok((place, *element));
                 }
-                self.apply_index(&mut place, index, len, element.size_bytes())?;
+                self.apply_index(&mut place, index, Some(len), element.size_bytes())?;
                 Ok((place, *element))
             }
             Expr::Deref(pointer) => {
@@ -3464,22 +3470,31 @@ impl<'a> RoutineLowerer<'a> {
         }
     }
 
-    /// Adds element `index` of an array of `len` elements of `size` bytes.
+    /// Adds element `index` of an array of `len` elements of `size` bytes;
+    /// `None` for elements through a pointer, whose count is unknown.
     fn apply_index(
         &mut self,
         place: &mut Place,
         index: &Expr,
-        len: u16,
+        len: Option<u16>,
         size: u16,
     ) -> Result<(), FrontendError> {
         if self.is_const_expr(index)? {
             let at = self.const_expr_value(index)?;
-            if !(0..i64::from(len)).contains(&at) {
-                return Err(FrontendError::Type(format!(
-                    "index {at} is outside the {len}-element array"
-                )));
+            match len {
+                Some(len) if !(0..i64::from(len)).contains(&at) => {
+                    return Err(FrontendError::Type(format!(
+                        "index {at} is outside the {len}-element array"
+                    )));
+                }
+                None if at < 0 => {
+                    return Err(FrontendError::Type(format!("index {at} is negative")));
+                }
+                _ => {}
             }
-            return place.add_offset(at as u16 * size);
+            let offset = u16::try_from(at * i64::from(size))
+                .map_err(|_| FrontendError::Type("offset beyond 64 KiB".to_owned()))?;
+            return place.add_offset(offset);
         }
         // Evaluating the index may need the accumulator.
         let width = place.offset_width();
@@ -3868,8 +3883,9 @@ impl<'a> RoutineLowerer<'a> {
                 }
                 match base_ty {
                     Type::Array { element, .. } => Ok(*element),
+                    Type::Pointer { to, .. } => self.parent.resolve(*to),
                     _ => Err(FrontendError::Type(
-                        "indexed access needs an array".to_owned(),
+                        "indexed access needs an array or a pointer".to_owned(),
                     )),
                 }
             }
@@ -6449,5 +6465,74 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("has no value"), "{err}");
+    }
+
+    #[test]
+    fn array_lengths_are_constant_expressions_including_imported_ones() {
+        let modules = SourceSet::new([SHAPES]);
+        let module = compile_source_with(
+            "
+            module Sized
+            import Shapes
+            const ROWS = ORIGIN_X - 1
+            var grid: [ROWS][ORIGIN_X * 2]u8
+            var table: [LIMIT / 100]Point
+
+            export procedure main()
+                grid[ROWS - 1][7] = 1
+                return
+            end
+            ",
+            &modules,
+        )
+        .unwrap();
+        let size = |name: &str| {
+            module
+                .globals
+                .iter()
+                .find(|global| global.name == name)
+                .map(|global| global.ty.size_bytes())
+        };
+        assert_eq!(size("grid"), Some(24));
+        assert_eq!(size("table"), Some(8));
+
+        for (length, message) in [
+            ("COUNT", "COUNT is not a constant"),
+            ("-1", "array length -1 is out of range"),
+            ("$10000", "array length 65536 is out of range"),
+        ] {
+            let error = compile_error(&format!(
+                "
+                module Bad
+                var cells: [{length}]u8
+                export procedure main()
+                    return
+                end
+                "
+            ));
+            assert!(error.contains(message), "{length}: {error}");
+        }
+    }
+
+    #[test]
+    fn pointers_index_by_their_target_type() {
+        let error = compile_error(
+            "
+            module Negative
+            export function main(p: near ^u16): u16
+                return p[-1]
+            end
+            ",
+        );
+        assert!(error.contains("index -1 is negative"), "{error}");
+        let error = compile_error(
+            "
+            module NotIndexable
+            export function main(v: u16): u8
+                return v[1]
+            end
+            ",
+        );
+        assert!(error.contains("needs an array or a pointer"), "{error}");
     }
 }
