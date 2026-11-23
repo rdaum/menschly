@@ -1,0 +1,57 @@
+module BubbleVideo
+import Vic4
+
+# Sprite images and palettes can span banks. Only this staging area needs
+# to be near for the VIC-IV palette loader.
+var palette_buffer: [48]u8
+
+export procedure bb_sprites_init(table: u32, mask: u8, bank: u8)
+    vic4_sprite_table(table)
+    vic4_sprite_palette(bank)
+    vic4_sprites_16_colour(mask)
+    vic4_sprite_height(16, mask)
+    return
+end
+
+export procedure bb_sprite_frame(slot: u8, frame: u16, images: u32, palettes: u32)
+    var offset: u32
+    offset = u32(frame) << 4
+    dma_copy(palettes + (offset << 1) + offset, u32(addr(palette_buffer)), 48)
+    vic4_sprite_colours(slot, addr(palette_buffer))
+    vic4_sprite_colour(slot, 0)
+    vic4_sprite_image(slot, images + (u32(frame) << 7))
+    return
+end
+
+# Draw a one-based room into an initialized 32-column or wider FCM screen.
+# tile_ram is a 64-byte aligned FCM destination for this room's 12 characters.
+export procedure bb_draw_room(room: u8, super_mode: u8, characters: u32, palettes: u32, maps: u32, tile_ram: u32)
+    var number: u32
+    var offset: u32
+    var cell: far ^u8
+    var first_tile: u16
+    var x: u8
+    var y: u8
+    if room == 0 or room > 102
+        return
+    end
+    number = u32(room - 1)
+    offset = (number << 9) + (number << 8)
+    dma_copy(characters + offset, tile_ram, 768)
+    cell = maps + offset + (number << 6)
+    offset = (number << 6) + (number << 5)
+    if super_mode
+        offset = offset + 48
+    end
+    dma_copy(palettes + offset, u32(addr(palette_buffer)), 48)
+    vic4_palette_edit(0)
+    vic4_palette_load(0, 16, addr(palette_buffer))
+    first_tile = vic4_tile_at(tile_ram)
+    for y = 0 to 25
+        for x = 0 to 31
+            vic4_put(x, y, first_tile + u16(cell^))
+            cell = cell + 1
+        end
+    end
+    return
+end

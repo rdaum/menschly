@@ -1,34 +1,96 @@
-# Bubble Bobble sprite extractor
+# Bubble Bobble assets for MEGA65
 
-With Python 3 and Pillow 9.1 or newer, run the extractor on a local MAME
-`bublboblr` (US/Romstar) ROM set. Supply a complete ZIP or a directory of
-unpacked chips. The extractor checks the twelve graphics chips and the colour
-tables in the two program ROMs by checksum. It runs offline. Run these commands from this directory.
+From this directory, run the two offline tools with Python 3 and Pillow 9.1
+or newer. The extractor accepts an unpacked US/Romstar MAME set or a complete
+`bublboblr.zip`. The converter reads the generated atlas and name index.
 
 ```sh
 python3 extract.py ../../examples/bubs
-# Or supply an archive
-python3 extract.py /path/to/bublboblr.zip
+python3 convert.py
 ```
 
-The default output directory is `target/bubble-bobble/` at the repository root. Use `--output-dir`
-to choose another. `sprites.png` contains 1,447 named 16×16 cells in a
-32-column, 46-row grid. `sprites.tsv` maps zero-based cell numbers to Mensch
-constant names, starting with `BUBBLUN_STAND` and `BUBBLUN_WALK_01`. The
-last 25 cells are empty. Wide and tall graphics are centred and reduced
-with nearest-neighbour sampling.
+Both default to `target/bubble-bobble/` at the repository root. To use another
+directory, run `python3 extract.py /path/to/bublboblr.zip --output-dir assets`
+and then `python3 convert.py assets`. All ROM-derived outputs are local.
 
-Use a per-sprite hardware palette. The PNG reserves index 0 for transparency
-and each cell uses at most 15 opaque colours. For each cell, remap its used
-opaque PNG indices to local indices 1–15, including opaque black.
+## Sprites
 
-The frame catalog in [frames.tsv](frames.tsv) contains assembly
-instructions. Consecutive rows with the same name draw parts of one frame.
-Each part gives a hexadecimal ROM tile code, dimensions in 8×8 tiles, a
-pixel offset, tile order, flips and a palette bank. Optional `pen=entry`
-pairs select alternate colours from the ROM tables. Composite layouts follow
-the supplied visual reference. Future level-map extraction can reuse
-`read_rom` and `decode_tiles` to address the original 8×8 tiles directly.
-The arcade graphics layout and transparent pen are documented in the
-[MAME driver](https://github.com/mamedev/mame/blob/master/src/mame/taito/bublbobl.cpp)
-and [video renderer](https://github.com/mamedev/mame/blob/master/src/mame/taito/bublbobl_v.cpp).
+`sprites.png` has 1,417 distinct 16×16 cells on a 32 × 45 grid, packed
+in row-major order. The last 23 cells are empty. `sprites.tsv` maps all
+1,447 animation names to cells. Shared effects and repeated ROM poses alias
+the same cell. Look up each animation step by name. Cell numbers have changed
+since the first atlas and consecutive steps can share an index.
+
+The extractor preserves the tile origin for native 16×16 frames. Short poses
+keep their vertical padding and full-height poses can have feet on row 15.
+Larger assemblies include the full extent of every 8×8 tile before
+nearest-neighbour reduction. Small symbols spanning a larger tile canvas are
+centred at their native resolution. In [frames.tsv](frames.tsv), adjacent
+rows with the same name assemble one frame. A tile code of `@NAME` reuses an
+earlier assembly. Other rows give the tile code in hex, dimensions in tiles,
+pixel offsets, tile order, flips, palette bank and optional `pen=entry`
+colour overrides. The [MAME graphics driver](https://github.com/mamedev/mame/blob/master/src/mame/taito/bublbobl.cpp)
+and [video renderer](https://github.com/mamedev/mame/blob/master/src/mame/taito/bublbobl_v.cpp)
+describe the ROM layout and transparent pen.
+
+| Converter output | Layout |
+| --- | --- |
+| `sprites.bin` | 128 bytes per cell, 8 bytes per row, left pixel in the high nibble |
+| `sprite_palettes.rgb` | 48 bytes per cell, 16 RGB triples. Nibble 0 is transparent. Opaque black gets its own index. |
+| `bubble-frames.mensch` | Module `BubbleFrames` exports all frame names as `u16` cell indices. |
+
+## Terrain and room maps
+
+`level_tiles.png` is a 12-column × 102-row atlas of 8×8 tiles in normal-game
+colours. Each row contains a blank, four side-wall quadrants (TL, TR, BL, BR),
+a platform, and six shadow tiles. `level_tiles.tsv` gives their names, source
+tile codes and normal/super palette banks. Row 102 uses the secret-room art.
+Round numbers in names and in the Mensch API start at 1.
+
+| Extractor output | Record per room |
+| --- | --- |
+| `level_tiles.bin` | 768 bytes, twelve 64-byte FCM characters in atlas order. Each pixel is a local palette index. |
+| `level_palettes.rgb` | 96 bytes, normal then super. Each is 16 RGB triples with index 0 reserved for the backdrop. |
+| `rooms.bin` | 832 bytes, a 32-column × 26-row display map in row-major order. Values 0–11 select that room's terrain tiles. |
+
+The extractor reads terrain from the graphics chips, palette selectors and
+openings from the banked program ROM, and room interiors from `a78-08.37`.
+The map includes wall quadrants and neighbour-dependent shadows. The arcade
+layout is documented in [Patch-A-Bobble's terrain code](https://github.com/kstenerud/patch-a-bobble/blob/master/src/Gfxset.cpp)
+and [room decoder](https://github.com/kstenerud/patch-a-bobble/blob/master/src/Lvlset.cpp).
+
+## Calling from Mensch
+
+Compile [bubble-video.mensch](bubble-video.mensch), the generated
+`bubble-frames.mensch`, and [vic4.mensch](../../lib/vic4.mensch) with your
+game. The sprite images, pointer table and active FCM characters belong
+in chip RAM. The full five files total 422,384 bytes. On a 384 KiB machine,
+keep the sprite images and palettes resident and stage one room at a time.
+For room N, read 768 terrain bytes at offset `(N-1)*768`, 96 palette bytes
+at `(N-1)*96`, and 832 map bytes at `(N-1)*832`. Pass those three buffers
+as record 1 to `bb_draw_room`. With complete files in addressable memory,
+pass N directly. The sprite image base and FCM tile destination must be 64-byte
+aligned. Reserve 16 aligned bytes for the sprite pointer table and 768 bytes
+at a full-colour tile address (character number at least $100).
+
+```text
+import BubbleFrames
+import BubbleVideo
+import Vic4
+
+# Inside initialization, with room 1 staged:
+vic4_init()
+vic4_text16(SCREEN, 32, 0)
+vic4_fill_colour(0, 0, 0, 32 * 26)
+bb_draw_room(1, 0, LEVEL_TILES, LEVEL_PALETTES, ROOM_MAPS, TILE_RAM)
+bb_sprites_init(SPRITE_TABLE, $01, 1)
+bb_sprite_frame(0, BUBBLUN_WALK_01, SPRITE_IMAGES, SPRITE_PALETTES)
+vic4_sprite_place(0, 120, 100)
+vic4_sprites_on($01)
+```
+
+The example names in capitals other than the generated frame name are
+application-supplied addresses. The room wrapper writes 26 screen rows;
+reserve that screen memory and choose a display height or viewport accordingly.
+Its second argument selects normal (0) or super (nonzero) colours. Sprites
+use palette bank 1 in this example, leaving bank 0 for the room.

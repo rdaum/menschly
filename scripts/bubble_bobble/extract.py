@@ -11,6 +11,7 @@ from zlib import crc32
 
 from PIL import Image
 
+from levels import write_levels
 
 HERE = Path(__file__).resolve().parent
 CELL = 16
@@ -41,15 +42,19 @@ def rom_files(source):
                     yield archive.read(member)
 
 
-def read_rom(source):
+def read_rom(source, *, with_rooms=False):
     chips = {}
     palette = None
     rascal = None
+    screen_rom = None
+    program_rom = None
     for data in rom_files(source):
         if len(data) == 0x8000:
             checksum = crc32(data)
             if checksum in GRAPHICS:
                 chips[checksum] = data
+            elif checksum == 0xAE11A07B:
+                screen_rom = data
             elif crc32(data[0x555a:0x55ba]) == RASCAL_PALETTE_CRC:
                 rascal = data[0x555a:0x55ba]
         else:
@@ -57,14 +62,20 @@ def read_rom(source):
             ending = data[0x2886:0x28c6]
             if crc32(table) == PALETTE_CRC and crc32(ending) == ENDING_PALETTE_CRC:
                 palette = table + ending
+                program_rom = data
     missing = [name for checksum, name in GRAPHICS.items() if checksum not in chips]
     if palette is None:
         missing.append("64 KiB banked program ROM with the supported palette table (e.g. a78-24.52)")
     if rascal is None:
         missing.append("32 KiB program ROM with the Rascal palettes (e.g. a78-25.51)")
+    if with_rooms and screen_rom is None:
+        missing.append("a78-08.37 (room layouts)")
     if missing:
         raise ValueError("Missing or unsupported ROM data: " + ", ".join(missing))
-    return [chips[checksum] for checksum in GRAPHICS], palette + rascal
+    graphics = [chips[checksum] for checksum in GRAPHICS]
+    if with_rooms:
+        return graphics, palette + rascal, program_rom, screen_rom
+    return graphics, palette + rascal
 
 
 def decode_tiles(chips):
@@ -108,13 +119,22 @@ class Part:
 
 
 def read_frames():
+    recipes = {}
     with (HERE / "frames.tsv").open(encoding="ascii", newline="") as stream:
         for name, rows in groupby(csv.DictReader(stream, delimiter="\t"), key=lambda r: r["name"]):
-            parts = [
-                Part(int(r["x"]), int(r["y"]), int(r["tile"], 16), int(r["width"]),
-                     int(r["height"]), r["order"], r["flip"], int(r["bank"]), r["overrides"])
-                for r in rows
-            ]
+            rows = list(rows)
+            tile = rows[0]["tile"]
+            if tile.startswith("@"):
+                if len(rows) != 1 or tile[1:] not in recipes:
+                    raise ValueError(f"Invalid frame alias {name}: {tile}")
+                parts = recipes[tile[1:]]
+            else:
+                parts = [
+                    Part(int(r["x"]), int(r["y"]), int(r["tile"], 16), int(r["width"]),
+                         int(r["height"]), r["order"], r["flip"], int(r["bank"]), r["overrides"])
+                    for r in rows
+                ]
+            recipes[name] = parts
             yield name, parts
 
 
@@ -165,7 +185,10 @@ def render_cell(name, parts, tiles, colors):
     bounds = frame.getbbox()
     if bounds is None:
         raise ValueError(f"Empty frame: {name}")
-    frame = frame.crop(bounds)
+    # Retain the ROM origin, including the transparent rows above crouching
+    # characters. Some small glyphs straddle tiles on a larger assembly canvas.
+    if max(frame.size) > CELL and max(bounds[2] - bounds[0], bounds[3] - bounds[1]) <= CELL:
+        frame = frame.crop(bounds)
     frame.thumbnail((CELL, CELL), Image.Resampling.NEAREST)
     cell = Image.new("L", (CELL, CELL))
     cell.paste(frame, ((CELL - frame.width) // 2, (CELL - frame.height) // 2))
@@ -176,26 +199,30 @@ def render_cell(name, parts, tiles, colors):
 
 
 def generate(source, destination):
-    chips, table = read_rom(source)
+    chips, table, program_rom, screen_rom = read_rom(source, with_rooms=True)
     tiles = decode_tiles(chips)
     palette, colors = decode_palettes(table)
     frames = list(read_frames())
     names = [name for name, _ in frames]
     if len(names) != len(set(names)):
         raise ValueError("Duplicate frame name in catalog")
-    rows = (len(frames) + COLUMNS - 1) // COLUMNS
+    cells = {}
+    index = ["cell\tname\n"]
+    for name, parts in frames:
+        pixels = render_cell(name, parts, tiles, colors).tobytes()
+        cell = cells.setdefault(pixels, len(cells))
+        index.append(f"{cell}\t{name}\n")
+    rows = (len(cells) + COLUMNS - 1) // COLUMNS
     atlas = Image.new("P", (COLUMNS * CELL, rows * CELL))
     atlas.putpalette(bytes(channel for rgb in palette for channel in rgb))
-    for i, (name, parts) in enumerate(frames):
-        cell = render_cell(name, parts, tiles, colors)
-        # Keep the numeric PNG indices when pasting into a paletted destination.
-        atlas.paste(Image.frombytes("P", cell.size, cell.tobytes()),
+    for pixels, i in cells.items():
+        atlas.paste(Image.frombytes("P", (CELL, CELL), pixels),
                     (i % COLUMNS * CELL, i // COLUMNS * CELL))
     destination.mkdir(parents=True, exist_ok=True)
     atlas.save(destination / "sprites.png", transparency=0)
-    index = "cell\tname\n" + "".join(f"{i}\t{name}\n" for i, name in enumerate(names))
-    (destination / "sprites.tsv").write_text(index, encoding="ascii")
-    print(f"{len(frames)} named sprites, {CELL}×{CELL}px, {COLUMNS} columns × {rows} rows")
+    (destination / "sprites.tsv").write_text("".join(index), encoding="ascii")
+    write_levels(destination, tiles, palette, colors, program_rom, screen_rom)
+    print(f"{len(frames)} names for {len(cells)} unique sprites, {CELL}×{CELL}px, {COLUMNS} columns × {rows} rows")
     print(f"{destination / 'sprites.png'}\n{destination / 'sprites.tsv'}")
 
 
