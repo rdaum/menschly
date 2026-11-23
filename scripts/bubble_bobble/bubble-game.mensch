@@ -40,11 +40,15 @@ const QUIET_LINE = 256
 # ---------------------------------------------------------------- Bub
 
 const PLAYER = 0
-# Bub's sideways speed, pixels per frame in repeating 5-frame patterns (as
-# measured in MAME): walking 6 px per 5 frames, steering a jump 4, and
-# drifting while falling off an edge 1 px every 3 frames.
-const WALK_STEPS: [5]u8 = [1, 1, 1, 1, 2]
-const JUMP_STEPS: [5]u8 = [1, 1, 0, 1, 1]
+# The arcade moves Bub 6 times every 5 frames: twice on frames where
+# (tick + BEAT_PHASE) % BEAT is 0 (in step with round 1's start). Walking is
+# 1 px a move; steering a jump 1 px on 4 moves in every STEER_CYCLE,
+# starting with a skip (the arcade's air steering is uneven, now behind,
+# now catching up, by up to 3 px; this keeps closest to it); drifting off an
+# edge 1 px every FALL_EVERY frames.
+const BEAT = 5
+const BEAT_PHASE = 2
+const STEER_CYCLE = 5
 const FALL_EVERY = 3
 const START_X = 24
 const START_Y = 184
@@ -83,6 +87,8 @@ var facing_left: u8
 var walk_step: u8
 # Frames of sideways input, for the step patterns.
 var stride: u8
+# Moves steered during the current jump.
+var steers: u8
 var caught: u8
 var safe: u8
 var blowing: u8
@@ -231,6 +237,27 @@ procedure start_round()
     return
 end
 
+# The controls: the joystick, or in a replay build the script's input for
+# frame `frame` (a frame's later reads see the next frame's).
+function read_buttons(frame: u16): u8
+    if REPLAY
+        if frame < REPLAY_FRAMES
+            return REPLAY_INPUT[frame]
+        end
+        return 0
+    end
+    return joystick(2)
+end
+
+# Pixels Bub steers on this move of a jump.
+function steer(): i16
+    steers = steers + 1
+    if steers % STEER_CYCLE == 0
+        return 0
+    end
+    return 1
+end
+
 procedure move_bub(buttons: u8)
     var dx: i16
     var pressed: u8
@@ -240,6 +267,9 @@ procedure move_bub(buttons: u8)
         if caught == 0
             body_place(PLAYER, START_X, START_Y)
             safe = SAFE_FRAMES
+        elsif not supported(body_x(PLAYER), body_y(PLAYER) + 16)
+            # Caught in the air, he sinks to the ground at 1 px a frame.
+            body_place(PLAYER, body_x(PLAYER), body_y(PLAYER) + 1)
         end
         return
     end
@@ -249,13 +279,14 @@ procedure move_bub(buttons: u8)
     if blowing
         blowing = blowing - 1
     end
+    pressed = buttons & (buttons_before xor $ff)
     dx = 0
     if buttons & (JOY_LEFT | JOY_RIGHT)
         stride = stride + 1
         if body_on_ground(PLAYER)
-            dx = i16(WALK_STEPS[stride % 5])
+            dx = 1
         elsif body_jumping(PLAYER)
-            dx = i16(JUMP_STEPS[stride % 5])
+            dx = steer()
         elsif stride % FALL_EVERY == 0
             dx = 1
         end
@@ -267,20 +298,46 @@ procedure move_bub(buttons: u8)
             facing_left = 0
         end
     end
-    if body_walk(PLAYER, dx) == 0 and dx != 0
-        walk_step = walk_step + 1
-    end
-    pressed = buttons & (buttons_before xor $ff)
+    # Taking off, Bub makes no step sideways that frame.
     if pressed & JOY_UP
         if body_jump(PLAYER)
             walk_step = 0
+            dx = 0
+            steers = STEER_CYCLE - 1
         end
+    end
+    if body_walk(PLAYER, dx) == 0 and dx != 0
+        walk_step = walk_step + 1
     end
     if (pressed & JOY_FIRE) and blowing == 0
         b = bubble_blow(body_x(PLAYER), body_y(PLAYER), facing_left)
         blowing = BLOW_FRAMES
     end
     body_step(PLAYER)
+    # The extra move on the beat: walking and jumping go twice as far. It
+    # reads the controls afresh, as the arcade's later move does.
+    if (tick + BEAT_PHASE) % BEAT == 0
+        buttons = read_buttons(tick + 1)
+        if body_on_ground(PLAYER) and (buttons & (JOY_LEFT | JOY_RIGHT))
+            dx = 16
+            if buttons & JOY_LEFT
+                dx = 0 - dx
+            end
+            if body_walk(PLAYER, dx) == 0
+                walk_step = walk_step + 1
+            end
+            body_step(PLAYER)
+        elsif body_jumping(PLAYER)
+            if buttons & (JOY_LEFT | JOY_RIGHT)
+                dx = steer() << 4
+                if buttons & JOY_LEFT
+                    dx = 0 - dx
+                end
+                b = body_walk(PLAYER, dx)
+            end
+            body_step(PLAYER)
+        end
+    end
     return
 end
 
@@ -725,14 +782,7 @@ export function main(): u8
     start_round()
     repeat
         vic4_wait_line(QUIET_LINE)
-        if REPLAY
-            buttons = 0
-            if tick < REPLAY_FRAMES
-                buttons = REPLAY_INPUT[tick]
-            end
-        else
-            buttons = joystick(2)
-        end
+        buttons = read_buttons(tick)
         buttons_now = buttons
         move_bub(buttons)
         for i = 0 to ENEMIES - 1

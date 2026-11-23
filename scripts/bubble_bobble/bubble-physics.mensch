@@ -20,10 +20,12 @@ module BubblePhysics
 # Each frame a game moves a body sideways with body_walk (walls stop it) and
 # then calls body_step for jumping, falling, landing and walking off edges.
 #
-# Vertical motion follows the arcade's frame by frame (measured in MAME,
-# bublboblr round 1): a jump is a fixed arc, the same however long the
-# button is held; walking off an edge is a slower fall that eases to 1 px a
-# frame for the last 10 px.
+# Vertical motion follows the arcade's (measured in MAME, bublboblr round
+# 1): a jump is a fixed arc, the same however long the button is held;
+# walking off an edge is a slower fall that eases to 1 px a frame for the
+# last 10 px. The arcade moves Bub 6 times every 5 frames: a game calls
+# body_step a second time on the extra frames for a jumping body (the jump's
+# table is per move; the edge fall's is per frame).
 
 export const ROOM_COLUMNS = 32
 export const ROOM_ROWS = 26
@@ -38,16 +40,18 @@ export const WALL = 2
 # Speeds are in sixteenths of a pixel per frame.
 export const SUBPIXELS = 16
 
-# A jump, pixels up per frame from take-off: up 42 px, then down again; it
-# goes on falling at the last 5 frames' pace (12 px per 5 frames) until it
-# lands.
-const JUMP_ARC = 50
+# A jump, pixels up per move from take-off: up 42 px, then down again; it
+# goes on falling 2 px a move until it lands, which it does on ground up to
+# JUMP_REACH px below its feet.
+const JUMP_ARC = 59
 const JUMP_UP: [JUMP_ARC]i8 = [
-    2, 4, 2, 2, 2, 2, 4, 2, 2, 2, 2, 4, 2, 1, 1, 1, 2, 1, 1, 1,
-    1, 0, 1, 0, 0, 0, 0, -1, 0, 0, -1, -2, -1, -1, -1, -1, -2, -2, -2, -2,
-    -2, -4, -2, -2, -2, -2, -4, -2, -2, -4
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0,
+    -1, 0, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2
 ]
-const JUMP_TAIL: [5]u8 = [2, 2, 2, 2, 4]
+const JUMP_TAIL = 2
+const JUMP_REACH = 2
 # Walking off an edge: pixels down per frame, starting with LEDGE_START's
 # frames and then repeating LEDGE_CYCLE's (18 px every 15 frames), until
 # ground is less than LEDGE_EASE px below; from there 1 px a frame.
@@ -258,7 +262,7 @@ function fall_step(body: u8, px: i16, feet: i16): i16
         if frame < JUMP_ARC
             return 0 - i16(JUMP_UP[frame])
         end
-        return i16(JUMP_TAIL[u8((frame - JUMP_ARC) % 5)])
+        return JUMP_TAIL
     end
     if ground_near(px, feet)
         return 1
@@ -303,6 +307,9 @@ export procedure body_step(body: u8)
         # Falling: land on terrain whose top the feet reach, having started
         # at or above it (so a body inside a platform falls on through).
         feet_after = (y >> 4) + SIZE
+        if bodies[body].mode == JUMPING
+            feet_after = feet_after + JUMP_REACH
+        end
         top = (feet_after >> 3) << 3
         # The top row is never landed on: bodies come in through it.
         if feet_before <= top and top > 0

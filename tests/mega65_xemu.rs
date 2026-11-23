@@ -3115,8 +3115,8 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
             steps(7, 200)
             out[17] = body_y(7)
             out[18] = i16(body_on_ground(7))
-            # 9. The arcade's jump on open floor: 50 frames in the air,
-            #    42 px up at the top.
+            # 9. The arcade's jump on open floor: 60 moves in the air (50
+            #    frames at its 6 moves per 5), 42 px up at the top.
             body_place(8, 150, 184)
             steps(8, 1)
             frame = 0
@@ -3210,7 +3210,7 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
     );
     assert_eq!(out[16], 1, "out of the top, in at the bottom");
     assert_eq!(&out[17..19], &[184, 1], "then down onto the floor");
-    assert_eq!(&out[19..21], &[50, 142], "the arcade's jump: 50 frames, 42 px");
+    assert_eq!(&out[19..21], &[60, 142], "the arcade's jump: 60 moves, 42 px");
     assert_eq!(&out[21..23], &[36, 184], "the arcade's 40 px ledge fall: 36 frames");
 }
 

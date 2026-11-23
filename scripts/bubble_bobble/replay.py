@@ -152,7 +152,13 @@ def compare(ours, arcade, context):
             continue
         worst = max(worst, len(bad))
         first = bad[0]
-        print(f"{name}: first differs at frame {first}, {len(bad)} of {count} frames differ")
+        gaps = [max(abs(a[0] - b[0]), abs(a[1] - b[1]))
+                for a, b in ((at(ours, t), at(arcade, t)) for t in bad)
+                if a is not None and b is not None]
+        widest = f", at most {max(gaps)} px apart" if gaps else ""
+        resynced = "" if bad[-1] == count - 1 else f", the same again from frame {bad[-1] + 1}"
+        print(f"{name}: first differs at frame {first}, {len(bad)} of {count} frames differ"
+              f"{widest}{resynced}")
         for t in range(max(0, first - 2), min(count, first + context)):
             print(f"    {t:4d}  ours {at(ours, t)!s:18}  arcade {at(arcade, t)}")
     return worst
