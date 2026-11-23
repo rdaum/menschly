@@ -46,10 +46,10 @@ export const NO_ACTOR = $ff
 
 const MAX_ACTORS = 64
 const HARDWARE_SPRITES = 8
-const MAX_ROWS = 32
+const MAX_ROWS = 26
 const MAX_SLOTS = 32
 const NO_SLOT = $ff
-const MAX_ENTRIES = 64
+const MAX_ENTRIES = 32
 const NO_ENTRY = $ff
 const GROUPS = 16
 const IMAGE_BYTES = 128

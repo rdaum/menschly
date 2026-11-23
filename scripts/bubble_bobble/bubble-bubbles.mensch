@@ -26,7 +26,8 @@ module BubbleBubbles
 
 import BubblePhysics
 
-export const MAX_BUBBLES = 40
+# The arcade's 24 bubble slots.
+export const MAX_BUBBLES = 24
 export const NO_BUBBLE = $ff
 export const NO_CAPTIVE = $ff
 
@@ -75,17 +76,12 @@ type Bubble = record(state: u8, captive: u8, escaped: u8, x: i16, y: i16, vx: i1
                      way: u8, push_x: i8, push_y: i8)
 
 var bubbles: parallel [MAX_BUBBLES]Bubble
-# The round's air (see BubbleAir).
-var air_map: [512]u8
+# Where the round's air (see BubbleAir) lies.
+var air_base: u32
 
-# Takes the round's air map (BubbleAir's format) from `map`.
+# Uses the round's air map (BubbleAir's format) at `map`.
 export procedure bubbles_air(map: u32)
-    var cell: far ^u8
-    var i: u16
-    cell = map
-    for i = 0 to 511
-        air_map[i] = cell[i]
-    end
+    air_base = map
     return
 end
 
@@ -94,11 +90,13 @@ function air_at(x: i16, y: i16): u8
     var row: i16
     var col: i16
     var pair: u8
+    var air_map: far ^u8
     row = (y + 40) >> 3
     col = (x + 8) >> 3
     if row < 0 or row > 31 or col < 0 or col > 31
         return 0
     end
+    air_map = air_base
     pair = air_map[(u16(row) << 4) + (u16(col) >> 1)]
     if col & 1
         return pair & $0f

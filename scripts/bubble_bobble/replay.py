@@ -75,11 +75,19 @@ def parse(script, frames):
 def run_ours(inputs, lives):
     WORK.mkdir(parents=True, exist_ok=True)
     module = WORK / "game-replay.mensch"
-    rows = ",\n    ".join(", ".join(f"${v:02x}" for v in inputs[i:i + 16])
-                          for i in range(0, len(inputs), 16))
+    # Runs of (frames, buttons), at most 255 frames each.
+    runs = []
+    for bits in inputs:
+        if runs and runs[-1][1] == bits and runs[-1][0] < 255:
+            runs[-1][0] += 1
+        else:
+            runs.append([1, bits])
+    flat = [v for run in runs for v in run]
+    rows = ",\n    ".join(", ".join(f"${v:02x}" for v in flat[i:i + 16])
+                          for i in range(0, len(flat), 16))
     module.write_text(f"module GameReplay\nexport const REPLAY = 1\n"
-                      f"export const REPLAY_FRAMES = {len(inputs)}\n"
-                      f"export const REPLAY_INPUT: [{len(inputs)}]u8 = [\n    {rows}\n]\n"
+                      f"export const REPLAY_RUNS = {len(flat)}\n"
+                      f"export const REPLAY_INPUT: [{len(flat)}]u8 = [\n    {rows}\n]\n"
                       f"export const REPLAY_LIVES_COUNT = {len(lives)}\n"
                       f"export const REPLAY_LIVES: [{max(1, len(lives))}]u8 = "
                       f"[{', '.join(str(v) for v in lives) or '0'}]\n")
@@ -110,7 +118,8 @@ def run_ours(inputs, lives):
             x, y, state = struct.unpack_from("<BBB", rec, 23 + i * 3)
             if state in OUR_BUBBLE_STATES:
                 bubbles.append((x, y - 40))
-        frames.append(((bx, by, bstate), enemies, tuple(sorted(bubbles))))
+        score = struct.unpack_from("<H", rec, 77)[0]
+        frames.append(((bx, by, bstate), enemies, tuple(sorted(bubbles)), score))
     return frames
 
 
@@ -125,7 +134,7 @@ def run_arcade(inputs):
         held = bits
     out = WORK / "arcade.tsv"
     env = dict(os.environ, OUT=str(out), FIRST=str(ARCADE_START), LAST=str(ARCADE_START + len(inputs)),
-               RANGES=f"E690-E693,ED49-ED93,{BUBBLE_BASE:04X}-{BUBBLE_BASE + BUBBLE_STRIDE * ARCADE_BUBBLES - 1:04X}",
+               RANGES=f"E690-E693,ED49-ED93,{BUBBLE_BASE:04X}-{BUBBLE_BASE + BUBBLE_STRIDE * ARCADE_BUBBLES - 1:04X},E641-E643",
                INPUTS=",".join(events),
                SNAPDIR=str(WORK / "snap"))
     seconds = (ARCADE_START + len(inputs)) // 59 + 3
@@ -156,7 +165,9 @@ def run_arcade(inputs):
             # Floating, shooting, or holding an enemy.
             if b[0] in (1, 2, 4, 8, 0x10):
                 bubbles.append(convert(b[2], b[1]))
-        frames.append(((*convert(x, h), state), enemies, tuple(sorted(bubbles))))
+        # Player 1's score: BCD, low byte first, in tens.
+        score = int(bytes.fromhex(cols[4])[::-1].hex())
+        frames.append(((*convert(x, h), state), enemies, tuple(sorted(bubbles)), score))
     return frames, lives
 
 
@@ -175,7 +186,7 @@ def visible(position):
 
 
 def compare(ours, arcade, context):
-    names = ["Bub"] + [f"enemy {i}" for i in range(ENEMIES)] + ["bubbles"]
+    names = ["Bub"] + [f"enemy {i}" for i in range(ENEMIES)] + ["bubbles", "score / 10"]
     count = min(len(ours), len(arcade))
     worst = 0
     for k, name in enumerate(names):
@@ -183,6 +194,8 @@ def compare(ours, arcade, context):
             if k == 0:
                 return frames[t][0]
             if k == len(names) - 1:
+                return frames[t][3]
+            if k == len(names) - 2:
                 return frames[t][2]
             return frames[t][1][k - 1]
         # The arcade's Bub is state 0 (not there) for a frame on coming back.
@@ -195,7 +208,7 @@ def compare(ours, arcade, context):
         first = bad[0]
         gaps = [max(abs(a[0] - b[0]), abs(a[1] - b[1]))
                 for a, b in ((at(ours, t), at(arcade, t)) for t in bad)
-                if a is not None and b is not None and k != len(names) - 1]
+                if a is not None and b is not None and k < len(names) - 2]
         widest = f", at most {max(gaps)} px apart" if gaps else ""
         resynced = "" if bad[-1] == count - 1 else f", the same again from frame {bad[-1] + 1}"
         print(f"{name}: first differs at frame {first}, {len(bad)} of {count} frames differ"

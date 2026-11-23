@@ -105,6 +105,16 @@ var lives_used: u16
 # The chain reaction: whether one is going, the bubble it is at, and which
 # way the enemies it frees fly.
 var chaining: u8
+# Enemies the current chain has killed.
+var chain_kills: u8
+var score: u32
+var item_actor: u8
+var item_state: u8
+var item_index: u8
+var item_timer: u16
+var item_y: i16
+var round_frames: u16
+var rounds_played: u16
 var chain_from: u8
 var chain_left: u8
 # Moves steered during the current jump.
@@ -176,6 +186,40 @@ const GONE = 3
 # script (BubbleRomTables), bouncing off a side wall, then falling.
 const DYING = 4
 const DYING_HIDDEN = 3
+# Landed: food (BubbleRomTables' CHAIN_FOOD, by its place among the enemies
+# its chain killed) for FRUIT_FRAMES; Bub collects it within COLLECT_REACH
+# px both ways. Then its score floats up SCORE_RISE frames (1 px every 4)
+# and stays SCORE_HOLD.
+const FRUIT = 5
+const SCORING = 6
+# Touched by Bub: scored the next frame (the arcade's sub CPU notices,
+# its main CPU scores).
+const COLLECTED = 7
+const FRUIT_FRAMES = 480
+const COLLECT_REACH = 16
+const SCORE_RISE = 120
+const SCORE_HOLD = 60
+# Points: an empty bubble, and a trapped enemy, burst.
+const BUBBLE_POINTS = 10
+const KILL_POINTS = 1000
+# The round's item (BubbleRomTables' ITEM_*): it shows ITEM_DELAY frames into
+# the round at the round's place, for ITEM_FRAMES. Which one: 49 less the
+# seconds the last round took (at most 29); round 1's (the arcade carries
+# time over from its attract demo) is 30.
+const ITEM_DELAY = 343
+const ITEM_FRAMES = 600
+const ITEM_BEST = 49
+const ITEM_SLOWEST = 29
+const ROUND1_ITEM = 30
+# Round 1's place, from the round table's sprite position ($90, $53): sprite
+# coordinates are 8 px below and left of bodies' (the arcade's x and
+# height), so room x = sprite x and room y = 208 - sprite height.
+const ITEM_X = 83
+const ITEM_Y = 64
+const ITEM_WAITING = 0
+const ITEM_SHOWN = 1
+const ITEM_SCORING = 2
+const ITEM_DONE = 3
 const FLYING = 0
 const FALLING_DEAD = 1
 const SCRIPT_END = $99
@@ -208,6 +252,9 @@ var enemy_motion: [ENEMIES]u8
 var enemy_timer: [ENEMIES]u8
 # Whether the enemy was under a platform it could jump to last frame.
 var enemy_cooldown: [ENEMIES]u8
+# A popped enemy's place in its chain, and frames left as food or score.
+var enemy_chain: [ENEMIES]u8
+var enemy_life: [ENEMIES]u16
 # Whether a shot caught the enemy this frame.
 var enemy_trapping: [ENEMIES]u8
 # A dying enemy's place in its flight: script entry (into DEATH_SCRIPT, or
@@ -275,6 +322,18 @@ procedure start_round()
     end
     bubbles_reset()
     chaining = 0
+    item_index = ROUND1_ITEM
+    if rounds_played
+        item_index = ITEM_BEST - ITEM_SLOWEST
+        if round_frames / 60 < ITEM_SLOWEST
+            item_index = ITEM_BEST - u8(round_frames / 60)
+        end
+    end
+    rounds_played = rounds_played + 1
+    round_frames = 0
+    item_state = ITEM_WAITING
+    item_timer = ITEM_DELAY
+    actor_hide(item_actor)
     clearing = 0
     return
 end
@@ -290,11 +349,19 @@ function bubble_life(): u8
 end
 
 # The controls: the joystick, or in a replay build the script's input for
-# frame `frame` (a frame's later reads see the next frame's).
+# frame `frame` (a frame's later reads see the next frame's). The script is
+# runs of (frames, buttons), read forward: `frame` never goes back.
+var run_at: u16
+var run_start: u16
+
 function read_buttons(frame: u16): u8
     if REPLAY
-        if frame < REPLAY_FRAMES
-            return REPLAY_INPUT[frame]
+        while run_at < REPLAY_RUNS and frame >= run_start + u16(REPLAY_INPUT[run_at])
+            run_start = run_start + u16(REPLAY_INPUT[run_at])
+            run_at = run_at + 2
+        end
+        if run_at < REPLAY_RUNS
+            return REPLAY_INPUT[run_at + 1]
         end
         return 0
     end
@@ -494,6 +561,7 @@ procedure move_enemy(i: u8)
         move_dying(i)
         return
     end
+
     if enemy_state[i] != ACTIVE
         return
     end
@@ -652,9 +720,10 @@ procedure move_dying(i: u8)
             y = y - ROOM_HEIGHT - 16
         end
         body_place(body, x, y)
-        # Landing, it turns into fruit (not yet shown).
+        # Landing, it turns into food.
         if (y & 7) == 0 and supported(x, y + 16)
-            enemy_state[i] = GONE
+            enemy_state[i] = FRUIT
+            enemy_life[i] = FRUIT_FRAMES
         end
         return
     end
@@ -706,15 +775,128 @@ procedure move_dying(i: u8)
     return
 end
 
+# ---------------------------------------------------------------- food
+
+# Whether Bub, alive, is within COLLECT_REACH px of (collect_x, collect_y)
+# both ways. (Module variables, not parameters: the direct page is full.)
+var collect_x: i16
+var collect_y: i16
+var collect_dx: i16
+var collect_dy: i16
+
+function bub_collects(): u8
+    if caught
+        return 0
+    end
+    collect_dx = body_x(PLAYER) - collect_x
+    collect_dy = body_y(PLAYER) - collect_y
+    if collect_dx > 0 - COLLECT_REACH and collect_dx < COLLECT_REACH and collect_dy > 0 - COLLECT_REACH and collect_dy < COLLECT_REACH
+        return 1
+    end
+    return 0
+end
+
+# Enemies that are food lying where they landed, or their scores floating
+# up. (A module variable for the loop: the direct page is full.)
+var food_i: u8
+
+procedure foods()
+    food_i = 0
+    while food_i != ENEMIES
+        if enemy_state[food_i] == COLLECTED
+            score = score + u32(CHAIN_POINTS[enemy_chain[food_i]])
+            enemy_state[food_i] = SCORING
+            enemy_life[food_i] = SCORE_RISE + SCORE_HOLD
+        elsif enemy_state[food_i] == FRUIT or enemy_state[food_i] == SCORING
+            enemy_life[food_i] = enemy_life[food_i] - 1
+            collect_x = body_x(FIRST_ENEMY + food_i)
+            collect_y = body_y(FIRST_ENEMY + food_i)
+            if enemy_state[food_i] == FRUIT
+                if bub_collects()
+                    enemy_state[food_i] = COLLECTED
+                elsif enemy_life[food_i] == 0
+                    enemy_state[food_i] = GONE
+                end
+            elsif enemy_life[food_i] == 0
+                enemy_state[food_i] = GONE
+            elsif enemy_life[food_i] > SCORE_HOLD and (enemy_life[food_i] & 3) == 0
+                body_place(FIRST_ENEMY + food_i, collect_x, collect_y - 1)
+            end
+        end
+        food_i = food_i + 1
+    end
+    return
+end
+
+# The round's item: waiting, shown, its score floating up, or done.
+procedure round_item()
+    round_frames = round_frames + 1
+    if item_state == ITEM_DONE
+        return
+    end
+    item_timer = item_timer - 1
+    if item_state == ITEM_WAITING
+        if item_timer == 0
+            item_state = ITEM_SHOWN
+            item_timer = ITEM_FRAMES
+            item_y = ITEM_Y
+        end
+    elsif item_state == ITEM_SHOWN
+        collect_x = ITEM_X
+        collect_y = ITEM_Y
+        if bub_collects()
+            score = score + u32(ITEM_POINTS[item_index])
+            item_state = ITEM_SCORING
+            item_timer = SCORE_RISE + SCORE_HOLD
+        elsif item_timer == 0
+            item_state = ITEM_DONE
+        end
+    else
+        if item_timer == 0
+            item_state = ITEM_DONE
+        elsif item_timer > SCORE_HOLD and (item_timer & 3) == 0
+            item_y = item_y - 1
+        end
+    end
+    return
+end
+
+var item_cell: u16
+
+procedure draw_item()
+    item_cell = NO_SPRITE
+    if item_state == ITEM_SHOWN
+        item_cell = ITEM_FOOD[item_index]
+    elsif item_state == ITEM_SCORING
+        item_cell = ITEM_SCORE[item_index]
+    end
+    if item_cell == NO_SPRITE
+        actor_hide(item_actor)
+    else
+        draw_at(item_actor, ITEM_X, item_y, item_cell, 0)
+    end
+    return
+end
+
 # ---------------------------------------------------------------- bubbles
 
-# Bursts bubble `b`, its enemy (if any) flying off left if `left`, and
-# starts a chain reaction from it.
-procedure burst(b: u8, left: u8)
+# Bursts bubble `b` (Bub's doing if `fresh`, else the chain's), its enemy
+# (if any) flying off left if `left`, and starts a chain reaction from it.
+procedure burst(b: u8, left: u8, fresh: u8)
     var enemy: u8
+    if fresh
+        chain_kills = 0
+    end
     enemy = bubble_pop(b)
     if enemy != NO_CAPTIVE
         start_dying(enemy, bubble_x(b), bubble_y(b), left)
+        enemy_chain[enemy] = chain_kills
+        if chain_kills < 10
+            chain_kills = chain_kills + 1
+        end
+        score = score + KILL_POINTS
+    else
+        score = score + BUBBLE_POINTS
     end
     chain_from = b
     chain_left = left
@@ -737,7 +919,7 @@ procedure chain()
             dx = bubble_x(b) - bubble_x(chain_from)
             dy = bubble_y(b) - bubble_y(chain_from)
             if dx > 0 - CHAIN_REACH and dx < CHAIN_REACH and dy > 0 - CHAIN_REACH and dy < CHAIN_REACH
-                burst(b, chain_left)
+                burst(b, chain_left, 0)
                 return
             end
         end
@@ -755,7 +937,7 @@ procedure bub_meets(b: u8)
     if body_falling(PLAYER)
         if across > 0 - LAND_SIDE and across < LAND_SIDE and above >= 0
             if above < LAND_POP
-                burst(b, facing_left)
+                burst(b, facing_left, 1)
             elsif above < LAND_BOUNCE and (buttons_now & JOY_UP)
                 body_launch(PLAYER)
             end
@@ -771,7 +953,7 @@ procedure bub_meets(b: u8)
         ahead = 0 - across - POP_FRONT
     end
     if ahead <= 0 and ahead > 0 - POP_REACH
-        burst(b, facing_left)
+        burst(b, facing_left, 1)
     elsif ahead > 0 and ahead < PUSH_AHEAD and (buttons_now & (JOY_LEFT | JOY_RIGHT))
         if facing_left
             bubble_nudge(b, -1)
@@ -886,8 +1068,9 @@ procedure check_cleared()
         end
         return
     end
+    # Cleared when every enemy is dead (its food may still lie about).
     for i = 0 to ENEMIES - 1
-        if enemy_state[i] != GONE
+        if enemy_state[i] < FRUIT and enemy_state[i] != GONE
             return
         end
     end
@@ -943,6 +1126,12 @@ procedure draw_enemies()
         elsif enemy_state[i] == DYING and enemy_timer[i] == 0
             draw_at(enemy_actor[i], body_x(FIRST_ENEMY + i), body_y(FIRST_ENEMY + i),
                     ZEN_DYING[u8(tick >> 2) % 8], enemy_left[i] xor 1)
+        elsif enemy_state[i] == FRUIT or enemy_state[i] == COLLECTED
+            draw_at(enemy_actor[i], body_x(FIRST_ENEMY + i), body_y(FIRST_ENEMY + i),
+                    CHAIN_FOOD[enemy_chain[i]], 0)
+        elsif enemy_state[i] == SCORING and CHAIN_SCORE[enemy_chain[i]] != NO_SPRITE
+            draw_at(enemy_actor[i], body_x(FIRST_ENEMY + i), body_y(FIRST_ENEMY + i),
+                    CHAIN_SCORE[enemy_chain[i]], 0)
         else
             actor_hide(enemy_actor[i])
         end
@@ -981,7 +1170,7 @@ end
 # Replay builds (replay.py) log each frame here, REPLAY_BYTES apiece, for
 # comparing with the arcade: Bub's x and y (i16), 2 if caught or 1; per
 # enemy x and y (i16), its state and its motion; then per bubble (the first
-# LOGGED_BUBBLES) x, y + 40 and its state, a byte each.
+# LOGGED_BUBBLES) x, y + 40 and its state, a byte each; the score / 10.
 const REPLAY_LOG: u32 = $52000
 const REPLAY_BYTES = 80
 const REPLAY_LIMIT = 700
@@ -1016,6 +1205,7 @@ procedure log_frame()
         end
         at[10 + u16(i) * 6] = enemy_motion[i] | (enemy_left[i] << 4)
     end
+    log_put16(at + 77, i16(u16(score / 10)))
     for i = 0 to LOGGED_BUBBLES - 1
         at[23 + u16(i) * 3] = u8(bubble_x(i))
         at[24 + u16(i) * 3] = u8(bubble_y(i) + 40)
@@ -1047,6 +1237,7 @@ export function main(): u8
     for i = 0 to MAX_BUBBLES - 1
         bubble_actor[i] = actor_new(ACTOR_SOFTWARE)
     end
+    item_actor = actor_new(ACTOR_SOFTWARE)
     seed = $ace1
     tick = 0
     start_round()
@@ -1061,6 +1252,8 @@ export function main(): u8
         end
         bubbles_step()
         bubbles_meet()
+        foods()
+        round_item()
         check_caught()
         check_cleared()
         remember()
@@ -1071,6 +1264,7 @@ export function main(): u8
         draw_bub()
         draw_enemies()
         draw_bubbles()
+        draw_item()
         actors_frame()
         enter_bubbles()
         tick = tick + 1

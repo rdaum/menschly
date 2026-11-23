@@ -35,13 +35,14 @@ if [[ ! -f "$assets/sprites.tsv" || ! -f "$assets/sprite_cells.bin" ]]; then
   (cd "$here" && python3 extract.py "$bubs" --output-dir "$assets")
   (cd "$here" && python3 convert.py "$assets")
 fi
-(cd "$here" && python3 demo_assets.py)
+# rom_tables.py lists the sprites its tables use; demo_assets.py takes them.
 (cd "$here" && python3 rom_tables.py "$assets" >/dev/null)
+(cd "$here" && python3 demo_assets.py)
 # The input replay module: replay.py writes one with a script of inputs;
 # otherwise the game reads the joystick.
 replay="${REPLAY_MODULE:-$assets/game-replay.mensch}"
 if [[ -z "${REPLAY_MODULE:-}" ]]; then
-  printf 'module GameReplay\nexport const REPLAY = 0\nexport const REPLAY_FRAMES = 1\nexport const REPLAY_INPUT: [1]u8 = [0]\nexport const REPLAY_LIVES_COUNT = 0\nexport const REPLAY_LIVES: [1]u8 = [0]\n' > "$replay"
+  printf 'module GameReplay\nexport const REPLAY = 0\nexport const REPLAY_RUNS = 0\nexport const REPLAY_INPUT: [2]u8 = [0, 0]\nexport const REPLAY_LIVES_COUNT = 0\nexport const REPLAY_LIVES: [1]u8 = [0]\n' > "$replay"
 fi
 
 # 2. Build the ROM, then boot it windowed.

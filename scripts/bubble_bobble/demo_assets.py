@@ -58,6 +58,10 @@ CYCLES = [
     ("ZEN_CHAN_ANGRY", [f"ZEN_CHAN_ANGRY_{i:02d}" for i in range(1, 5)]),
     ("ZEN_CHAN_STUNNED", [f"ZEN_CHAN_STUNNED_{i:02d}" for i in range(1, 9)]),
 ]
+# The food and score sprites the arcade's tables name (rom_tables.py).
+ROM_SPRITES = D / "rom-sprites.txt"
+if ROM_SPRITES.exists():
+    CYCLES.append(("ROM_SPRITES", ROM_SPRITES.read_text().split()))
 
 
 def read_frames():
