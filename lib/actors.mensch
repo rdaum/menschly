@@ -99,21 +99,21 @@ var sprite_buffers: u32
 var sprite_x0: u16
 var sprite_y0: u16
 
-var overlay_screen: u32
-var overlay_row_bytes: u16
-var overlay_first: u16
 var overlay_rows: u8
 var overlay_slots: u8
 # The character pool: entry n's characters are at pool + n * 128.
 var pool: u32
 var pool_entries: u8
+# The character number of entry 0's top character; entry n's is 2n more.
+var pool_character: u16
 var entry_cell: [MAX_ENTRIES]u16
 var entry_users: [MAX_ENTRIES]u8
 var entry_mirrored: [MAX_ENTRIES]u8
 var entry_palette: [MAX_ENTRIES]u16
 var slots_used: [MAX_ROWS]u8
 # Where each row's first slot is, in the screen and in colour RAM.
-var row_slots: [MAX_ROWS]u16
+var row_screen: [MAX_ROWS]u32
+var row_colour: [MAX_ROWS]u32
 var group_palette: [GROUPS]u16
 var group_users: [GROUPS]u8
 
@@ -172,6 +172,8 @@ end
 # after this.
 export procedure actors_software(screen: u32, columns: u8, rows: u8, slots: u8, characters: u32, entries: u8)
     var row_chars: u16
+    var row_bytes: u16
+    var first: u16
     var row: u8
     var slot: u8
     var group: u8
@@ -181,19 +183,20 @@ export procedure actors_software(screen: u32, columns: u8, rows: u8, slots: u8, 
     vic4_text_rows(rows)
     vic4_fill_screen(0, row_chars * u16(rows))
     vic4_fill_colour(0, 0, 0, row_chars * u16(rows))
-    overlay_screen = screen
-    overlay_row_bytes = row_chars << 1
-    overlay_first = u16(columns) << 1
+    row_bytes = row_chars << 1
+    first = u16(columns) << 1
     overlay_rows = rows
     overlay_slots = slots
     pool = characters
     pool_entries = entries
+    pool_character = u16(characters >> 6)
     for entry = 0 to entries - 1
         entry_cell[entry] = NOTHING
         entry_users[entry] = 0
     end
     for row = 0 to rows - 1
-        row_slots[row] = u16(row) * overlay_row_bytes + overlay_first
+        row_screen[row] = screen + u32(u16(row) * row_bytes + first)
+        row_colour[row] = COLOUR_RAM + u32(u16(row) * row_bytes + first)
         slots_used[row] = 0
         # Every slot, and the closing token after them, starts off screen.
         for slot = 0 to slots
@@ -501,7 +504,7 @@ procedure place(actor: u8)
         return
     end
     placing_x = actors[actor].x
-    placing_character = u16((pool + (u32(entry) << 7)) >> 6)
+    placing_character = pool_character + (u16(entry) << 1)
     placing_attributes = CHARACTER_ATTRIBUTES
     if actors[actor].mirrored xor entry_mirrored[entry]
         placing_attributes = CHARACTER_ATTRIBUTES | FLIP
@@ -533,7 +536,7 @@ procedure use_slot(row: u8, shift: u8, mask: u8, half: u8)
     var cell: far ^u8
     var colour: far ^u8
     var character: u16
-    var offset: u16
+    var offset: u32
     if row >= overlay_rows
         return
     end
@@ -543,13 +546,13 @@ procedure use_slot(row: u8, shift: u8, mask: u8, half: u8)
     end
     slots_used[row] = slot + 1
     character = placing_character + u16(half)
-    offset = slot_offset(row, slot)
-    cell = overlay_screen + u32(offset)
+    offset = u32(u16(slot) << 2)
+    cell = row_screen[row] + offset
     cell[0] = u8(placing_x)
     cell[1] = (u8(placing_x >> 8) & $03) | shift
     cell[2] = u8(character)
     cell[3] = u8(character >> 8)
-    colour = COLOUR_RAM + u32(offset)
+    colour = row_colour[row] + offset
     colour[0] = TOKEN_ATTRIBUTES
     colour[1] = mask
     colour[2] = placing_attributes
@@ -557,22 +560,17 @@ procedure use_slot(row: u8, shift: u8, mask: u8, half: u8)
     return
 end
 
-# The byte offset of slot `slot` of `row` in the screen and in colour RAM.
-function slot_offset(row: u8, slot: u8): u16
-    return row_slots[row] + (u16(slot) << 2)
-end
-
 # Writes slot `slot` of `row` as a token to `x` with shift and mask, then
 # character 0.
 procedure put_token(row: u8, slot: u8, x: u16, shift: u8, mask: u8)
     var cell: far ^u8
     var colour: far ^u8
-    var offset: u16
-    offset = slot_offset(row, slot)
-    cell = overlay_screen + u32(offset)
+    var offset: u32
+    offset = u32(u16(slot) << 2)
+    cell = row_screen[row] + offset
     cell[0] = u8(x)
     cell[1] = (u8(x >> 8) & $03) | shift
-    colour = COLOUR_RAM + u32(offset)
+    colour = row_colour[row] + offset
     colour[0] = TOKEN_ATTRIBUTES
     colour[1] = mask
     # The closing token has no character after it.
@@ -588,7 +586,7 @@ end
 # Moves slot `slot` of `row` off screen.
 procedure hide_token(row: u8, slot: u8)
     var cell: far ^u8
-    cell = overlay_screen + u32(slot_offset(row, slot))
+    cell = row_screen[row] + u32(u16(slot) << 2)
     cell[0] = u8(OFFSCREEN)
     cell[1] = u8(OFFSCREEN >> 8)
     return
