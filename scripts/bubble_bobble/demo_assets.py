@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Generate the sprite data the animation demo uses, as Mensch source.
 
-The full sprite pack is 249 KB, but the demo's six cycles are only 36 cells, so
-this writes just those as `const` byte arrays in the style of
-`examples/vic4-demo.mensch`, plus the frame constants remapped to demo order.
+The demo's six cycles use only 36 of the atlas's cells, so this writes just
+those as `const` tables, in the converter's format (each distinct image and
+palette once, plus a 4-byte record per cell), with the frame constants
+renumbered as demo cells.
 
 Run after extract.py and convert.py:
 
@@ -14,15 +15,18 @@ Run after extract.py and convert.py:
 Writes `target/bubble-bobble/bubble-demo-data.mensch`, module
 `BubbleDemoData`, which exports:
 
-  DEMO_CELLS                         the number of cells (36)
-  DEMO_IMAGES: [DEMO_CELLS * 128]u8  sprite images, 8 bytes per row
-  DEMO_PALETTES: [DEMO_CELLS * 48]u8 RGB triples, 16 per cell
-  BUBBLUN_WALK_01: u16 = 0 ...       frame names as demo-local cell numbers
+  DEMO_IMAGES: [images * 128]u8      sprite images, 8 bytes per row
+  DEMO_PALETTES: [palettes * 48]u8   16 RGB triples each
+  DEMO_CELLS: [cells * 2]u16         per cell its image number (bit 15:
+                                     mirrored) and palette number
+  BUBBLUN_WALK_01: u16 = 0 ...       frame names as demo cell numbers
   DEMO_ROOM_TILES, DEMO_ROOM_PALETTES, DEMO_ROOM_MAP
                                      room ROOM's records from the level files,
                                      as bb_draw_room's room 1
 """
 from pathlib import Path
+
+from convert import MIRRORED, mirror_image, pack_set
 
 ROOT = Path(__file__).resolve().parents[2]
 D = ROOT / "target/bubble-bobble"
@@ -40,7 +44,8 @@ CYCLES = [
     ("BUBBLUN_WALK", [f"BUBBLUN_WALK_{i:02d}" for i in range(1, 7)]),
     ("BOBBLUN_WALK", [f"BOBBLUN_WALK_{i:02d}" for i in range(1, 7)]),
     ("BUBBLUN_BLOW", [f"BUBBLUN_BLOW_{i:02d}" for i in range(1, 9)]),
-    ("MAITA_MOVE", [f"MAITA_MOVE_{i:02d}" for i in range(1, 11)]),
+    # Frames 8-10 are 32-pixel-wide throws squeezed into one cell; walk only.
+    ("MAITA_MOVE", [f"MAITA_MOVE_{i:02d}" for i in range(1, 8)]),
     ("ZEN_CHAN_MOVE", [f"ZEN_CHAN_WALK_{i:02d}" for i in range(1, 5)]),
     ("BUBBLE_BLUE", [f"BUBBLE_BLUE_{i:02d}" for i in range(1, 4)]),
 ]
@@ -66,8 +71,18 @@ def byte_array(name, length, data, per_row, comment):
 
 def main():
     frames = read_frames()
-    images = (D / "sprites.bin").read_bytes()
+    images = (D / "sprite_images.bin").read_bytes()
     palettes = (D / "sprite_palettes.rgb").read_bytes()
+    table = (D / "sprite_cells.bin").read_bytes()
+
+    def cell_image(cell):
+        number = int.from_bytes(table[cell * 4:cell * 4 + 2], "little")
+        image = images[(number & ~MIRRORED) * IMAGE:][:IMAGE]
+        return mirror_image(image) if number & MIRRORED else image
+
+    def cell_palette(cell):
+        number = int.from_bytes(table[cell * 4 + 2:cell * 4 + 4], "little")
+        return palettes[number * PALETTE:][:PALETTE]
 
     missing = [n for _, names in CYCLES for n in names if n not in frames]
     if missing:
@@ -82,13 +97,9 @@ def main():
                 order.append(cell)
     local = {cell: i for i, cell in enumerate(order)}
 
-    blob = bytearray()
-    pal = bytearray()
-    for cell in order:
-        start = cell * IMAGE
-        blob += images[start:start + IMAGE]
-        pstart = cell * PALETTE
-        pal += palettes[pstart:pstart + PALETTE]
+    demo_images, demo_palettes, records = pack_set(
+        [(cell_image(cell), cell_palette(cell)) for cell in order])
+    cells = [value for record in records for value in record]
 
     room = ROOM - 1
     tiles = (D / "level_tiles.bin").read_bytes()[room * ROOM_TILES:][:ROOM_TILES]
@@ -100,12 +111,16 @@ def main():
     out.append("# asset pack: the cells the animation demo uses, renumbered from zero in\n")
     out.append("# cycle order.\n\n")
     out.append('metadata data_segment = "RODATA"\n\n')
-    out.append(f"export const DEMO_CELLS = {len(order)}\n\n")
-    out.append(byte_array("DEMO_IMAGES", f"DEMO_CELLS * {IMAGE}", blob, 8,
-                          "Sprite images, 128 bytes each, 8 bytes per row"))
+    out.append(byte_array("DEMO_IMAGES", len(demo_images) * IMAGE, b"".join(demo_images), 8,
+                          f"{len(demo_images)} sprite images, 128 bytes each, 8 bytes per row"))
     out.append("\n")
-    out.append(byte_array("DEMO_PALETTES", f"DEMO_CELLS * {PALETTE}", pal, 8,
-                          "RGB palettes, 48 bytes each (16 triples)"))
+    out.append(byte_array("DEMO_PALETTES", len(demo_palettes) * PALETTE, b"".join(demo_palettes), 12,
+                          f"{len(demo_palettes)} palettes, 16 RGB triples each"))
+    out.append("\n# Per cell: image number (bit 15 set when mirrored) and palette number\n")
+    out.append(f"export const DEMO_CELLS: [{len(cells)}]u16 = [\n")
+    for i in range(0, len(cells), 8):
+        out.append("    " + ", ".join(f"${value:04x}" for value in cells[i:i + 8]) + ",\n")
+    out.append("]\n")
     out.append("\n")
     out.append(byte_array("DEMO_ROOM_TILES", ROOM_TILES, tiles, 8,
                           f"Room {ROOM}: twelve 8x8 full-colour characters, one palette index per byte"))
@@ -121,7 +136,8 @@ def main():
             out.append(f"export const {name}: u16 = {local[frames[name]]}\n")
     (D / "bubble-demo-data.mensch").write_text("".join(out), encoding="ascii")
 
-    print(f"{len(order)} demo cells: {len(blob)} image bytes, {len(pal)} palette bytes")
+    print(f"{len(order)} demo cells: {len(demo_images)} images, {len(demo_palettes)} palettes, "
+          f"{len(demo_images) * IMAGE + len(demo_palettes) * PALETTE + len(cells) * 2} bytes")
     print(f"room {ROOM}: {len(tiles) + len(room_palettes) + len(room_map)} bytes")
     for cycle, names in CYCLES:
         cells = [local[frames[n]] for n in names]

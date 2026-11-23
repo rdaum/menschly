@@ -2,7 +2,7 @@ import unittest
 
 from PIL import Image
 
-from convert import pack_cell
+from convert import MIRRORED, cell_table, mirror_image, pack_cell, pack_set
 from extract import Part, render_cell
 from levels import room_map
 
@@ -33,6 +33,23 @@ class AssetTests(unittest.TestCase):
         image, palette = pack_cell(cell, "pose")
         self.assertEqual(image, b"\x12" + bytes(126) + b"\x02")
         self.assertEqual(palette[:9], bytes([0, 0, 0, 0, 0, 0, 255, 0, 0]))
+
+    def test_mirror_reverses_each_row_and_its_nibbles(self):
+        image = bytes([0x12, 0, 0, 0, 0, 0, 0, 0x34]) + bytes(120)
+        mirrored = mirror_image(image)
+        self.assertEqual(mirrored[:8], bytes([0x43, 0, 0, 0, 0, 0, 0, 0x21]))
+        self.assertEqual(mirror_image(mirrored), image)
+
+    def test_pack_set_stores_each_image_and_palette_once(self):
+        left = bytes([0x10]) + bytes(127)
+        other = bytes([0x22]) + bytes(127)
+        red, blue = bytes([255]) + bytes(47), bytes([0, 0, 255]) + bytes(45)
+        images, palettes, records = pack_set(
+            [(left, red), (left, blue), (mirror_image(left), red), (other, blue)])
+        self.assertEqual(images, [left, other])
+        self.assertEqual(palettes, [red, blue])
+        self.assertEqual(records, [(0, 0), (0, 1), (MIRRORED, 0), (1, 1)])
+        self.assertEqual(cell_table(records)[8:12], bytes([0x00, 0x80, 0, 0]))
 
     def test_map_uses_four_wall_quadrants_and_header_openings(self):
         # First interior row solid. Other interior cells use wind code 7.

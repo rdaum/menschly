@@ -33,11 +33,17 @@ colour overrides. The [MAME graphics driver](https://github.com/mamedev/mame/blo
 and [video renderer](https://github.com/mamedev/mame/blob/master/src/mame/taito/bublbobl_v.cpp)
 describe the ROM layout and transparent pen.
 
+The converter stores each distinct image and palette once: the 1,417 cells
+use 885 images and 592 palettes, 147,364 bytes in all. Many cells share
+pixels and differ only in colour (most of Bob's frames are Bub's), and a cell
+that is another's mirror image reuses it.
+
 | Converter output | Layout |
 | --- | --- |
-| `sprites.bin` | 128 bytes per cell, 8 bytes per row, left pixel in the high nibble |
-| `sprite_palettes.rgb` | 48 bytes per cell, 16 RGB triples. Nibble 0 is transparent. Opaque black gets its own index. |
-| `bubble-frames.mensch` | Module `BubbleFrames` exports all frame names as `u16` cell indices. |
+| `sprite_images.bin` | 128 bytes per image, 8 bytes per row, left pixel in the high nibble |
+| `sprite_palettes.rgb` | 48 bytes per palette, 16 RGB triples. Nibble 0 is transparent. Opaque black gets its own index. |
+| `sprite_cells.bin` | 4 bytes per cell: image number (bit 15 set when the cell is that image mirrored) and palette number, little-endian |
+| `bubble-frames.mensch` | Module `BubbleFrames` exports all frame names as `u16` cell numbers. |
 
 ## Terrain and room maps
 
@@ -69,31 +75,36 @@ scripts/bubble_bobble/run-demo.sh             # build and run
 scripts/bubble_bobble/run-demo.sh --no-run    # build the ROM only
 ```
 
-The 249 KB asset pack does not fit the kernel's 24 KB image segment, so
-`demo_assets.py` extracts the 36 cells the demo's six cycles use and writes
-them as module `BubbleDemoData` (`target/bubble-bobble/bubble-demo-data.mensch`):
-exported image and palette tables and the frame names, renumbered as demo
-cells. At startup the demo copies the images by DMA to `$46000` and puts the
-sprite pointer table at `$45000`, because the VIC-IV reads the table from a
+The 147 KB sprite pack does not fit the kernel's 24 KB image segment, so
+`demo_assets.py` extracts the 33 cells the demo's six cycles use, in the
+converter's format, and room 1, and writes them as module `BubbleDemoData`
+(`target/bubble-bobble/bubble-demo-data.mensch`) with the frame names
+renumbered as demo cells. The sprite pointer table is at `$45000` and the
+sprites' image buffers at `$46000`, because the VIC-IV reads the table from a
 16-byte boundary and each image from a 64-byte one.
 
-`bubble-anim.mensch` is the animation library: `anim_init`, `anim_show` (which
-skips work when a slot already shows that frame), `anim_place`, and `anim_run`,
-which steps every cycle in parallel one frame per `hold` screen frames.
+`bubble-anim.mensch` holds the demo's cycles and `anim_run`, which steps
+every cycle in parallel one frame per `hold` screen frames, mirroring the
+cycles asked for.
 
 ## Calling from Mensch
 
 Compile [bubble-video.mensch](bubble-video.mensch), the generated
 `bubble-frames.mensch`, and [vic4.mensch](../../lib/vic4.mensch) with your
-game. The sprite images, pointer table and active FCM characters belong
-in chip RAM. The full five files total 422,384 bytes. On a 384 KiB machine,
-keep the sprite images and palettes resident and stage one room at a time.
+game. Each hardware sprite shows its own 128-byte buffer in chip RAM, and
+`bb_sprite_show` copies a cell's image there, mirroring it on the way if
+asked, and loads its palette only when that changes. The sprite files
+themselves can be anywhere DMA reaches, inside or outside chip RAM. The
+pointer table, the eight buffers and the active FCM characters belong in
+chip RAM. The six files total 320,356 bytes; keep the sprite files resident
+and stage one room at a time.
 For room N, read 768 terrain bytes at offset `(N-1)*768`, 96 palette bytes
 at `(N-1)*96`, and 832 map bytes at `(N-1)*832`. Pass those three buffers
 as record 1 to `bb_draw_room`. With complete files in addressable memory,
 pass N directly. The sprite image base and FCM tile destination must be 64-byte
-aligned. Reserve 16 aligned bytes for the sprite pointer table and 768 bytes
-at a full-colour tile address (character number at least $100).
+aligned, and so must the eight 128-byte sprite buffers. Reserve 16 aligned
+bytes for the sprite pointer table and 768 bytes at a full-colour tile
+address (character number at least $100).
 
 ```text
 import BubbleFrames
@@ -106,8 +117,9 @@ vic4_text16(SCREEN, 32, 0)
 vic4_text_rows(26)
 vic4_fill_colour(0, 0, 0, 32 * 26)
 bb_draw_room(1, 0, LEVEL_TILES, LEVEL_PALETTES, ROOM_MAPS, TILE_RAM, 0)
-bb_sprites_init(SPRITE_TABLE, $01, 1)
-bb_sprite_frame(0, BUBBLUN_WALK_01, SPRITE_IMAGES, SPRITE_PALETTES)
+bb_sprites_init(SPRITE_TABLE, SPRITE_BUFFERS, $01, 1)
+bb_sprite_assets(SPRITE_IMAGES, SPRITE_PALETTES, SPRITE_CELLS)
+bb_sprite_show(0, BUBBLUN_WALK_01, 1)          # mirrored: facing left
 vic4_sprite_place(0, 120, 100)
 vic4_sprites_on($01)
 ```

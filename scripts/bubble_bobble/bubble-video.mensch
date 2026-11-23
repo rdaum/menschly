@@ -1,25 +1,115 @@
 module BubbleVideo
 import Vic4
 
-# Sprite images and palettes can span banks. Only this staging area needs
-# to be near for the VIC-IV palette loader.
-var palette_buffer: [48]u8
+# ---------------------------------------------------------------- sprites
+#
+# Each hardware sprite shows a fixed 128-byte buffer in chip RAM, and showing
+# a cell copies its image there, mirrored if asked. The sprite data itself
+# (convert.py's sprite_images.bin, sprite_palettes.rgb and sprite_cells.bin,
+# or a subset in that format) can be anywhere DMA reaches.
 
-export procedure bb_sprites_init(table: u32, mask: u8, bank: u8)
+const IMAGE_BYTES = 128
+const PALETTE_BYTES = 48
+const MIRRORED = $8000
+const NOTHING = $ffff
+
+var sprite_images: u32
+var sprite_palettes: u32
+var sprite_cells: u32
+var slot_images: u32
+
+# What each slot shows, so a repeat costs nothing.
+var shown_cell: [8]u16
+var shown_mirrored: [8]u8
+var shown_palette: [8]u16
+
+# Staging in bank 0: the palette loader reads near memory, and a mirrored
+# image is built here before it goes to its slot.
+var palette_buffer: [PALETTE_BYTES]u8
+var pixels: [IMAGE_BYTES]u8
+var mirrored_pixels: [IMAGE_BYTES]u8
+
+# Sets up the sprites in `mask` as 16-colour, 16-row sprites drawing from
+# palette `bank`, with the pointer table at `table` (16 bytes, 16-byte
+# aligned) and slot n showing the 128 bytes at `slot_buffers + n * 128`
+# (64-byte aligned, in chip RAM).
+export procedure bb_sprites_init(table: u32, slot_buffers: u32, mask: u8, bank: u8)
+    var slot: u8
+    slot_images = slot_buffers
     vic4_sprite_table(table)
     vic4_sprite_palette(bank)
     vic4_sprites_16_colour(mask)
     vic4_sprite_height(16, mask)
+    for slot = 0 to 7
+        vic4_sprite_image(slot, slot_images + (u32(slot) << 7))
+        shown_cell[slot] = NOTHING
+        shown_palette[slot] = NOTHING
+    end
     return
 end
 
-export procedure bb_sprite_frame(slot: u8, frame: u16, images: u32, palettes: u32)
-    var offset: u32
-    offset = u32(frame) << 4
-    dma_copy(palettes + (offset << 1) + offset, u32(addr(palette_buffer)), 48)
-    vic4_sprite_colours(slot, addr(palette_buffer))
-    vic4_sprite_colour(slot, 0)
-    vic4_sprite_image(slot, images + (u32(frame) << 7))
+# Where the sprite data is: images, palettes and the 4-byte cell records.
+export procedure bb_sprite_assets(image_data: u32, palette_data: u32, cell_data: u32)
+    sprite_images = image_data
+    sprite_palettes = palette_data
+    sprite_cells = cell_data
+    return
+end
+
+# Shows `cell` in sprite `slot`, mirrored left to right if `mirrored`.
+export procedure bb_sprite_show(slot: u8, cell: u16, mirrored: u8)
+    var record: far ^u16
+    var image: u16
+    var palette: u16
+    var flip: u8
+    if mirrored
+        mirrored = 1
+    end
+    if shown_cell[slot] == cell and shown_mirrored[slot] == mirrored
+        return
+    end
+    shown_cell[slot] = cell
+    shown_mirrored[slot] = mirrored
+    record = sprite_cells + (u32(cell) << 2)
+    image = record[0]
+    palette = record[1]
+    flip = mirrored
+    if image & MIRRORED
+        flip = flip xor 1
+    end
+    image = image & (MIRRORED xor $ffff)
+    if flip
+        dma_copy(sprite_images + (u32(image) << 7), u32(addr(pixels)), IMAGE_BYTES)
+        mirror_pixels()
+        dma_copy(u32(addr(mirrored_pixels)), slot_images + (u32(slot) << 7), IMAGE_BYTES)
+    else
+        dma_copy(sprite_images + (u32(image) << 7), slot_images + (u32(slot) << 7), IMAGE_BYTES)
+    end
+    if shown_palette[slot] != palette
+        shown_palette[slot] = palette
+        # 48 bytes per palette is (palette << 5) + (palette << 4).
+        dma_copy(sprite_palettes + (u32(palette) << 5) + (u32(palette) << 4),
+                 u32(addr(palette_buffer)), PALETTE_BYTES)
+        vic4_sprite_colours(slot, addr(palette_buffer))
+        vic4_sprite_colour(slot, 0)
+    end
+    return
+end
+
+# mirrored_pixels = pixels with each 16-pixel row reversed: the row's bytes
+# in reverse order, each with its two pixels swapped.
+procedure mirror_pixels()
+    var row: u8
+    var i: u8
+    var byte: u8
+    row = 0
+    repeat
+        for i = 0 to 7
+            byte = pixels[row + i]
+            mirrored_pixels[row + 7 - i] = byte << 4 | byte >> 4
+        end
+        row = row + 8
+    until row == IMAGE_BYTES
     return
 end
 

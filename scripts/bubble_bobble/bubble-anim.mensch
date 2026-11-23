@@ -1,75 +1,13 @@
 module BubbleAnim
 import Vic4
+import BubbleVideo
 import BubbleDemoData
 
 # Sprite animation for the Bubble Bobble demo.
 #
 # Each sprite slot shows one frame of a named cycle, stepped once every `hold`
-# frames. Frame names come from the generated `BubbleDemoData` module, where
-# every name is a `u16` cell index into its image and palette tables: 128
-# bytes per sprite image and 48 bytes per RGB palette.
-#
-# `stage` is a 48-byte buffer the palette loader must address directly, so it
-# has to be near. `table` is the 16-byte sprite pointer table.
-
-var stage: [48]u8
-
-# The frame each slot is showing, so a repeat costs no hardware work.
-var shown: [8]u16
-
-const BITS: [8]u8 = [$01, $02, $04, $08, $10, $20, $40, $80]
-
-export function bit_of(slot: u8): u8
-    return BITS[slot & 7]
-end
-
-# ---------------------------------------------------------------- setup
-
-# Prepares `count` sprite slots in 16-colour mode, 16 rows tall, using palette
-# bank 1 so bank 0 stays free for the room. Every slot starts hidden.
-export procedure anim_init(table: u32, count: u8)
-    var mask: u8
-    var slot: u8
-    vic4_sprite_table(table)
-    vic4_sprite_palette(1)
-    mask = 0
-    for slot = 0 to count - 1
-        mask = mask | bit_of(slot)
-        shown[slot] = 0
-    end
-    vic4_sprites_16_colour(mask)
-    vic4_sprite_height(16, mask)
-    vic4_sprites_on(0)
-    return
-end
-
-# ---------------------------------------------------------------- one sprite
-
-# Shows `frame` in `slot`. Does nothing if the slot already shows that frame.
-export procedure anim_show(slot: u8, frame: u16, images: u32, palettes: u32)
-    var offset: u32
-    if shown[slot] == frame
-        return
-    end
-    shown[slot] = frame
-    vic4_sprite_image(slot, images + (u32(frame) << 7))
-    # 48 bytes per palette is (frame << 5) + (frame << 4).
-    offset = (u32(frame) << 5) + (u32(frame) << 4)
-    dma_copy(palettes + offset, u32(addr(stage)), 48)
-    vic4_sprite_colours(slot, addr(stage))
-    vic4_sprite_colour(slot, 0)
-    return
-end
-
-export procedure anim_place(slot: u8, x: u16, y: u8)
-    vic4_sprite_place(slot, x, y)
-    return
-end
-
-export procedure anim_on(mask: u8)
-    vic4_sprites_on(mask)
-    return
-end
+# frames, through BubbleVideo's bb_sprite_show. Frame names come from the
+# generated `BubbleDemoData` module, where every name is a `u16` cell number.
 
 # ---------------------------------------------------------------- cycles
 #
@@ -97,9 +35,9 @@ const BLOW: [8]u16 = [
     BUBBLUN_BLOW_01, BUBBLUN_BLOW_02, BUBBLUN_BLOW_03, BUBBLUN_BLOW_04,
     BUBBLUN_BLOW_05, BUBBLUN_BLOW_06, BUBBLUN_BLOW_07, BUBBLUN_BLOW_08
 ]
-const MAITA: [10]u16 = [
+const MAITA: [7]u16 = [
     MAITA_MOVE_01, MAITA_MOVE_02, MAITA_MOVE_03, MAITA_MOVE_04, MAITA_MOVE_05,
-    MAITA_MOVE_06, MAITA_MOVE_07, MAITA_MOVE_08, MAITA_MOVE_09, MAITA_MOVE_10
+    MAITA_MOVE_06, MAITA_MOVE_07
 ]
 const ZEN: [4]u16 = [
     ZEN_CHAN_WALK_01, ZEN_CHAN_WALK_02, ZEN_CHAN_WALK_03, ZEN_CHAN_WALK_04
@@ -111,7 +49,7 @@ const FRAMES: [CYCLES]near ^u16 = [
     addr(WALK_BUBBLUN), addr(WALK_BOBBLUN), addr(BLOW),
     addr(MAITA), addr(ZEN), addr(BUBBLE)
 ]
-const LENGTH: [CYCLES]u8 = [6, 6, 8, 10, 4, 3]
+const LENGTH: [CYCLES]u8 = [6, 6, 8, 7, 4, 3]
 
 # Where each cycle currently is.
 var step: [CYCLES]u8
@@ -145,9 +83,10 @@ end
 # ---------------------------------------------------------------- the pattern
 #
 # Runs every cycle in parallel, one slot each, stepping a frame every `hold`
-# screen frames. `slots[cycle]` is the sprite slot that cycle drives. Returns
+# screen frames. `slots[cycle]` is the sprite slot that cycle drives, and its
+# frames are mirrored left to right when `mirror[cycle]` is nonzero. Returns
 # after `revolutions` complete turns of the longest cycle.
-export procedure anim_run(slots: near ^u8, images: u32, palettes: u32, hold: u8, revolutions: u8)
+export procedure anim_run(slots: near ^u8, mirror: near ^u8, hold: u8, revolutions: u8)
     var cycle: u8
     var frames: u16
     var total: u8
@@ -160,7 +99,7 @@ export procedure anim_run(slots: near ^u8, images: u32, palettes: u32, hold: u8,
     end
     # Show the first frame of every cycle straight away.
     for cycle = 0 to CYCLES - 1
-        anim_show(slots[cycle], cycle_frame(cycle, 0), images, palettes)
+        bb_sprite_show(slots[cycle], cycle_frame(cycle, 0), mirror[cycle])
     end
     frames = 0
     done = 0
@@ -174,7 +113,7 @@ export procedure anim_run(slots: near ^u8, images: u32, palettes: u32, hold: u8,
                 if step[cycle] == LENGTH[cycle]
                     step[cycle] = 0
                 end
-                anim_show(slots[cycle], cycle_frame(cycle, step[cycle]), images, palettes)
+                bb_sprite_show(slots[cycle], cycle_frame(cycle, step[cycle]), mirror[cycle])
             end
         end
         frames = frames + 1

@@ -6,9 +6,9 @@ module BubbleDemo
 # Run it with scripts/bubble_bobble/run-demo.sh, which regenerates the assets
 # and boots the result in Xemu.
 #
-# The full sprite pack is 249 KB, far more than the kernel's 24 KB image
+# The full sprite pack is 147 KB, far more than the kernel's 24 KB image
 # segment, so `demo_assets.py` generates module `BubbleDemoData` with just the
-# 36 cells these six cycles use (4.6 KB of images, 1.7 KB of palettes).
+# 36 cells these six cycles use (4.7 KB) and room 1 (1.7 KB).
 
 import Vic4
 import BubbleAnim
@@ -17,9 +17,10 @@ import BubbleVideo
 
 # The VIC-IV reads the sprite pointer table from a 16-byte boundary and each
 # image from a 64-byte one, so both go at fixed chip-RAM addresses (as in
-# examples/vic4-demo.mensch) and the images are copied there by DMA.
+# examples/vic4-demo.mensch): the table, and the eight 128-byte buffers the
+# sprites show, which bb_sprite_show copies each frame into.
 const SPRITE_TABLE: u32 = $45000
-const SPRITE_IMAGES: u32 = $46000
+const SLOT_IMAGES: u32 = $46000
 # Room 1's twelve full-colour characters (character $1100 on).
 const ROOM_TILES: u32 = $44000
 
@@ -34,6 +35,9 @@ const SPRITES = 6
 # are rows 10, 15 and 20.
 const STAND_COLUMN: [SPRITES]u8 = [6, 23, 9, 18, 12, 20]
 const STAND_ROW: [SPRITES]u8 = [23, 23, 18, 13, 8, 4]
+# Nonzero to mirror a cycle's frames: Bob turns to face Bub across the
+# floor, and Maita (drawn facing left) walks right.
+const MIRROR: [SPRITES]u8 = [0, 1, 0, 1, 0, 0]
 
 # Screen frames each animation frame is held for.
 const HOLD = 4
@@ -50,7 +54,6 @@ const CELL_Y = 46
 
 export function main(): u8
     var cycle: u8
-    dma_copy(u32(addr(DEMO_IMAGES)), SPRITE_IMAGES, DEMO_CELLS * 128)
     vic4_init()
     vic4_text16(SCREEN, COLUMNS, 0)
     vic4_text_rows(ROWS)
@@ -60,14 +63,15 @@ export function main(): u8
     vic4_background(0)
     bb_draw_room(1, 0, u32(addr(DEMO_ROOM_TILES)), u32(addr(DEMO_ROOM_PALETTES)),
                  u32(addr(DEMO_ROOM_MAP)), ROOM_TILES, ROOM_LEFT)
-    anim_init(SPRITE_TABLE, SPRITES)
+    bb_sprites_init(SPRITE_TABLE, SLOT_IMAGES, $3f, 1)
+    bb_sprite_assets(u32(addr(DEMO_IMAGES)), u32(addr(DEMO_PALETTES)), u32(addr(DEMO_CELLS)))
     anim_cycles()
     for cycle = 0 to SPRITES - 1
-        anim_place(SLOTS[cycle],
+        vic4_sprite_place(SLOTS[cycle],
                    CELL_X + (u16(ROOM_LEFT + STAND_COLUMN[cycle]) << 3),
                    CELL_Y + (STAND_ROW[cycle] << 3))
     end
-    anim_on($3f)
-    anim_run(addr(SLOTS), SPRITE_IMAGES, u32(addr(DEMO_PALETTES)), HOLD, 255)
+    vic4_sprites_on($3f)
+    anim_run(addr(SLOTS), addr(MIRROR), HOLD, 255)
     return 0
 end

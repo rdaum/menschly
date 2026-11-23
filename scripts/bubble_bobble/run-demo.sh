@@ -27,7 +27,7 @@ if [[ "${1:-}" == "--rom" ]]; then keep_rom="${2:?--rom needs a file name}"; fi
 mkdir -p "$assets"
 
 # 1. Assets: ROM -> sprite atlas -> packed cells -> Mensch source.
-if [[ ! -f "$assets/sprites.tsv" || ! -f "$assets/sprite_palettes.rgb" ]]; then
+if [[ ! -f "$assets/sprites.tsv" || ! -f "$assets/sprite_cells.bin" ]]; then
   echo "extracting assets from $bubs"
   (cd "$here" && python3 extract.py "$bubs" --output-dir "$assets")
   (cd "$here" && python3 convert.py "$assets")
