@@ -2871,7 +2871,7 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
     let caller = "
         module PhysicsTest
         import BubblePhysics
-        fixed($0e00) volatile var out: [16]i16
+        fixed($0e00) volatile var out: [19]i16
         var room_map: [832]u8
 
         # Side walls; ceiling and floor with a gap at columns 14-17; one
@@ -2969,6 +2969,22 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
             steps(6, 4)
             out[14] = i16(body_falling(6))
             out[15] = body_y(6)
+            # 8. Launched upward near the top (under the solid ceiling): out
+            #    of the top, in at the bottom, up through the floor and back
+            #    down onto it.
+            body_place(7, 40, 20)
+            body_launch(7, JUMP)
+            went_above = 0
+            for frame = 1 to 60
+                body_step(7)
+                if body_y(7) > 150
+                    went_above = 1
+                end
+            end
+            out[16] = went_above
+            steps(7, 200)
+            out[17] = body_y(7)
+            out[18] = i16(body_on_ground(7))
             return 0
         end
         ";
@@ -2997,7 +3013,7 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
     };
     let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
     assert_eq!(run.exit_code, 0);
-    let out: Vec<i16> = (0..16)
+    let out: Vec<i16> = (0..19)
         .map(|i| i16::from_le_bytes([run.memory[0x0e00 + 2 * i], run.memory[0x0e01 + 2 * i]]))
         .collect();
     assert_eq!(&out[0..2], &[184, 1], "drop onto the floor");
@@ -3030,6 +3046,8 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
         out[13],
         out[15]
     );
+    assert_eq!(out[16], 1, "out of the top, in at the bottom");
+    assert_eq!(&out[17..19], &[184, 1], "then down onto the floor");
 }
 
 #[test]

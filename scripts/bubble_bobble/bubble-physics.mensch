@@ -9,12 +9,13 @@ module BubblePhysics
 #
 # - wall cells (1-4, the side walls) stop bodies from every direction;
 # - platform cells (5) are one-way: a body rising through one carries on, a
-#   body coming down onto one lands on it. The top row is the exception: it
-#   stops a body leaving through the ceiling, and a body coming in from
-#   above (dropping in, or wrapping round from the bottom) passes through;
+#   body coming down onto one lands on it. The top row is never landed on:
+#   bodies come in through it, dropping in or wrapping round;
 # - everything else (0, and the shadows 6-11) is empty.
 #
-# A body that falls out of the bottom of the room comes back in at the top.
+# The room wraps vertically: a body that falls out of the bottom comes back
+# in at the top, and one that rises out of the top (say, bouncing off
+# bubbles) comes back in at the bottom.
 #
 # Each frame a game moves a body sideways with body_walk (walls stop it) and
 # then calls body_step for gravity, landing and walking off edges.
@@ -205,12 +206,10 @@ export procedure body_step(body: u8)
     end
     y = bodies[body].y + vy
     if vy < 0
-        # Rising: through platforms, but not out through the ceiling.
-        if (y >> 4) < 8 and (bodies[body].y >> 4) >= 8
-            if supported(px, 0)
-                y = 8 << 4
-                vy = 0
-            end
+        # Rising: through platforms, and out of the top back in at the
+        # bottom.
+        if (y >> 4) < 0 - SIZE
+            y = y + ((ROOM_HEIGHT + SIZE) << 4)
         end
     else
         # Falling: land on terrain whose top the feet reach, having started

@@ -55,6 +55,8 @@ const BOUNCE_BELOW = 10
 const BOUNCE_SIDE = 12
 # Otherwise Bub pops a bubble he overlaps by this margin on every side.
 const POP_MARGIN = 5
+# A bounce is lower than a jump: about 30 px (speed^2 / 4 / 16).
+const BOUNCE_SPEED = 44
 
 const BUB_WALK: [6]u16 = [
     BUBBLUN_WALK_01, BUBBLUN_WALK_02, BUBBLUN_WALK_03,
@@ -285,7 +287,7 @@ procedure bubbles_meet()
             end
         elsif bubble_state(b) == BUBBLE_FLOAT and caught == 0
             if lands_on(b) and (buttons_now & JOY_UP)
-                body_launch(PLAYER, JUMP)
+                body_launch(PLAYER, BOUNCE_SPEED)
             elsif boxes_touch(bubble_x(b), bubble_y(b), body_x(PLAYER), body_y(PLAYER), POP_MARGIN)
                 enemy = bubble_pop(b)
                 if enemy != NO_CAPTIVE
@@ -334,10 +336,11 @@ procedure check_cleared()
     return
 end
 
-# Draws `actor` at room pixel (x, y) with `cell`, hidden while above the
-# room. The sprites face left; `mirrored` turns them to face right.
+# Draws `actor` at room pixel (x, y) with `cell`, hidden only while
+# entirely above the room (a body partly above it shows its lower part).
+# The sprites face left; `mirrored` turns them to face right.
 procedure draw_at(actor: u8, x: i16, y: i16, cell: u16, mirrored: u8)
-    if y < 0
+    if y <= -16
         actor_hide(actor)
         return
     end
