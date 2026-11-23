@@ -1,0 +1,122 @@
+module BubbleSwarm
+
+# A benchmark for lib/actors.mensch: room 1 with a swarm of software
+# bubbles that behave like the game's (rising half a pixel a frame, then
+# drifting along under the ceiling toward the middle a quarter pixel a
+# frame, cycling their three floating frames), measuring the raster lines
+# actors_frame takes.
+#
+# Over frames FIRST_MEASURED to FIRST_MEASURED + 127 it records, at $0F00
+# (u16 each): the total raster lines spent in actors_frame, the worst
+# frame, and the actor rows that found no slot. bench-swarm.sh builds it
+# for a given number of bubbles, runs it headless and prints them.
+
+import Vic4
+import Actors
+import BubbleDemoData
+import BubbleVideo
+import SwarmSize
+
+const ROOM_TILES: u32 = $44000
+const SPRITE_TABLE: u32 = $45000
+const SPRITE_BUFFERS: u32 = $46000
+const ACTOR_CHARACTERS: u32 = $48000
+const SCREEN: u32 = $50000
+
+const COLUMNS = 40
+const ROWS = 26
+const SLOTS = 32
+const ENTRIES = 32
+const ROOM_LEFT = (COLUMNS - 32) / 2
+const ROOM_X = ROOM_LEFT * 8
+const QUIET_LINE = 256
+
+# Sixteenths of a pixel per frame.
+const RISE = 8
+const DRIFT = 4
+const CEILING = 8
+const MIDDLE = 120
+
+const FIRST_MEASURED = 120
+const MEASURED = 128
+const LINES_PER_FRAME = 312
+
+const FLOAT: [3]u16 = [BUBBLE_GREEN_01, BUBBLE_GREEN_02, BUBBLE_GREEN_03]
+
+fixed($0f00) volatile var stats: [4]u16
+
+var actor: [BUBBLES]u8
+var x16: [BUBBLES]u16
+var y16: [BUBBLES]u16
+
+procedure scatter()
+    var i: u8
+    for i = 0 to BUBBLES - 1
+        actor[i] = actor_new(ACTOR_SOFTWARE)
+        # Spread across the room's interior and its height.
+        x16[i] = (16 + u16((u16(i) * 37) % 208)) << 4
+        y16[i] = (24 + u16((u16(i) * 53) % 168)) << 4
+    end
+    return
+end
+
+procedure move(tick: u16)
+    var i: u8
+    var px: u16
+    for i = 0 to BUBBLES - 1
+        if (y16[i] >> 4) > CEILING
+            y16[i] = y16[i] - RISE
+        else
+            px = x16[i] >> 4
+            if px < MIDDLE
+                x16[i] = x16[i] + DRIFT
+            elsif px > MIDDLE
+                x16[i] = x16[i] - DRIFT
+            end
+        end
+        actor_draw(actor[i], ROOM_X + (x16[i] >> 4), y16[i] >> 4,
+                   FLOAT[u8((tick >> 3) + u16(i)) % 3], 0)
+    end
+    return
+end
+
+export function main(): u8
+    var tick: u16
+    var before: u16
+    var after: u16
+    var lines: u16
+    vic4_init()
+    actors_sheet(u32(addr(DEMO_IMAGES)), u32(addr(DEMO_PALETTES)), u32(addr(DEMO_CELLS)))
+    actors_software(SCREEN, COLUMNS, ROWS, SLOTS, ACTOR_CHARACTERS, ENTRIES)
+    actors_hardware(SPRITE_TABLE, SPRITE_BUFFERS, 1, 24, 46)
+    bb_draw_room(1, 0, u32(addr(DEMO_ROOM_TILES)), u32(addr(DEMO_ROOM_PALETTES)),
+                 u32(addr(DEMO_ROOM_MAP)), ROOM_TILES, ROOM_LEFT)
+    scatter()
+    stats[0] = 0
+    stats[1] = 0
+    stats[2] = 0
+    stats[3] = BUBBLES
+    tick = 0
+    repeat
+        vic4_wait_line(QUIET_LINE)
+        move(tick)
+        before = vic4_raster()
+        actors_frame()
+        after = vic4_raster()
+        lines = after + LINES_PER_FRAME - before
+        if lines >= LINES_PER_FRAME
+            lines = lines - LINES_PER_FRAME
+        end
+        if tick >= FIRST_MEASURED and tick < FIRST_MEASURED + MEASURED
+            stats[0] = stats[0] + lines
+            if lines > stats[1]
+                stats[1] = lines
+            end
+            stats[2] = stats[2] + actors_missing()
+        else
+            lines = actors_missing()
+        end
+        tick = tick + 1
+    until 0
+    return 0
+end
