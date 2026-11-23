@@ -143,7 +143,9 @@ def run_arcade(inputs):
         enemies = []
         for i in range(ENEMIES):
             r = rec[i * 0x19:(i + 1) * 0x19]
-            enemies.append(visible(convert(r[2], r[1])) if r[0] else None)
+            # Gone once a popped enemy has landed (+$0E bit 3: it is fruit).
+            dead = r[0] & 2 and r[0x0E] & 8
+            enemies.append(visible(convert(r[2], r[1])) if r[0] and not dead else None)
         table = bytes.fromhex(cols[3])
         bubbles = []
         for i in range(ARCADE_BUBBLES):
@@ -151,7 +153,8 @@ def run_arcade(inputs):
             if b[0] == 2 and not shooting[i]:
                 lives.append(b[0x0D])
             shooting[i] = b[0] == 2
-            if b[0] in (1, 2):
+            # Floating, shooting, or holding an enemy.
+            if b[0] in (1, 2, 4, 8, 0x10):
                 bubbles.append(convert(b[2], b[1]))
         frames.append(((*convert(x, h), state), enemies, tuple(sorted(bubbles))))
     return frames, lives

@@ -43,10 +43,10 @@ const SHOT_SPEED = 48
 # floating, after the shot's last pixel and rest) % 5 is 1 or 3.
 # How long a floating bubble lasts: LIFE_UNIT * its life (the arcade's is 8
 # to 15, at random, given to bubble_blow) + LIFE_EXTRA frames; with an enemy
-# inside (a guess, not yet measured) CAPTIVE_FRAMES.
+# inside CAPTIVE_FRAMES (round 1's: its lifetime starts at 29 * 60 + 60).
 const LIFE_UNIT = 60
 const LIFE_EXTRA = 23
-const CAPTIVE_FRAMES = 480
+const CAPTIVE_FRAMES = 1800
 export const POP_FRAMES = 31
 
 # The air: 0 or 1 up, 2 right, 3 left, 4 down.
@@ -385,6 +385,13 @@ export function bubble_capture(b: u8, enemy: u8): u8
     bubbles[b].captive = enemy
     start_float(b)
     return 1
+end
+
+# Pushes floating bubble `b` `dx` px sideways (Bub walking into it), after
+# its own move next frame.
+export procedure bubble_nudge(b: u8, dx: i8)
+    bubbles[b].push_x = bubbles[b].push_x + dx
+    return
 end
 
 # Bursts floating bubble `b`: the enemy it held, or NO_CAPTIVE.

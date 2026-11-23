@@ -3290,12 +3290,13 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
             steps(9)
             out[7] = bubble_x(b)
             out[8] = i16(bubble_state(b))
-            # 5. A trapped enemy floats, then breaks out after 480 frames.
+            # 5. A trapped enemy floats, then breaks out after round 1's 1800
+            #    frames.
             bubbles_reset()
             b = bubble_blow(40, 184, 0, 8)
             out[9] = i16(bubble_capture(b, 2))
             out[10] = i16(bubble_state(b))
-            steps(479)
+            steps(1799)
             out[11] = i16(bubble_escapee(b))
             steps(1)
             out[12] = i16(bubble_escapee(b))
@@ -3348,7 +3349,7 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
     assert_eq!(
         &out[11..13],
         &[255, 2],
-        "the enemy breaks out at 480 frames"
+        "the enemy breaks out at 1800 frames"
     );
     assert_eq!(
         &out[13..15],

@@ -36,6 +36,7 @@ if [[ ! -f "$assets/sprites.tsv" || ! -f "$assets/sprite_cells.bin" ]]; then
   (cd "$here" && python3 convert.py "$assets")
 fi
 (cd "$here" && python3 demo_assets.py)
+(cd "$here" && python3 rom_tables.py "$assets" >/dev/null)
 # The input replay module: replay.py writes one with a script of inputs;
 # otherwise the game reads the joystick.
 replay="${REPLAY_MODULE:-$assets/game-replay.mensch}"
@@ -58,6 +59,7 @@ cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- 
   "$root/lib/vic4.mensch" \
   "$root/lib/actors.mensch" \
   "$assets/bubble-demo-data.mensch" \
+  "$assets/bubble-rom-tables.mensch" \
   "$replay"
 
 echo "rom: $rom"

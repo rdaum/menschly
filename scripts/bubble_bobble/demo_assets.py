@@ -56,6 +56,7 @@ CYCLES = [
     ("BUBBLE_DOTTED", [f"BUBBLE_DOTTED_{i:02d}" for i in range(1, 4)]),
     ("ZEN_CHAN_BUBBLE_GREEN", [f"ZEN_CHAN_BUBBLE_GREEN_{i:02d}" for i in range(1, 4)]),
     ("ZEN_CHAN_ANGRY", [f"ZEN_CHAN_ANGRY_{i:02d}" for i in range(1, 5)]),
+    ("ZEN_CHAN_STUNNED", [f"ZEN_CHAN_STUNNED_{i:02d}" for i in range(1, 9)]),
 ]
 
 

@@ -19,6 +19,7 @@ import BubbleVideo
 import BubblePhysics
 import BubbleBubbles
 import BubbleAir
+import BubbleRomTables
 import GameReplay
 
 # Chip RAM, as in the animation demo.
@@ -61,14 +62,25 @@ const SAFE_FRAMES = 180
 const CATCH_DISTANCE = 8
 # Frames between bubbles, and of the blowing animation.
 const BLOW_FRAMES = 22
-# Coming down with up held onto a bubble bounces off it: feet from
-# BOUNCE_ABOVE pixels above its top to BOUNCE_BELOW below, and within
-# BOUNCE_SIDE pixels of it sideways.
-const BOUNCE_ABOVE = 2
-const BOUNCE_BELOW = 10
-const BOUNCE_SIDE = 12
-# Otherwise Bub pops a bubble he overlaps by this margin on every side.
-const POP_MARGIN = 5
+# Bub and floating bubbles, as the arcade's sub CPU has them ($0664), with
+# positions as centres: when their heights are less than TOUCH_HEIGHT apart,
+# Bub pops a bubble that is no more than POP_FRONT px ahead of his middle
+# (and less than POP_REACH behind that), and pushes one just further ahead
+# (less than PUSH_AHEAD px more) the way he walks. Coming down onto one,
+# within LAND_SIDE px across, he pops it if his middle is less than LAND_POP
+# px above its, and bounces off it (with up held) if less than LAND_BOUNCE.
+const TOUCH_HEIGHT = 12
+const POP_FRONT = 5
+const POP_REACH = 18
+const PUSH_AHEAD = 10
+const LAND_SIDE = 12
+const LAND_POP = 12
+const LAND_BOUNCE = 22
+# A shooting bubble traps an enemy less than TRAP_REACH px from it both ways.
+const TRAP_REACH = 14
+# A bursting bubble bursts the first other bubble less than CHAIN_REACH px
+# from it both ways, and so on, one a frame ($08F0).
+const CHAIN_REACH = 20
 
 const BUB_WALK: [6]u16 = [
     BUBBLUN_WALK_01, BUBBLUN_WALK_02, BUBBLUN_WALK_03,
@@ -90,6 +102,11 @@ var walk_step: u8
 var stride: u8
 # Bubble lives taken from a replay's list.
 var lives_used: u16
+# The chain reaction: whether one is going, the bubble it is at, and which
+# way the enemies it frees fly.
+var chaining: u8
+var chain_from: u8
+var chain_left: u8
 # Moves steered during the current jump.
 var steers: u8
 var caught: u8
@@ -155,6 +172,14 @@ const WAITING = 0
 const ACTIVE = 1
 const TRAPPED = 2
 const GONE = 3
+# Popped: hidden for DYING_HIDDEN frames, then flying off along its slot's
+# script (BubbleRomTables), bouncing off a side wall, then falling.
+const DYING = 4
+const DYING_HIDDEN = 3
+const FLYING = 0
+const FALLING_DEAD = 1
+const SCRIPT_END = $99
+const STEPS_END = $88
 
 # An active enemy's motion.
 const WALK = 0
@@ -165,6 +190,10 @@ const PAUSE = 4
 
 const ZEN_WALK: [4]u16 = [
     ZEN_CHAN_WALK_01, ZEN_CHAN_WALK_02, ZEN_CHAN_WALK_03, ZEN_CHAN_WALK_04
+]
+const ZEN_DYING: [8]u16 = [
+    ZEN_CHAN_STUNNED_01, ZEN_CHAN_STUNNED_02, ZEN_CHAN_STUNNED_03, ZEN_CHAN_STUNNED_04,
+    ZEN_CHAN_STUNNED_05, ZEN_CHAN_STUNNED_06, ZEN_CHAN_STUNNED_07, ZEN_CHAN_STUNNED_08
 ]
 const ZEN_ANGRY: [4]u16 = [
     ZEN_CHAN_ANGRY_01, ZEN_CHAN_ANGRY_02, ZEN_CHAN_ANGRY_03, ZEN_CHAN_ANGRY_04
@@ -179,6 +208,14 @@ var enemy_motion: [ENEMIES]u8
 var enemy_timer: [ENEMIES]u8
 # Whether the enemy was under a platform it could jump to last frame.
 var enemy_cooldown: [ENEMIES]u8
+# Whether a shot caught the enemy this frame.
+var enemy_trapping: [ENEMIES]u8
+# A dying enemy's place in its flight: script entry (into DEATH_SCRIPT, or
+# BOUNCE_SCRIPT once bounced), repeats left, and step in the pattern.
+var enemy_script: [ENEMIES]u16
+var enemy_bounced: [ENEMIES]u8
+var enemy_reps: [ENEMIES]u8
+var enemy_step: [ENEMIES]u8
 var enemy_mind: [ENEMIES]u8
 # The height (y) the enemy last jumped from, or NO_JUMP; and whether its
 # jump is the drifting one.
@@ -230,12 +267,14 @@ procedure start_round()
         enemy_delay[i] = DROP_DELAY[i]
         enemy_left[i] = 1
         enemy_angry[i] = 0
+        enemy_trapping[i] = 0
         enemy_cooldown[i] = reload(i)
         enemy_mind[i] = CHASING
         enemy_jumped_from[i] = NO_JUMP
         actor_hide(enemy_actor[i])
     end
     bubbles_reset()
+    chaining = 0
     clearing = 0
     return
 end
@@ -451,6 +490,10 @@ procedure move_enemy(i: u8)
         end
         return
     end
+    if enemy_state[i] == DYING
+        move_dying(i)
+        return
+    end
     if enemy_state[i] != ACTIVE
         return
     end
@@ -547,51 +590,249 @@ procedure move_enemy(i: u8)
     return
 end
 
-# Whether Bub is coming down with his feet on the top of bubble `b`.
-function lands_on(b: u8): u8
-    var feet: i16
-    var dx: i16
-    if body_falling(PLAYER) == 0
-        return 0
+# ---------------------------------------------------------------- dying
+
+function script_byte(i: u8, at: u16): u8
+    if enemy_bounced[i]
+        return BOUNCE_SCRIPT[at]
     end
-    dx = body_x(PLAYER) - bubble_x(b)
-    if dx <= 0 - BOUNCE_SIDE or dx >= BOUNCE_SIDE
-        return 0
-    end
-    feet = body_y(PLAYER) + 16
-    if feet >= bubble_y(b) - BOUNCE_ABOVE and feet < bubble_y(b) + BOUNCE_BELOW
-        return 1
-    end
-    return 0
+    return DEATH_SCRIPT[at]
 end
 
-# Bubbles against Zen-chans and Bub: trapping, popping, bouncing and
-# breaking out.
-procedure bubbles_meet()
+# Enemy `i` starts (or, `bounced`, starts again) on its slot's flight.
+procedure start_script(i: u8, bounced: u8)
+    enemy_bounced[i] = bounced
+    if bounced
+        enemy_script[i] = BOUNCE_SCRIPT_AT[i]
+    else
+        enemy_script[i] = DEATH_SCRIPT_AT[i]
+    end
+    enemy_reps[i] = script_byte(i, enemy_script[i] + 1)
+    enemy_step[i] = 0
+    return
+end
+
+# Enemy `i` is popped out of its bubble at (x, y), flying left if `left`.
+procedure start_dying(i: u8, x: i16, y: i16, left: u8)
+    enemy_state[i] = DYING
+    enemy_motion[i] = FLYING
+    enemy_timer[i] = DYING_HIDDEN
+    enemy_left[i] = left
+    body_place(FIRST_ENEMY + i, x, y)
+    start_script(i, 0)
+    return
+end
+
+# A flight step: 1 px, or 2 if that does not reach an 8-pixel line.
+function fly(v: i16, d: i16): i16
+    v = v + d
+    if (v & 7) != 0
+        v = v + d
+    end
+    return v
+end
+
+procedure move_dying(i: u8)
+    var body: u8
+    var x: i16
+    var y: i16
+    var way: u8
+    var pattern: u16
+    var bits: u8
+    body = FIRST_ENEMY + i
+    if enemy_timer[i]
+        enemy_timer[i] = enemy_timer[i] - 1
+        return
+    end
+    x = body_x(body)
+    y = body_y(body)
+    if enemy_motion[i] == FALLING_DEAD
+        y = y + 1
+        if y >= ROOM_HEIGHT
+            y = y - ROOM_HEIGHT - 16
+        end
+        body_place(body, x, y)
+        # Landing, it turns into fruit (not yet shown).
+        if (y & 7) == 0 and supported(x, y + 16)
+            enemy_state[i] = GONE
+        end
+        return
+    end
+    # At a side wall it turns and starts its bounce, holding a frame.
+    if enemy_left[i] and x < 16
+        enemy_left[i] = 0
+        start_script(i, 1)
+        return
+    end
+    if enemy_left[i] == 0 and x >= 224
+        enemy_left[i] = 1
+        start_script(i, 1)
+        return
+    end
+    way = script_byte(i, enemy_script[i])
+    if way == SCRIPT_END
+        enemy_motion[i] = FALLING_DEAD
+        return
+    end
+    if enemy_left[i] and way != 0
+        way = (32 - way) & 31
+    end
+    pattern = DEATH_STEP_AT[way]
+    bits = DEATH_STEPS[pattern + u16(enemy_step[i])]
+    if bits & 1
+        if bits & 8
+            y = fly(y, 1)
+        else
+            y = fly(y, -1)
+        end
+    end
+    if bits & $10
+        if bits & $80
+            x = fly(x, -1)
+        else
+            x = fly(x, 1)
+        end
+    end
+    body_place(body, x, y)
+    enemy_step[i] = enemy_step[i] + 1
+    if DEATH_STEPS[pattern + u16(enemy_step[i])] == STEPS_END
+        enemy_step[i] = 0
+        enemy_reps[i] = enemy_reps[i] - 1
+        if enemy_reps[i] == 0
+            enemy_script[i] = enemy_script[i] + 2
+            enemy_reps[i] = script_byte(i, enemy_script[i] + 1)
+        end
+    end
+    return
+end
+
+# ---------------------------------------------------------------- bubbles
+
+# Bursts bubble `b`, its enemy (if any) flying off left if `left`, and
+# starts a chain reaction from it.
+procedure burst(b: u8, left: u8)
+    var enemy: u8
+    enemy = bubble_pop(b)
+    if enemy != NO_CAPTIVE
+        start_dying(enemy, bubble_x(b), bubble_y(b), left)
+    end
+    chain_from = b
+    chain_left = left
+    chaining = 1
+    return
+end
+
+# The chain reaction: the bubble that last burst bursts the first floating
+# bubble close to it.
+procedure chain()
+    var b: u8
+    var dx: i16
+    var dy: i16
+    if chaining == 0
+        return
+    end
+    chaining = 0
+    for b = 0 to MAX_BUBBLES - 1
+        if b != chain_from and bubble_state(b) == BUBBLE_FLOAT
+            dx = bubble_x(b) - bubble_x(chain_from)
+            dy = bubble_y(b) - bubble_y(chain_from)
+            if dx > 0 - CHAIN_REACH and dx < CHAIN_REACH and dy > 0 - CHAIN_REACH and dy < CHAIN_REACH
+                burst(b, chain_left)
+                return
+            end
+        end
+    end
+    return
+end
+
+# Bub against floating bubble `b`: popping it, pushing it or bouncing off it.
+procedure bub_meets(b: u8)
+    var ahead: i16
+    var above: i16
+    var across: i16
+    across = bubble_x(b) - body_x(PLAYER)
+    above = bubble_y(b) - body_y(PLAYER)
+    if body_falling(PLAYER)
+        if across > 0 - LAND_SIDE and across < LAND_SIDE and above >= 0
+            if above < LAND_POP
+                burst(b, facing_left)
+            elsif above < LAND_BOUNCE and (buttons_now & JOY_UP)
+                body_launch(PLAYER)
+            end
+            return
+        end
+    end
+    if above <= 0 - TOUCH_HEIGHT or above >= TOUCH_HEIGHT
+        return
+    end
+    # How far the bubble is ahead of Bub's front (his middle + POP_FRONT).
+    ahead = across - POP_FRONT
+    if facing_left
+        ahead = 0 - across - POP_FRONT
+    end
+    if ahead <= 0 and ahead > 0 - POP_REACH
+        burst(b, facing_left)
+    elsif ahead > 0 and ahead < PUSH_AHEAD and (buttons_now & (JOY_LEFT | JOY_RIGHT))
+        if facing_left
+            bubble_nudge(b, -1)
+        else
+            bubble_nudge(b, 1)
+        end
+    end
+    return
+end
+
+# Shooting bubbles trap enemies: as the arcade does, before anything moves
+# this frame, so from where they all were at the end of the last.
+procedure trap_enemies()
     var b: u8
     var i: u8
-    var enemy: u8
+    var dx: i16
+    var dy: i16
     for b = 0 to MAX_BUBBLES - 1
         if bubble_state(b) == BUBBLE_SHOT
             for i = 0 to ENEMIES - 1
                 if enemy_state[i] == ACTIVE
-                    if boxes_touch(bubble_x(b), bubble_y(b), body_x(FIRST_ENEMY + i), body_y(FIRST_ENEMY + i), 2)
+                    dx = bubble_x(b) - body_x(FIRST_ENEMY + i)
+                    dy = bubble_y(b) - body_y(FIRST_ENEMY + i)
+                    if dx > 0 - TRAP_REACH and dx < TRAP_REACH and dy > 0 - TRAP_REACH and dy < TRAP_REACH
                         if bubble_capture(b, i)
-                            enemy_state[i] = TRAPPED
-                            actor_hide(enemy_actor[i])
+                            # It finishes this frame, then is inside.
+                            enemy_trapping[i] = 1
                         end
                     end
                 end
             end
-        elsif bubble_state(b) == BUBBLE_FLOAT and caught == 0
-            if lands_on(b) and (buttons_now & JOY_UP)
-                body_launch(PLAYER)
-            elsif boxes_touch(bubble_x(b), bubble_y(b), body_x(PLAYER), body_y(PLAYER), POP_MARGIN)
-                enemy = bubble_pop(b)
-                if enemy != NO_CAPTIVE
-                    enemy_state[enemy] = GONE
-                end
-            end
+        end
+    end
+    return
+end
+
+# Enemies trapped this frame are inside their bubbles from now on.
+procedure enter_bubbles()
+    var i: u8
+    for i = 0 to ENEMIES - 1
+        if enemy_trapping[i]
+            enemy_trapping[i] = 0
+            enemy_state[i] = TRAPPED
+            actor_hide(enemy_actor[i])
+        end
+    end
+    return
+end
+
+# Bubbles against Bub: popping, pushing, bouncing, chain reactions; and
+# enemies breaking out.
+procedure bubbles_meet()
+    var b: u8
+    var i: u8
+    var enemy: u8
+    var dx: i16
+    var dy: i16
+    chain()
+    for b = 0 to MAX_BUBBLES - 1
+        if bubble_state(b) == BUBBLE_FLOAT and caught == 0
+            bub_meets(b)
         end
         enemy = bubble_escapee(b)
         if enemy != NO_CAPTIVE
@@ -699,6 +940,9 @@ procedure draw_enemies()
             end
             draw_at(enemy_actor[i], body_x(FIRST_ENEMY + i), body_y(FIRST_ENEMY + i),
                     cell, enemy_left[i] xor 1)
+        elsif enemy_state[i] == DYING and enemy_timer[i] == 0
+            draw_at(enemy_actor[i], body_x(FIRST_ENEMY + i), body_y(FIRST_ENEMY + i),
+                    ZEN_DYING[u8(tick >> 2) % 8], enemy_left[i] xor 1)
         else
             actor_hide(enemy_actor[i])
         end
@@ -721,7 +965,8 @@ procedure draw_bubbles()
                 end
                 cell = BUBBLE_FORM[step]
             elsif bubble_state(b) == BUBBLE_POP
-                cell = BUBBLE_POPPED[u8(POP_FRAMES - bubble_timer(b)) / 6]
+                # Three frames over the burst.
+                cell = BUBBLE_POPPED[u8(u16(POP_FRAMES - bubble_timer(b)) * 3 / (POP_FRAMES + 1))]
             elsif bubble_captive(b) != NO_CAPTIVE
                 cell = BUBBLE_TRAPPED[u8(tick >> 3) % 3]
             else
@@ -764,7 +1009,11 @@ procedure log_frame()
     for i = 0 to ENEMIES - 1
         log_put16(at + u32(5 + i * 6), body_x(FIRST_ENEMY + i))
         log_put16(at + u32(7 + i * 6), body_y(FIRST_ENEMY + i))
-        at[9 + u16(i) * 6] = enemy_state[i]
+        # On screen: walking, or dying once shown.
+        at[9 + u16(i) * 6] = 0
+        if enemy_state[i] == ACTIVE or (enemy_state[i] == DYING and enemy_timer[i] == 0)
+            at[9 + u16(i) * 6] = 1
+        end
         at[10 + u16(i) * 6] = enemy_motion[i] | (enemy_left[i] << 4)
     end
     for i = 0 to LOGGED_BUBBLES - 1
@@ -805,6 +1054,7 @@ export function main(): u8
         vic4_wait_line(QUIET_LINE)
         buttons = read_buttons(tick)
         buttons_now = buttons
+        trap_enemies()
         move_bub(buttons)
         for i = 0 to ENEMIES - 1
             move_enemy(i)
@@ -822,6 +1072,7 @@ export function main(): u8
         draw_enemies()
         draw_bubbles()
         actors_frame()
+        enter_bubbles()
         tick = tick + 1
     until 0
     return 0
