@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, ArgRegister, BinaryOp, Const, CopRegister, DataItem, Entry, EntryKind, Field,
-    Global, GlobalPlacement, Import, InterruptPreserve, IrInst, Label, Library, Local, Metadata,
-    Module, Param, PointerKind, Routine, RoutineKind, RoutineType, StaticData, Storage, Type,
-    Value, Vector, Width,
+    Abi, Address, ArgRegister, BinaryOp, Const, CopRegister, DataItem, Entry, EntryKind,
+    ExternalData, Field, Global, GlobalPlacement, Import, InterruptPreserve, IrInst, Label,
+    Library, Local, Metadata, Module, Param, PointerKind, Routine, RoutineKind, RoutineType,
+    StaticData, Storage, Type, Value, Vector, Width,
 };
 
 /// Finds the source text of a module named in an `import`.
@@ -140,6 +140,8 @@ pub struct GlobalDecl {
     pub init: Option<Init>,
     /// A `const` table: reads only.
     pub readonly: bool,
+    /// Defined and exported by an imported module; this one only refers to it.
+    pub external: bool,
 }
 
 /// An initialiser: an expression, or the elements of an array (`[...]`) or
@@ -694,6 +696,7 @@ struct Imported {
     modules: Vec<String>,
     types: Vec<TypeDecl>,
     consts: Vec<ConstDecl>,
+    globals: Vec<GlobalDecl>,
     externals: Vec<ExternalDecl>,
 }
 
@@ -776,6 +779,15 @@ impl<'m> Parser<'m> {
                 ..decl
             });
         }
+        for global in module.globals.into_iter().filter(|global| global.export) {
+            imported.globals.push(GlobalDecl {
+                export: false,
+                arena: false,
+                init: None,
+                external: true,
+                ..global
+            });
+        }
         for routine in module.routines.into_iter().filter(|routine| routine.export) {
             imported.externals.push(ExternalDecl {
                 name: routine.name,
@@ -818,6 +830,7 @@ impl<'m> Parser<'m> {
                 self.import_module(&module.module, &name, &mut imported)?;
                 types.extend(imported.types);
                 consts.extend(imported.consts);
+                globals.extend(imported.globals);
                 externals.extend(imported.externals);
                 imports.push(module);
             } else if self.is_keyword_at(0, "export")
@@ -831,15 +844,16 @@ impl<'m> Parser<'m> {
                     });
                 } else {
                     self.take_keyword("const");
-                    let ConstOrTable::Const(decl) = self.parse_const_decl()? else {
-                        return Err(self.parse_error(
-                            "only scalar constants can be exported (tables are data)",
-                        ));
-                    };
-                    consts.push(ConstDecl {
-                        export: true,
-                        ..decl
-                    });
+                    match self.parse_const_decl()? {
+                        ConstOrTable::Const(decl) => consts.push(ConstDecl {
+                            export: true,
+                            ..decl
+                        }),
+                        ConstOrTable::Table(decl) => globals.push(GlobalDecl {
+                            export: true,
+                            ..decl
+                        }),
+                    }
                 }
             } else if self.take_keyword("library") {
                 libraries.push(self.parse_library_decl()?);
@@ -963,6 +977,7 @@ impl<'m> Parser<'m> {
                 arena: false,
                 init: Some(init),
                 readonly: true,
+                external: false,
             }));
         }
         let expr = self.parse_expr()?;
@@ -1060,6 +1075,7 @@ impl<'m> Parser<'m> {
             arena,
             init,
             readonly: false,
+            external: false,
         })
     }
 
@@ -2212,6 +2228,28 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
         .collect();
     let mut globals = Vec::new();
     for global in &source.globals {
+        if global.external {
+            // Another module's global: a fixed one is just its address, which
+            // the assembler needs to see to pick the addressing mode; the
+            // rest are imported symbols.
+            match global.placement {
+                GlobalPlacement::Fixed(_) => globals.push(Global {
+                    name: global.name.clone(),
+                    ty: global.ty.clone(),
+                    placement: global.placement.clone(),
+                    volatile: global.volatile,
+                    export: false,
+                    init: None,
+                }),
+                GlobalPlacement::Static | GlobalPlacement::Bank(_) => {
+                    module.external_data.push(ExternalData {
+                        name: global.name.clone(),
+                        far: matches!(global.placement, GlobalPlacement::Bank(_)),
+                    })
+                }
+            }
+            continue;
+        }
         let init = match &global.init {
             Some(init) => {
                 let mut items = Vec::new();
@@ -6368,8 +6406,6 @@ mod tests {
         assert!(twice.contains("imported twice"), "{twice}");
         let missing = error("module Plot\nimport Lines\n");
         assert!(missing.contains("module Lines was not found"), "{missing}");
-        let table = compile_error("module T\nexport const TABLE: [2]u8 = [1, 2]\n");
-        assert!(table.contains("only scalar constants"), "{table}");
     }
 
     #[test]
@@ -6534,5 +6570,122 @@ mod tests {
             ",
         );
         assert!(error.contains("needs an array or a pointer"), "{error}");
+    }
+
+    #[test]
+    fn imports_take_in_exported_tables_and_variables() {
+        const DATA: &str = "
+            module Data
+            export const TABLE: [3]u8 = [1, 2, 3]
+            export var counter: u16
+            export bank(2) var far_buffer: [16]u8
+            export fixed($d020) volatile var border: u8
+            const PRIVATE_TABLE: [1]u8 = [9]
+            ";
+        const RELAY: &str = "
+            module Relay
+            import Data
+            export procedure relay()
+                counter = u16(TABLE[0])
+                return
+            end
+            ";
+        let modules = SourceSet::new([DATA, RELAY]);
+        let compiled = crate::driver::compile_source_with(
+            "
+            module User
+            import Data
+            export procedure main()
+                var i: u8
+                i = 2
+                counter = u16(TABLE[i])
+                border = TABLE[1]
+                far_buffer[3] = 1
+                return
+            end
+            ",
+            &modules,
+            crate::driver::Target::W65816,
+            crate::driver::DEFAULT_DIRECT_PAGE_BUDGET,
+        )
+        .unwrap();
+        assert!(compiled.asm.contains(".import TABLE\n"), "{}", compiled.asm);
+        assert!(
+            compiled.asm.contains(".import counter\n"),
+            "{}",
+            compiled.asm
+        );
+        assert!(
+            compiled.asm.contains(".import far_buffer: far\n"),
+            "{}",
+            compiled.asm
+        );
+        assert!(compiled.asm.contains("border = $d020"), "{}", compiled.asm);
+        assert!(!compiled.asm.contains("TABLE:"), "{}", compiled.asm);
+
+        let exporter = crate::driver::compile_source(
+            DATA,
+            crate::driver::Target::W65816,
+            crate::driver::DEFAULT_DIRECT_PAGE_BUDGET,
+        )
+        .unwrap();
+        assert!(
+            exporter.asm.contains(".export counter\ncounter: .res 2"),
+            "{}",
+            exporter.asm
+        );
+        assert!(
+            exporter.asm.contains(".export TABLE\nTABLE:"),
+            "{}",
+            exporter.asm
+        );
+
+        let error = |source: &str| {
+            compile_source_with(source, &modules)
+                .expect_err("source should be rejected")
+                .to_string()
+        };
+        let written = error(
+            "
+            module User
+            import Data
+            export procedure main()
+                TABLE[0] = 5
+                return
+            end
+            ",
+        );
+        assert!(written.contains("TABLE is a constant table"), "{written}");
+        let private = error(
+            "
+            module User
+            import Data
+            export function main(): u8
+                return PRIVATE_TABLE[0]
+            end
+            ",
+        );
+        assert!(private.contains("PRIVATE_TABLE"), "{private}");
+        let transitive = error(
+            "
+            module User
+            import Relay
+            export function main(): u8
+                return TABLE[0]
+            end
+            ",
+        );
+        assert!(transitive.contains("TABLE"), "{transitive}");
+        let clash = error(
+            "
+            module User
+            import Data
+            var counter: u8
+            export procedure main()
+                return
+            end
+            ",
+        );
+        assert!(clash.contains("counter"), "{clash}");
     }
 }

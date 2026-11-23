@@ -161,6 +161,7 @@ fn add_support_routines(out: &mut AsmModule) {
         out.static_symbols.push(crate::target_65816::StaticSymbol {
             name: name.to_owned(),
             size: 2,
+            export: false,
         });
     }
     for (name, source) in math {
@@ -179,11 +180,13 @@ fn lower_module_declarations(module: &Module, out: &mut AsmModule) {
         out.static_symbols.push(crate::target_65816::StaticSymbol {
             name: COP_SIGNATURE_SYMBOL.to_owned(),
             size: 1,
+            export: false,
         });
         for name in [COP_A_SYMBOL, COP_X_SYMBOL, COP_Y_SYMBOL] {
             out.static_symbols.push(crate::target_65816::StaticSymbol {
                 name: name.to_owned(),
                 size: 2,
+                export: false,
             });
         }
     }

@@ -183,16 +183,21 @@ Routines without parameters can be pointed at whatever their ABI, except
 ```text
 module Vic4
 export const JOY_FIRE = $10
+export const MASKS: [2]u8 = [$01, $02]
 export type Point = record(x: u8, y: u8)
+export var frame: u16
 export procedure vic4_init() ... end
 
 module Game
-import Vic4                     # vic4_init, JOY_FIRE and Point are now known
+import Vic4                     # vic4_init, JOY_FIRE, MASKS, Point, frame
 ```
 
 `import M` takes in what module `M` exports: its exported routines (called
-as if declared `external`), and its `export const` and `export type`
-declarations. Only scalar constants can be exported. Names a module imports
+as if declared `external`), its `export const` constants and tables, its
+`export type` declarations and its `export var` variables. Imported tables
+and variables are the exporting module's own storage, reached through the
+linker: an imported table is still read-only, a `fixed` variable keeps its
+address, and a `bank(N)` one is reached with long addressing. Names a module imports
 are its own: they do not pass on to the modules that import it, and an
 imported name may not clash with one already declared. Import cycles are
 rejected.

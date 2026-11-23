@@ -331,6 +331,81 @@ fn constant_array_lengths_and_pointer_indexing() {
 }
 
 #[test]
+fn modules_share_exported_tables_and_variables() {
+    // `Levels` lives in window bank 1: its code moves, its data stays
+    // resident, so `main` reads and writes it directly.
+    let sources = [
+        mega65::KernelModule {
+            name: "0-main".to_owned(),
+            source: "
+            module Main
+            import Levels
+            fixed($0850) volatile var out: [8]u8
+            const PICKS: [1]near ^Spawn = [addr(SPAWNS)]
+
+            export function main(): u8
+                var i: u8
+                var p: near ^Spawn
+                out[0] = SPAWNS[1].x
+                i = 2
+                out[1] = SPAWNS[i].lives
+                out[2] = u8(score >> 8)
+                score = $4321
+                out[3] = bump_score()
+                p = PICKS[0]
+                out[4] = p[1].y
+                out[5] = SIZES[i]
+                lamp = 9
+                out[6] = lamp_seen()
+                return u8(SPAWN_COUNT)
+            end
+            "
+            .to_owned(),
+            window: None,
+        },
+        mega65::KernelModule {
+            name: "1-levels".to_owned(),
+            source: "
+            module Levels
+            export const SPAWN_COUNT = 3
+            export type Spawn = record(x: u8, y: u8, lives: u8)
+            export const SPAWNS: [SPAWN_COUNT]Spawn = [(10, 20, 1), (30, 40, 2), (50, 60, 3)]
+            export const SIZES: [4]u8 = [1, 2, 4, 8]
+            export var score: u16 = $1234
+            export fixed($0860) volatile var lamp: u8
+
+            export function bump_score(): u8
+                score = score + 1
+                return u8(score)
+            end
+
+            export function lamp_seen(): u8
+                return lamp + 1
+            end
+            "
+            .to_owned(),
+            window: Some(1),
+        },
+    ];
+    let modules = mega65::compile_kernel_modules(&sources).expect("modules should compile");
+    let refs = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect::<Vec<_>>();
+    let dir = temp_dir("shared-data");
+    let rom = mega65::build_rom(&dir, &refs)
+        .unwrap_or_else(|error| panic!("modules should link: {error}"));
+    let Some(xemu) = mega65::find_xemu() else {
+        eprintln!("skipping shared-data: Xemu not found (set MENSCH_XMEGA65)");
+        return;
+    };
+    let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30))
+        .unwrap_or_else(|error| panic!("shared-data: {error}"));
+    assert_eq!(run.exit_code, 3);
+    assert_eq!(&run.memory[0x0850..0x0857], &[30, 3, 0x12, 0x22, 40, 4, 10]);
+}
+
+#[test]
 fn reentrant_stack_parameters_locals_and_results() {
     let Some(run) = run_source(
         "reentrant-basics",

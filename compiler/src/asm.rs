@@ -24,6 +24,7 @@ pub struct AsmModule<I> {
     pub libraries: Vec<ModuleLibrary>,
     pub external_routines: Vec<String>,
     pub external_direct_symbols: Vec<String>,
+    pub external_data: Vec<ExternalData>,
     pub entry: Option<ModuleEntry>,
     pub routines: Vec<AsmRoutine<I>>,
 }
@@ -43,6 +44,7 @@ impl<I> AsmModule<I> {
             libraries: Vec::new(),
             external_routines: Vec::new(),
             external_direct_symbols: Vec::new(),
+            external_data: Vec::new(),
             entry: None,
             routines: Vec::new(),
         }
@@ -71,6 +73,7 @@ impl<I> AsmModule<I> {
                 GlobalPlacement::Static => out.static_symbols.push(StaticSymbol {
                     name: global.name.clone(),
                     size,
+                    export: global.export,
                 }),
                 GlobalPlacement::Fixed(address) => out.fixed_symbols.push(FixedSymbol {
                     name: global.name.clone(),
@@ -118,6 +121,7 @@ impl<I> AsmModule<I> {
             .collect();
         out.external_routines = module.external_routines.clone();
         out.external_direct_symbols = module.external_direct_symbols.clone();
+        out.external_data = module.external_data.clone();
         out.entry = module.entry.as_ref().map(|entry| ModuleEntry {
             kind: match entry.kind {
                 EntryKind::Application => "application",
@@ -197,15 +201,16 @@ impl<I> AsmModule<I> {
                 .and_modify(|size| *size = (*size).max(local.size))
                 .or_insert(local.size);
         }
-        self.static_symbols.extend(
-            statics
-                .into_iter()
-                .map(|(name, size)| StaticSymbol { name, size }),
-        );
+        self.static_symbols
+            .extend(statics.into_iter().map(|(name, size)| StaticSymbol {
+                name,
+                size,
+                export: false,
+            }));
     }
 }
 
-pub use crate::ir::{DataItem, StaticData};
+pub use crate::ir::{DataItem, ExternalData, StaticData};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectSymbol {
@@ -220,6 +225,7 @@ pub struct DirectSymbol {
 pub struct StaticSymbol {
     pub name: String,
     pub size: u16,
+    pub export: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

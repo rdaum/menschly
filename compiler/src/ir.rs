@@ -11,6 +11,8 @@ pub struct Module {
     pub libraries: Vec<Library>,
     pub external_routines: Vec<String>,
     pub external_direct_symbols: Vec<String>,
+    /// Globals another module defines and exports.
+    pub external_data: Vec<ExternalData>,
     pub entry: Option<Entry>,
     pub routines: Vec<Routine>,
 }
@@ -27,6 +29,7 @@ impl Module {
             libraries: Vec::new(),
             external_routines: Vec::new(),
             external_direct_symbols: Vec::new(),
+            external_data: Vec::new(),
             entry: None,
             routines: Vec::new(),
         }
@@ -113,6 +116,14 @@ pub enum GlobalPlacement {
     Static,
     Fixed(u32),
     Bank(u8),
+}
+
+/// A global defined in another module: `far` when it lives in another bank
+/// (`bank(N)`), so references to it need long addressing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalData {
+    pub name: String,
+    pub far: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

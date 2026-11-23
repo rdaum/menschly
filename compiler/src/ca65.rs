@@ -48,7 +48,18 @@ pub fn emit<I: Ca65Inst>(module: &crate::asm::AsmModule<I>) -> String {
         out.push_str(symbol);
         out.push('\n');
     }
-    if !module.external_routines.is_empty() || !module.external_direct_symbols.is_empty() {
+    for data in &module.external_data {
+        out.push_str(".import ");
+        out.push_str(&data.name);
+        if data.far {
+            out.push_str(": far");
+        }
+        out.push('\n');
+    }
+    if !module.external_routines.is_empty()
+        || !module.external_direct_symbols.is_empty()
+        || !module.external_data.is_empty()
+    {
         out.push('\n');
     }
 
@@ -93,6 +104,11 @@ pub fn emit<I: Ca65Inst>(module: &crate::asm::AsmModule<I>) -> String {
     if !module.static_symbols.is_empty() {
         out.push_str(".bss\n");
         for symbol in &module.static_symbols {
+            if symbol.export {
+                out.push_str(".export ");
+                out.push_str(&symbol.name);
+                out.push('\n');
+            }
             out.push_str(&symbol.name);
             out.push_str(": .res ");
             out.push_str(&symbol.size.to_string());

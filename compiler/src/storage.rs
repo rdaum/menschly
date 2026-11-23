@@ -559,6 +559,7 @@ pub fn apply_storage(module: &Module, assignment: &StorageAssignment) -> Module 
         libraries: module.libraries.clone(),
         external_routines: module.external_routines.clone(),
         external_direct_symbols: module.external_direct_symbols.clone(),
+        external_data: module.external_data.clone(),
         entry: module.entry.clone(),
         routines,
     }
