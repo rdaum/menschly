@@ -14,7 +14,7 @@ use std::process;
 use std::time::Duration;
 
 use clap::Parser;
-use mensch_systems_tests::mega65::{self, XemuOptions};
+use menschly::mega65::{self, XemuOptions};
 
 #[derive(Debug, Parser)]
 #[command(about = "Build a MEGA65 kernel ROM from Mensch modules and boot it in Xemu")]

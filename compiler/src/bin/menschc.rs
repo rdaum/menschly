@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::Parser;
-use mensch_systems_tests::driver::{self, Target};
-use mensch_systems_tests::{frontend, storage};
+use menschly::driver::{self, Target};
+use menschly::{frontend, storage};
 
 fn main() {
     if let Err(error) = run() {

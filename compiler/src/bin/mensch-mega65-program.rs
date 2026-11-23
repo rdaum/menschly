@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::Parser;
-use mensch_systems_tests::mega65;
+use menschly::mega65;
 
 #[derive(Debug, Parser)]
 #[command(about = "Build a relocatable Hellord program (o65) for the MEGA65")]

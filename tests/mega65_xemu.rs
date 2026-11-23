@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mensch_systems_tests::driver::{self, Target};
-use mensch_systems_tests::mega65::{self, XemuRun};
+use menschly::driver::{self, Target};
+use menschly::mega65::{self, XemuRun};
 
 static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 

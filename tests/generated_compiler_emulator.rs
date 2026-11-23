@@ -4,7 +4,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mensch_systems_tests::{ca65, fixtures, frontend, lower_65816};
+use menschly::{ca65, fixtures, frontend, lower_65816};
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
 
 const ROUTINE_ADDR: usize = 0x020000;
@@ -157,12 +157,12 @@ fn assemble_fixture(name: &str, asm: &str) -> Vec<u8> {
     fs::read(&bin_path).expect("linked fixture binary should exist")
 }
 
-fn assemble_ir_fixture(name: &str, module: &mensch_systems_tests::ir::Module) -> Vec<u8> {
+fn assemble_ir_fixture(name: &str, module: &menschly::ir::Module) -> Vec<u8> {
     let asm = ca65::emit_module(&lower_65816::lower_module(module).unwrap());
     assemble_fixture(name, &asm)
 }
 
-fn assemble_storage_fixture(name: &str, module: &mensch_systems_tests::ir::Module) -> Vec<u8> {
+fn assemble_storage_fixture(name: &str, module: &menschly::ir::Module) -> Vec<u8> {
     let (lowered, _assignment) = lower_65816::lower_module_with_storage(module)
         .expect("fixture should assign storage and lower to 65816 assembly");
     let asm = ca65::emit_module(&lowered);

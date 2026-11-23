@@ -1,195 +1,161 @@
-# 65816 Systems Experiments
+# Menschly
 
-This repository now has two related tracks:
+Mensch, a systems language built for the 65xx family; Hellord, an
+operating system written in it; and the beginnings of games and a GUI for
+the MEGA65.
 
-- a working 65816 o65 relocating loader
-- notes for a future 65816-first systems language and compiler
+- **Mensch** is a compiled language designed around how the 6502 family
+  actually works: static storage by default, the base page as a register
+  file, no integer promotion, 8-bit indexes, column-wise (`parallel`) arrays,
+  register arguments and carry-flag results, explicit stack/reentrant
+  routines, interrupts and traps. The compiler (Rust) emits ca65 assembly for
+  the **65816** and the MEGA65's **45GS02**.
+- **Hellord** is an OS written in Mensch: a DOS-style shell, FAT16/FAT32 on
+  SD card, a GEMDOS/BIOS-style trap interface, and a loader that runs
+  relocatable o65 programs. It boots on the MEGA65 as a replacement for the
+  C65 ROM, and on an emulated X65-like 65816 machine.
+- **`lib/vic4.mensch`** is a MEGA65 graphics and input library (VIC-IV
+  full-colour tiles, palettes, DMA, raster interrupts, 16-colour sprites,
+  joysticks), the start of a game and of an eventual GEM-like GUI.
+- An **o65 relocating loader** in 65816 assembly, where the project began
+  (see [`loader/README.md`](loader/README.md)).
 
-## o65 Loader
+## Repository layout
 
-This is a relocating executable loader for the o65 binary format, written in
-65816 assembly for ca65.
+| Path | What |
+|---|---|
+| `compiler/src/` | The Mensch compiler: frontend, IR, storage assignment, 65816 and 45GS02 backends and optimizers, ca65 emitter, MEGA65 ROM builder and Xemu runner |
+| `compiler/src/bin/` | Command-line tools (below) |
+| `compiler/*.md` | Language documentation (below) |
+| `examples/hellord-*.mensch` | Hellord's modules |
+| `examples/mega65-machine.mensch`, `x65-machine.mensch`, `serial-ring.mensch` | Machine drivers: console and block device per machine |
+| `examples/programs/` | Programs that Hellord loads and runs |
+| `examples/vic4-demo.mensch` | Tiles, a raster sky gradient and 16-colour sprites on the MEGA65 |
+| `lib/` | Mensch libraries (`vic4.mensch`) |
+| `scripts/` | Boot Hellord or run the demo in an emulator |
+| `loader/` | The o65 relocating loader in 65816 assembly |
+| `x65alike-emul/` | A small X65-like 65816 machine model used by the tests |
+| `tests/` | Emulator-backed integration tests |
 
-o65 is a small relocatable binary/object format for 6502-family (or other
-similar) systems. It is useful when code cannot be linked to one fixed address
-ahead of time: the loader can take an o65 executable image, relocate its
-text/data references for the address where the image actually sits in memory,
-and then transfer control to the loaded program.
+## Documentation
 
-The format is described here:
+- [`compiler/INTRODUCTION.md`](compiler/INTRODUCTION.md): why Mensch, what it
+  does better than C on the 65xx (with examples and generated code), and what
+  C still does better.
+- [`compiler/LANGUAGE.md`](compiler/LANGUAGE.md): the language reference.
+- [`compiler/ABI.md`](compiler/ABI.md): how each construct is laid out and
+  called on the 65816 and the MEGA65, including window banks and the
+  direct-page overlay.
+- [`compiler/REGISTER_PLANNING.md`](compiler/REGISTER_PLANNING.md): notes on
+  register and direct-page allocation.
 
-http://www.6502.org/users/andre/o65/
-
-## Repository Layout
-
-- `loader/asm/` contains the maintained ca65 loader implementation.
-- `compiler/` contains planning notes for the future systems language/compiler.
-- `tests/` contains an emulator-backed Rust integration test suite for the
-  loader.
-
-## Loader Model
-
-The situation is:
-
-- The loader binary is linked to run at `$010000`.
-- The caller passes the o65 program image address in registers:
-  - `A`: low 16 bits of the image address
-  - `X` low byte: bank byte of the image address
-  - `X` high byte: optional loader context bank byte
-  - `Y`: optional loader context low 16 bits
-- The loader relocates the image in place.
-- Native 65816 programs are entered with `RTL` semantics and are expected to
-  return with `RTL`.
-- Plain 6502 programs and `CPU2_65816_EMU` programs are entered in 65816
-  emulation mode and are expected to return with `RTS`.
-- If no exported entry symbol is found, execution starts at the relocated text
-  segment start.
-- If an exported text symbol named `main` or `_main` exists, that symbol is used
-  as the entry point. `_main` takes priority over `main`.
-- If a symbol table is supplied, exported globals are appended to it as
-  resolved 24-bit runtime addresses.
-
-The return instruction is part of the loader ABI. Native 65816 programs are
-called through a long-return stack frame, so they exit with `RTL`. Plain 6502
-and `CPU2_65816_EMU` programs run in emulation mode and exit with `RTS` to a
-small native-mode return stub that the loader writes after the loaded image.
-
-If `Y` and the high byte of `X` point at a loader context, the first three
-bytes are an optional 24-bit image-end pointer used for bounds checks. The
-remaining bytes are a symbol table used to resolve unresolved external
-relocation entries by name. The symbol table format is a sequence of entries:
+## A taste of Mensch
 
 ```text
-name\0 address-low address-high address-bank
+module Game
+import Vic4
+
+type Actor = record(x: u8, y: u8, dx: i8)
+var actors: parallel [32]Actor          # stored column by column
+var floor: [256]u8
+
+procedure move_all()
+    var i: u8
+    for i = 0 to 31                     # lda actors,x / adc actors+64,x / sta actors,x
+        actors[i].x = actors[i].x + u8(actors[i].dx)
+    end
+    return
+end
+
+# Arguments arrive in X and Y; the answer comes back in the carry flag.
+function on_ground(x: u8 in x, y: u8 in y): u8 in carry
+    if floor[x] == y
+        return 1
+    end
+    return 0
+end
+
+export procedure main()
+    move_all()
+    if on_ground(actors[0].x, actors[0].y)    # a call, then bcc/bcs
+        actors[0].dx = 0
+    end
+    if joystick(2) & JOY_FIRE
+        vic4_border(2)
+    end
+    return
+end
 ```
 
-An empty name byte terminates the table. Symbol addresses are absolute 24-bit
-runtime addresses. If the loader context pointer is zero, external symbol
-resolution and whole-image truncation checks are disabled.
+On a small benchmark the plain-routine code is 208 bytes against 290 for
+`cc65 -O`, and 169 with `parallel` arrays (see `INTRODUCTION.md`).
 
-The loader code address and direct-page workspace address are fixed at link
-time by `loader/asm/o65_loader.cfg`. The o65 image address is supplied by the
-caller at runtime.
+## Requirements
 
-That split is intentional. A resident OS/monitor service normally has a known
-address in the system memory map, and link-time placement keeps the loader
-small and straightforward. Porting it to a different memory map should usually
-mean adjusting `loader/asm/o65_loader.cfg`; making the loader itself
-position-independent is a separate portability feature, not a requirement for
-the basic OS-resident use case.
+- Rust (stable) and Cargo.
+- cc65 with 45GS02 support (`ca65 --cpu 45GS02`; current cc65 master).
+  `ca65` and `ld65` must be on `PATH`.
+- For the MEGA65 tests and scripts: [Xemu](https://github.com/lgblgblgb/xemu)'s
+  `xmega65`, found through `$MENSCH_XMEGA65`,
+  `~/src/xemu/build/bin/xmega65.native` or `PATH`. Without it, the MEGA65
+  tests still compile and link everything and then skip the run.
+  - Booting a ROM with Xemu's virtual SD card (`-virtsd`) needs a local
+    patch to Xemu's `sdcontent.c`, or Xemu stops in the ONBOARD setup
+    utility.
+  - The tests that type at Hellord's shell need an Xemu with the `-typein`
+    option (also a local patch); they skip without it.
 
-## Implemented o65 Support
+## Tools
 
-The loader currently supports:
+| Binary | Use |
+|---|---|
+| `menschc` | Compile Mensch to ca65 assembly: `menschc --target mega65 -I lib game.mensch -o game.s` (`--target 65816` is the default) |
+| `mensch-run-mega65` | Build MEGA65 modules into a 128 KiB ROM image and boot it headless in Xemu; `--rom FILE --no-run` just writes the ROM, `--window N:module` places a module in a window bank |
+| `mensch-mega65-program` | Build a program that Hellord's `RUN` loads from the SD card |
+| `mensch-run-x65` | Build and run Mensch modules on the X65-like 65816 machine |
 
-- Native 65816 executable files.
-- Plain 6502 executable files, entered in 65816 emulation mode.
-- `CPU2_65816_EMU` executable files, entered in 65816 emulation mode.
-- Simple addressing mode.
-- 16-bit and 32-bit o65 size fields.
-- Header option scanning, with structural validation of option lengths.
-- Undefined/external reference list scanning and late-bound symbol table
-  resolution.
-- Chained executable loading.
-- Text and data relocation tables.
-- Relocation target bounds checking against the text/data segment currently
-  being relocated.
-- Optional image-end bounds checking for stream reads from header/list/table
-  data.
-- Pagewise relocation mode for `HIGH` relocation entries.
-- Exported global list scanning for `main` / `_main`.
-- Exported global publishing into the caller-supplied symbol table.
-- BSS clearing when the `BSSZERO` mode bit is set.
-- Alignment checking for 2-byte, 4-byte, and 256-byte alignment requests.
-- Relocation types:
-  - `WORD`
-  - `HIGH`
-  - `LOW`
-  - `SEGADDR`
-  - `SEG`
-- Segment relocation targets:
-  - text
-  - data
-  - bss
-  - zero/direct
-
-(Unsupported inputs are rejected instead of being silently misloaded).
-
-## Status Codes
-
-The loader returns status in `A` and stores it in zero page `status`.
-
-- `0x00`: success
-- `0x01`: bad o65 header magic
-- `0x02`: unknown relocation segment
-- `0x03`: unknown relocation type
-- `0x04`: object file, not executable
-- `0x05`: non-simple addressing mode
-- `0x07`: requested alignment is not satisfied by the in-place segment start
-- `0x08`: unsupported CPU mode
-- `0x09`: malformed header option
-- `0x0a`: relocation target is outside the text/data segment being relocated
-- `0x0c`: relocation references an unresolved external symbol
-- `0x0d`: malformed relocation table
-- `0x0e`: truncated image
-
-## Build
-
-The implementation uses ca65/ld65 from cc65:
+## Running things
 
 ```sh
-make -C loader/asm
+# Hellord on the MEGA65 (headless; prints the final screen)
+scripts/boot-hellord-mega65.sh --type-in 'VER\nDIR\nREBOOT\n'
+
+# Hellord on the X65-like 65816 machine (interactive in a terminal)
+scripts/boot-hellord-os.sh
+
+# The VIC-IV demo in an Xemu window (move the hero with joystick 2)
+scripts/run-vic4-demo.sh
+
+# A program for Hellord, then run it with `S:` and `HELLO`
+cargo run --bin mensch-mega65-program -- -o HELLO.PRG examples/programs/hello.mensch
 ```
 
-Generated assembler/linker outputs are ignored by git.
+Hellord's shell commands are `HELP`, `VER`, `DIR`, `STAT`, `PWD`, `CD`,
+`MAP`, `MEM`, `CLS`, `TYPE`, `RUN`, `PEEK`, `POKE`, `DUMP`, `FILL`,
+`BLKINFO`, `SET`, `PROMPT`, `PATH`, `ECHO` and `REBOOT`; a drive letter
+(`S:`) switches drives and a program's name runs it.
 
 ## Tests
-
-The test suite assembles the loader, loads it into a 24-bit memory model, runs
-it under the `wdc65816` Rust emulator crate, and asserts on relocated memory,
-loader status, and selected entry points.
-
-It requires `make`, `ca65`, and `ld65` on `PATH`.
 
 ```sh
 cargo test
 ```
 
-Coverage includes:
+The suite covers the compiler's units (parsing, type checks, storage
+assignment, both optimizers), generated 65816 code run on the `wdc65816`
+emulator and the X65-like machine, the o65 loader, and MEGA65 ROMs booted
+headless in Xemu: language features end to end, interrupts, window banks,
+Hellord booting, reading and writing FAT volumes on a virtual SD card,
+loading programs, and the VIC-IV library. `cargo clippy --all-targets` and
+`cargo fmt` are kept clean.
 
-- bad header rejection
-- object-file rejection
-- chained-file loading
-- non-simple addressing rejection
-- unsupported CPU2 rejection
-- native 65816, 6502, and 65816-emulation-mode entry/return
-- malformed header option rejection
-- pagewise `HIGH` relocation
-- alignment acceptance/rejection
-- 16-bit and 32-bit size fields
-- header options and external references
-- external relocation resolution and unresolved external rejection
-- malformed external relocation index rejection
-- malformed exported-global segment rejection
-- truncated image rejection when an image-end pointer is supplied
-- `WORD`, `HIGH`, `LOW`, and `SEGADDR` relocation behavior
-- data relocation table targeting
-- BSS clearing behavior with and without `BSSZERO`
-- exported `main` / `_main` entry-point selection and general export publishing
+## Status and direction
 
-The tests also keep a loader-size guard. As of this README, the assembled
-loader is `2703` bytes.
-
-## Remaining gaps / TODO
-
-This is still a not a complete o65 runtime loader. Known gaps include:
-
-- 65C02, 65SC02, 65CE02, and 6502X CPU2 modes are rejected rather than
-  emulated.
-- Header option payloads are not interpreted.
-
-## Notes
-
-The authoritative o65 details are in Andre Fachat's format document. cc65 also
-ships useful constants for the mode bits in `o65.inc`, and the tests mirror the
-mode values used by that toolchain.
+- The MEGA65 is the main target; the 65816 backend is kept working.
+- Next: an asset converter (indexed PNG to tiles, sprites, palettes and
+  maps), then a game engine on the VIC-IV library (tile collision, player
+  physics, the raster rewrite buffer for many moving objects).
+- Further out: a GEM-like GUI for Hellord.
+- Known language gaps: types cannot refer to each other before both are
+  declared, exported routines cannot take register arguments, and the 65816
+  backend has no 32-bit integers.

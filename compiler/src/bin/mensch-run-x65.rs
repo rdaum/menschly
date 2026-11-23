@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use clap::{Parser, ValueEnum};
-use mensch_systems_tests::x65_runner::{
+use menschly::x65_runner::{
     build_mensch_x65_image_sources, build_mensch_xex_sources, run_image, BlockDeviceConfig,
     RunConfig, X65ImageBlock,
 };

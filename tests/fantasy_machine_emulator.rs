@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::Command;
 
-use mensch_systems_tests::{ca65, frontend, lower_65816, storage, x65_runner};
+use menschly::{ca65, frontend, lower_65816, storage, x65_runner};
 use wdc65816::{HasAddressBus, Processor, StatusRegister};
 use x65alike_emul::{
     image::CpuStart, Machine, RAMBLOCK_REG, ROMBLOCK_REG, USB_UART_CTRL,
