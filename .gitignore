@@ -1,4 +1,8 @@
 target/
+/examples/bubs/
+/examples/bubs.zip
+/examples/bublbobl*.zip
+/examples/bubble-bobble-sprite-sheet.png
 loader/asm/*.bin
 loader/asm/*.lbl
 loader/asm/*.lst
