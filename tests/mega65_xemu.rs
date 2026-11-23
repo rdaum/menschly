@@ -1009,8 +1009,20 @@ fn hellord_lists_and_types_files_on_the_sd_card() {
     )
     .unwrap();
     assert!(!run.timed_out, "REBOOT should end the run");
-    let expected = "S> DIR\nDirectory of S:/\nHELLO.TXT    $0026\nBIG.DAT      $2710\n02 file(s)  00 dir(s)\nS> TYPE hello.txt\nHello from the SD card!\nSecond line.\nS> TYPE NOPE.TXT\nFile not found\n";
-    assert!(run.screen.contains(expected), "screen:\n{}", run.screen);
+    // Xemu builds the card from a host directory, so the entries come in
+    // whatever order the host's file system lists them.
+    let entries = ["HELLO.TXT    $0026\n", "BIG.DAT      $2710\n"];
+    let expected = |first: &str, second: &str| {
+        format!(
+            "S> DIR\nDirectory of S:/\n{first}{second}02 file(s)  00 dir(s)\nS> TYPE hello.txt\nHello from the SD card!\nSecond line.\nS> TYPE NOPE.TXT\nFile not found\n"
+        )
+    };
+    assert!(
+        run.screen.contains(&expected(entries[0], entries[1]))
+            || run.screen.contains(&expected(entries[1], entries[0])),
+        "screen:\n{}",
+        run.screen
+    );
 }
 
 /// A loadable program that exercises every relocation kind the loader
