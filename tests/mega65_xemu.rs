@@ -2416,21 +2416,25 @@ fn self_referential_records_field_calls_and_element_addresses() {
 }
 
 fn vic4_rom(name: &str, caller: &str) -> (PathBuf, Vec<u8>) {
-    let library =
-        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/vic4.mensch"))
-            .expect("vic4 library should be readable");
-    let sources = [
-        mega65::KernelModule {
-            name: "0-caller".to_owned(),
-            source: caller.to_owned(),
+    library_rom(name, caller, &["vic4"])
+}
+
+/// Builds `caller` with the named modules of `lib/` into a ROM.
+fn library_rom(name: &str, caller: &str, libraries: &[&str]) -> (PathBuf, Vec<u8>) {
+    let lib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib");
+    let mut sources = vec![mega65::KernelModule {
+        name: "0-caller".to_owned(),
+        source: caller.to_owned(),
+        window: None,
+    }];
+    for (index, library) in libraries.iter().enumerate() {
+        sources.push(mega65::KernelModule {
+            name: format!("{}-{library}", index + 1),
+            source: std::fs::read_to_string(lib.join(format!("{library}.mensch")))
+                .expect("library should be readable"),
             window: None,
-        },
-        mega65::KernelModule {
-            name: "1-vic4".to_owned(),
-            source: library,
-            window: None,
-        },
-    ];
+        });
+    }
     let modules = mega65::compile_kernel_modules(&sources).expect("program should compile");
     let refs = modules
         .iter()
@@ -2684,4 +2688,96 @@ fn vic4_demo_draws_its_room_and_sets_up_its_sprite() {
     assert_eq!(&memory[0x45000..0x45004], &[0x80, 0x11, 0x82, 0x11]);
     assert_eq!(&memory[0x46000..0x46008], &[0, 0, 0, 0x11, 0x11, 0, 0, 0]);
     assert_eq!(&memory[0x46080..0x46088], &[0, 0, 0, 0x01, 0x10, 0, 0, 0]);
+}
+
+#[test]
+fn actors_draw_hardware_sprites_and_raster_rewrite_characters() {
+    let (dir, rom) = library_rom(
+        "actors",
+        "
+        module ActorsTest
+        import Vic4
+        import Actors
+        fixed($0e00) volatile var out: [8]u8
+        fixed($d000) volatile var sprite_xy: [2]u8
+        fixed($d015) volatile var sprite_enable: u8
+        fixed($d100) volatile var red: [256]u8
+
+        # One image, rows of 8 bytes, left pixel in the high nibble; one
+        # palette; cell 0 is the image, cell 1 the image mirrored.
+        var images: [128]u8
+        var palettes: [48]u8
+        const CELLS: [4]u16 = [0, 0, $8000, 0]
+
+        export function main(): u8
+            var a: u8
+            var b: u8
+            var h: u8
+            var c: u8
+            images[0] = $12
+            images[7] = $34
+            palettes[3] = $56
+            vic4_init()
+            actors_sheet(u32(addr(images)), u32(addr(palettes)), u32(addr(CELLS)))
+            actors_software($50000, 4, 6, 2, $46000, 4)
+            actors_hardware($45000, $47000, 1, 24, 46)
+            a = actor_new(ACTOR_SOFTWARE)
+            b = actor_new(ACTOR_SOFTWARE)
+            h = actor_new(ACTOR_HARDWARE)
+            c = actor_new(ACTOR_SOFTWARE)
+            actor_draw(a, 100, 13, 0, 0)
+            actor_draw(b, 40, 16, 1, 0)
+            actor_draw(c, 200, 40, 0, 1)
+            actor_draw(h, 10, 20, 0, 1)
+            actors_frame()
+            dma_copy(COLOUR_RAM, $0f00, 6 * 18)
+            out[0] = sprite_xy[0]
+            out[1] = sprite_xy[1]
+            out[2] = sprite_enable
+            vic4_palette_edit(0)
+            out[3] = red[17]
+            out[4] = h
+            return a + b + c
+        end
+        ",
+        &["vic4", "actors"],
+    );
+    let Some(xemu) = mega65::find_xemu() else {
+        eprintln!("skipping actors: Xemu not found (set MENSCH_XMEGA65)");
+        return;
+    };
+    let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
+    assert_eq!(run.exit_code, 4);
+    let memory = &run.memory;
+    // Rows are 4 background characters, 2 slots of 2 and a closing token:
+    // 18 bytes. Slot s of row r is at r * 18 + 8 + s * 4.
+    let screen = |at: usize| &memory[0x50000 + at..0x50000 + at + 4];
+    let colour = |at: usize| &memory[0x0f00 + at..0x0f00 + at + 4];
+    // a: x 100, y 13 = row 1 line 5; characters $1180-$1181 ($46000 / 64),
+    // palette group 1. Row 1 shifts the top character down 5 and shows
+    // lines 5-7, row 2 shifts it up 3, row 3 shows the bottom one's lines 0-4.
+    assert_eq!(screen(26), &[100, 0xb0, 0x80, 0x11]);
+    assert_eq!(colour(26), &[0x98, 0xe0, 0x08, 0x1f]);
+    assert_eq!(screen(44), &[100, 0x60, 0x80, 0x11]);
+    assert_eq!(colour(44), &[0x98, 0xff, 0x08, 0x1f]);
+    assert_eq!(screen(62), &[100, 0x60, 0x81, 0x11]);
+    assert_eq!(colour(62), &[0x98, 0x1f, 0x08, 0x1f]);
+    // b: x 40, y 16 = row 2 line 0, slot 1 in rows 2 and 3; its cell is the
+    // stored image mirrored, so the characters flip. Same palette, same group.
+    assert_eq!(screen(48), &[40, 0x00, 0x82, 0x11]);
+    assert_eq!(colour(48), &[0x98, 0xff, 0x48, 0x1f]);
+    assert_eq!(screen(66), &[40, 0x00, 0x83, 0x11]);
+    // c: cell 0 mirrored, at row 5: a's characters, flipped.
+    assert_eq!(screen(98), &[200, 0x00, 0x80, 0x11]);
+    assert_eq!(colour(98), &[0x98, 0xff, 0x48, 0x1f]);
+    // Unused slots and the closing tokens point past x 320.
+    assert_eq!(&screen(30)[..2], &[0x40, 0x01]);
+    assert_eq!(&screen(34)[..2], &[0x40, 0x01]);
+    assert_eq!(&colour(34)[..2], &[0x98, 0xff]);
+    // The pool holds each cell's image once, each byte's pixels swapped.
+    assert_eq!(&memory[0x46000..0x46008], &[0x21, 0, 0, 0, 0, 0, 0, 0x43]);
+    // The hardware actor's buffer holds the image mirrored, and sprite 0
+    // sits at (10 + 24, 20 + 46), on.
+    assert_eq!(&memory[0x47000..0x47008], &[0x43, 0, 0, 0, 0, 0, 0, 0x21]);
+    assert_eq!(&memory[0x0e00..0x0e05], &[34, 66, 0x01, 0x65, 2]);
 }

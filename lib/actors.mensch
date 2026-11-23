@@ -1,0 +1,595 @@
+module Actors
+import Vic4
+
+# Actors: 16x16 animated objects drawn either by the VIC-IV's eight hardware
+# sprites or in software, on the character layer, by its raster rewrite
+# buffer (RRB). A game declares each actor's kind once and then draws every
+# actor the same way:
+#
+#     hero = actor_new(ACTOR_HARDWARE)
+#     bubble = actor_new(ACTOR_SOFTWARE)
+#     ...every frame:
+#     actor_draw(hero, x, y, cell, mirrored)
+#     actor_draw(bubble, x, y, cell, 0)
+#     actors_frame()
+#
+# Coordinates are pixels from the top left of the text area. Images come
+# from a sprite sheet (convert.py's format): 128-byte 16-colour images with
+# the left pixel in the high nibble, 48-byte palettes of 16 RGB triples with
+# entry 0 transparent, and a 4-byte record per cell holding its image number
+# (bit 15 set when the cell is that image mirrored) and palette number. The
+# sheet can be anywhere DMA reaches.
+#
+# Hardware actors each own one of the eight sprites, which shows a 128-byte
+# buffer in chip RAM; drawing a new cell copies its image there, mirroring it
+# with the CPU if asked.
+#
+# Software actors are 16-colour characters placed by GOTOX tokens. Every text
+# row ends with `slots` overlay slots after the background's `columns`
+# characters: a GOTOX token that moves the drawing position to the actor's x
+# and shifts the character rows to its y, then the character. An actor
+# covers two or three text rows, one slot in each; a row with more actors
+# than slots drops the extra ones. Software actors showing the same cell share
+# its characters: a pool of 128-byte entries in chip RAM (two characters, top
+# and bottom) holds each cell in use once, with the nibbles swapped, as
+# 16-colour characters keep the left pixel in the low nibble. The hardware
+# flips them for mirrored actors. A cell's palette goes in one of the 15
+# 16-colour groups of character palette bank 0 above the background's group
+# 0, shared the same way.
+
+export const ACTOR_HARDWARE = 1
+export const ACTOR_SOFTWARE = 2
+export const NO_ACTOR = $ff
+
+const MAX_ACTORS = 32
+const HARDWARE_SPRITES = 8
+const MAX_ROWS = 32
+const MAX_ENTRIES = 64
+const NO_ENTRY = $ff
+const GROUPS = 16
+const IMAGE_BYTES = 128
+const PALETTE_BYTES = 48
+const MIRRORED = $8000
+const NOTHING = $ffff
+
+# The x of a slot that draws nothing: the right edge of a 320-pixel row.
+const OFFSCREEN = 320
+
+# Colour RAM attributes of a GOTOX token: GOTOX, leave the background where
+# a pixel is 0, and mask lines with the colour byte. Of a character:
+# 16 colours, plus horizontal flip.
+const TOKEN_ATTRIBUTES = $98
+const CHARACTER_ATTRIBUTES = $08
+const FLIP = $40
+
+# A GOTOX token's high screen byte: x bits 8-9, then a downward shift
+# (bit 4, NEGATIVE) or an upward one by bits 5-7.
+const NEGATIVE = $10
+
+# Row masks, bit n for line n of a text row: lines `d` and below, and the
+# lines above `d`.
+const FROM_LINE: [8]u8 = [$ff, $fe, $fc, $f8, $f0, $e0, $c0, $80]
+const ABOVE_LINE: [8]u8 = [$00, $01, $03, $07, $0f, $1f, $3f, $7f]
+
+type Actor = record(
+    kind: u8,
+    visible: u8,
+    mirrored: u8,
+    sprite: u8,
+    group: u8,
+    entry: u8,
+    x: u16,
+    y: u16,
+    cell: u16,
+    loaded: u16,
+    loaded_mirrored: u8,
+    palette: u16
+)
+
+var actors: parallel [MAX_ACTORS]Actor
+var actor_count: u8
+var sprites_used: u8
+var sprites_shown: u8
+
+var sheet_images: u32
+var sheet_palettes: u32
+var sheet_cells: u32
+
+var sprite_buffers: u32
+var sprite_x0: u16
+var sprite_y0: u16
+
+var overlay_screen: u32
+var overlay_row_bytes: u16
+var overlay_first: u16
+var overlay_rows: u8
+var overlay_slots: u8
+# The character pool: entry n's characters are at pool + n * 128.
+var pool: u32
+var pool_entries: u8
+var entry_cell: [MAX_ENTRIES]u16
+var entry_users: [MAX_ENTRIES]u8
+var entry_mirrored: [MAX_ENTRIES]u8
+var entry_palette: [MAX_ENTRIES]u16
+var slots_used: [MAX_ROWS]u8
+# Where each row's first slot is, in the screen and in colour RAM.
+var row_slots: [MAX_ROWS]u16
+var group_palette: [GROUPS]u16
+var group_users: [GROUPS]u8
+
+# Set by look_up: a cell's image (with MIRRORED) and palette.
+var found_image: u16
+var found_palette: u16
+
+# The software actor being placed: its x, first character and attributes.
+var placing_x: u16
+var placing_character: u16
+var placing_attributes: u8
+var placing_colour: u8
+
+# Bank-0 staging: DMA brings images and palettes here for the CPU and the
+# palette loader.
+var pixels: [IMAGE_BYTES]u8
+var mirrored_pixels: [IMAGE_BYTES]u8
+var palette_buffer: [PALETTE_BYTES]u8
+
+# ---------------------------------------------------------------- setup
+
+# The sprite sheet: its images, palettes and 4-byte cell records.
+export procedure actors_sheet(images: u32, palettes: u32, cells: u32)
+    sheet_images = images
+    sheet_palettes = palettes
+    sheet_cells = cells
+    return
+end
+
+# The hardware sprites: pointer table at `table` (16 bytes, 16-byte aligned),
+# sprite n showing the 128 bytes at `buffers + n * 128` (64-byte aligned, in
+# chip RAM), colours from sprite palette `bank`, and text-area pixel (0, 0)
+# at sprite coordinates (x0, y0).
+export procedure actors_hardware(table: u32, buffers: u32, bank: u8, x0: u16, y0: u16)
+    var sprite: u8
+    sprite_buffers = buffers
+    sprite_x0 = x0
+    sprite_y0 = y0
+    vic4_sprite_table(table)
+    vic4_sprite_palette(bank)
+    vic4_sprites_16_colour($ff)
+    vic4_sprite_height(16, $ff)
+    for sprite = 0 to HARDWARE_SPRITES - 1
+        vic4_sprite_image(sprite, buffers + (u32(sprite) << 7))
+    end
+    sprites_shown = 0
+    vic4_sprites_on(0)
+    return
+end
+
+# The text screen at `screen`, with `columns` background characters and
+# `slots` software-actor slots per row, `rows` rows shown, and a pool of
+# `entries` (up to 64) cells' characters at `characters` (128 bytes each,
+# 64-byte aligned, in chip RAM below $80000): as many distinct cells as
+# software actors may show at once. Clears the screen: draw the background
+# after this.
+export procedure actors_software(screen: u32, columns: u8, rows: u8, slots: u8, characters: u32, entries: u8)
+    var row_chars: u16
+    var row: u8
+    var slot: u8
+    var group: u8
+    var entry: u8
+    row_chars = u16(columns) + (u16(slots) << 1) + 1
+    vic4_text16(screen, row_chars, 0)
+    vic4_text_rows(rows)
+    vic4_fill_screen(0, row_chars * u16(rows))
+    vic4_fill_colour(0, 0, 0, row_chars * u16(rows))
+    overlay_screen = screen
+    overlay_row_bytes = row_chars << 1
+    overlay_first = u16(columns) << 1
+    overlay_rows = rows
+    overlay_slots = slots
+    pool = characters
+    pool_entries = entries
+    for entry = 0 to entries - 1
+        entry_cell[entry] = NOTHING
+        entry_users[entry] = 0
+    end
+    for row = 0 to rows - 1
+        row_slots[row] = u16(row) * overlay_row_bytes + overlay_first
+        slots_used[row] = 0
+        # Every slot, and the closing token after them, starts off screen.
+        for slot = 0 to slots
+            put_token(row, slot, OFFSCREEN, 0, $ff)
+        end
+    end
+    for group = 0 to GROUPS - 1
+        group_palette[group] = NOTHING
+        group_users[group] = 0
+    end
+    return
+end
+
+# ---------------------------------------------------------------- actors
+
+# A new actor of `kind` (ACTOR_HARDWARE or ACTOR_SOFTWARE), hidden, or
+# NO_ACTOR when there are no actors or no hardware sprites left.
+export function actor_new(kind: u8): u8
+    var actor: u8
+    if actor_count == MAX_ACTORS
+        return NO_ACTOR
+    end
+    actor = actor_count
+    if kind == ACTOR_HARDWARE
+        if sprites_used == HARDWARE_SPRITES
+            return NO_ACTOR
+        end
+        actors[actor].sprite = sprites_used
+        sprites_used = sprites_used + 1
+    end
+    actors[actor].kind = kind
+    actors[actor].visible = 0
+    actors[actor].loaded = NOTHING
+    actors[actor].palette = NOTHING
+    actors[actor].group = 0
+    actors[actor].entry = NO_ENTRY
+    actor_count = actor_count + 1
+    return actor
+end
+
+# Shows `actor` at (x, y) with `cell`, mirrored left to right if `mirrored`.
+# A hardware actor changes at once; a software one at the next actors_frame.
+export procedure actor_draw(actor: u8, x: u16, y: u16, cell: u16, mirrored: u8)
+    if mirrored
+        mirrored = 1
+    end
+    actors[actor].x = x
+    actors[actor].y = y
+    actors[actor].cell = cell
+    actors[actor].mirrored = mirrored
+    actors[actor].visible = 1
+    if actors[actor].kind == ACTOR_HARDWARE
+        show_sprite(actor)
+    end
+    return
+end
+
+export procedure actor_hide(actor: u8)
+    actors[actor].visible = 0
+    if actors[actor].kind == ACTOR_HARDWARE
+        sprites_shown = sprites_shown & (sprite_bit(actors[actor].sprite) xor $ff)
+        vic4_sprites_on(sprites_shown)
+    end
+    return
+end
+
+# Rebuilds the software actors' slots. Call once per frame, ideally while the
+# raster is below the text area.
+export procedure actors_frame()
+    var row: u8
+    var slot: u8
+    var actor: u8
+    if overlay_rows == 0
+        return
+    end
+    for row = 0 to overlay_rows - 1
+        slot = 0
+        while slot != slots_used[row]
+            hide_token(row, slot)
+            slot = slot + 1
+        end
+        slots_used[row] = 0
+    end
+    actor = 0
+    while actor != actor_count
+        if actors[actor].kind == ACTOR_SOFTWARE and actors[actor].visible
+            place(actor)
+        end
+        actor = actor + 1
+    end
+    return
+end
+
+# ---------------------------------------------------------------- the sheet
+
+const BITS: [8]u8 = [$01, $02, $04, $08, $10, $20, $40, $80]
+
+function sprite_bit(sprite: u8): u8
+    return BITS[sprite & 7]
+end
+
+procedure look_up(cell: u16)
+    var record: far ^u16
+    record = sheet_cells + (u32(cell) << 2)
+    found_image = record[0]
+    found_palette = record[1]
+    return
+end
+
+# The address of image `image` (without MIRRORED) in the sheet.
+function image_address(image: u16): u32
+    return sheet_images + (u32(image & (MIRRORED xor $ffff)) << 7)
+end
+
+# palette_buffer = palette `palette` of the sheet.
+procedure fetch_palette(palette: u16)
+    # 48 bytes per palette is (palette << 5) + (palette << 4).
+    dma_copy(sheet_palettes + (u32(palette) << 5) + (u32(palette) << 4),
+             u32(addr(palette_buffer)), PALETTE_BYTES)
+    return
+end
+
+# ---------------------------------------------------------------- hardware
+
+procedure show_sprite(actor: u8)
+    var sprite: u8
+    var flip: u8
+    var buffer: u32
+    sprite = actors[actor].sprite
+    if actors[actor].loaded != actors[actor].cell or actors[actor].loaded_mirrored != actors[actor].mirrored
+        actors[actor].loaded = actors[actor].cell
+        actors[actor].loaded_mirrored = actors[actor].mirrored
+        look_up(actors[actor].cell)
+        flip = actors[actor].mirrored
+        if found_image & MIRRORED
+            flip = flip xor 1
+        end
+        buffer = sprite_buffers + (u32(sprite) << 7)
+        if flip
+            dma_copy(image_address(found_image), u32(addr(pixels)), IMAGE_BYTES)
+            mirror_pixels()
+            dma_copy(u32(addr(mirrored_pixels)), buffer, IMAGE_BYTES)
+        else
+            dma_copy(image_address(found_image), buffer, IMAGE_BYTES)
+        end
+        if actors[actor].palette != found_palette
+            actors[actor].palette = found_palette
+            fetch_palette(found_palette)
+            vic4_sprite_colours(sprite, addr(palette_buffer))
+            vic4_sprite_colour(sprite, 0)
+        end
+    end
+    vic4_sprite_place(sprite, actors[actor].x + sprite_x0, u8(actors[actor].y + sprite_y0))
+    sprites_shown = sprites_shown | sprite_bit(sprite)
+    vic4_sprites_on(sprites_shown)
+    return
+end
+
+# mirrored_pixels = pixels with each 16-pixel row reversed: the row's bytes
+# in reverse order, each with its two pixels swapped.
+procedure mirror_pixels()
+    var row: u8
+    var i: u8
+    var byte: u8
+    row = 0
+    repeat
+        for i = 0 to 7
+            byte = pixels[row + i]
+            mirrored_pixels[row + 7 - i] = byte << 4 | byte >> 4
+        end
+        row = row + 8
+    until row == IMAGE_BYTES
+    return
+end
+
+# ---------------------------------------------------------------- software
+
+# Gives a software actor the pool entry holding its cell, and that cell's
+# palette group, when its cell changed.
+procedure load_character(actor: u8)
+    var entry: u8
+    if actors[actor].loaded == actors[actor].cell
+        return
+    end
+    release_entry(actors[actor].entry)
+    entry = take_entry(actors[actor].cell)
+    actors[actor].entry = entry
+    if entry == NO_ENTRY
+        # Every entry is in use: try again next frame.
+        actors[actor].loaded = NOTHING
+        return
+    end
+    actors[actor].loaded = actors[actor].cell
+    if actors[actor].palette != entry_palette[entry]
+        release_group(actors[actor].group)
+        actors[actor].group = take_group(entry_palette[entry])
+        actors[actor].palette = entry_palette[entry]
+    end
+    return
+end
+
+# The pool entry holding `cell`'s characters: one that already does, else
+# an empty one, else one no actor uses, loaded with it. NO_ENTRY when every
+# entry is in use.
+function take_entry(cell: u16): u8
+    var entry: u8
+    entry = 0
+    while entry != pool_entries
+        if entry_cell[entry] == cell
+            entry_users[entry] = entry_users[entry] + 1
+            return entry
+        end
+        entry = entry + 1
+    end
+    entry = 0
+    while entry != pool_entries
+        if entry_cell[entry] == NOTHING
+            load_entry(entry, cell)
+            return entry
+        end
+        entry = entry + 1
+    end
+    entry = 0
+    while entry != pool_entries
+        if entry_users[entry] == 0
+            load_entry(entry, cell)
+            return entry
+        end
+        entry = entry + 1
+    end
+    return NO_ENTRY
+end
+
+# Loads `cell` into pool entry `entry`, its first user.
+procedure load_entry(entry: u8, cell: u16)
+    var i: u8
+    var byte: u8
+    look_up(cell)
+    entry_cell[entry] = cell
+    entry_users[entry] = 1
+    entry_palette[entry] = found_palette
+    entry_mirrored[entry] = 0
+    if found_image & MIRRORED
+        entry_mirrored[entry] = 1
+    end
+    dma_copy(image_address(found_image), u32(addr(pixels)), IMAGE_BYTES)
+    i = 0
+    repeat
+        byte = pixels[i]
+        pixels[i] = byte << 4 | byte >> 4
+        i = i + 1
+    until i == IMAGE_BYTES
+    dma_copy(u32(addr(pixels)), pool + (u32(entry) << 7), IMAGE_BYTES)
+    return
+end
+
+procedure release_entry(entry: u8)
+    if entry != NO_ENTRY and entry_users[entry] != 0
+        entry_users[entry] = entry_users[entry] - 1
+    end
+    return
+end
+
+# A palette group holding `palette`: one that already does, or a free one
+# loaded with it. With every group in use, group 1 (wrong colours).
+function take_group(palette: u16): u8
+    var group: u8
+    for group = 1 to GROUPS - 1
+        if group_palette[group] == palette
+            group_users[group] = group_users[group] + 1
+            return group
+        end
+    end
+    for group = 1 to GROUPS - 1
+        if group_users[group] == 0
+            group_palette[group] = palette
+            group_users[group] = 1
+            fetch_palette(palette)
+            vic4_palette_edit(0)
+            vic4_palette_load(group << 4, 16, addr(palette_buffer))
+            return group
+        end
+    end
+    group_users[1] = group_users[1] + 1
+    return 1
+end
+
+procedure release_group(group: u8)
+    if group != 0 and group_users[group] != 0
+        group_users[group] = group_users[group] - 1
+    end
+    return
+end
+
+# Puts a software actor in the slots of the two or three rows it covers.
+procedure place(actor: u8)
+    var y: u16
+    var row: u8
+    var line: u8
+    var lift: u8
+    var entry: u8
+    load_character(actor)
+    entry = actors[actor].entry
+    if entry == NO_ENTRY or actors[actor].x >= OFFSCREEN
+        return
+    end
+    placing_x = actors[actor].x
+    placing_character = u16((pool + (u32(entry) << 7)) >> 6)
+    placing_attributes = CHARACTER_ATTRIBUTES
+    if actors[actor].mirrored xor entry_mirrored[entry]
+        placing_attributes = CHARACTER_ATTRIBUTES | FLIP
+    end
+    placing_colour = actors[actor].group << 4 | $0f
+    y = actors[actor].y
+    row = u8(y >> 3)
+    line = u8(y) & 7
+    if line == 0
+        use_slot(row, 0, $ff, 0)
+        use_slot(row + 1, 0, $ff, 1)
+        return
+    end
+    # The top row shows the top character shifted down by `line`; the next
+    # shows it shifted up by 8 - line, running on into the bottom character;
+    # the last shows the bottom character the same way, down to `line`.
+    lift = (8 - line) << 5
+    use_slot(row, NEGATIVE | line << 5, FROM_LINE[line], 0)
+    use_slot(row + 1, lift, $ff, 0)
+    use_slot(row + 2, lift, ABOVE_LINE[line], 1)
+    return
+end
+
+# Fills the next free slot of `row` with the placing actor's character
+# (`half` 0 for the top one, 1 for the bottom), shifted by `shift` (a
+# token's high-byte shift bits) and drawing the lines in `mask`.
+procedure use_slot(row: u8, shift: u8, mask: u8, half: u8)
+    var slot: u8
+    var cell: far ^u8
+    var colour: far ^u8
+    var character: u16
+    var offset: u16
+    if row >= overlay_rows
+        return
+    end
+    slot = slots_used[row]
+    if slot == overlay_slots
+        return
+    end
+    slots_used[row] = slot + 1
+    character = placing_character + u16(half)
+    offset = slot_offset(row, slot)
+    cell = overlay_screen + u32(offset)
+    cell[0] = u8(placing_x)
+    cell[1] = (u8(placing_x >> 8) & $03) | shift
+    cell[2] = u8(character)
+    cell[3] = u8(character >> 8)
+    colour = COLOUR_RAM + u32(offset)
+    colour[0] = TOKEN_ATTRIBUTES
+    colour[1] = mask
+    colour[2] = placing_attributes
+    colour[3] = placing_colour
+    return
+end
+
+# The byte offset of slot `slot` of `row` in the screen and in colour RAM.
+function slot_offset(row: u8, slot: u8): u16
+    return row_slots[row] + (u16(slot) << 2)
+end
+
+# Writes slot `slot` of `row` as a token to `x` with shift and mask, then
+# character 0.
+procedure put_token(row: u8, slot: u8, x: u16, shift: u8, mask: u8)
+    var cell: far ^u8
+    var colour: far ^u8
+    var offset: u16
+    offset = slot_offset(row, slot)
+    cell = overlay_screen + u32(offset)
+    cell[0] = u8(x)
+    cell[1] = (u8(x >> 8) & $03) | shift
+    colour = COLOUR_RAM + u32(offset)
+    colour[0] = TOKEN_ATTRIBUTES
+    colour[1] = mask
+    # The closing token has no character after it.
+    if slot != overlay_slots
+        cell[2] = 0
+        cell[3] = 0
+        colour[2] = 0
+        colour[3] = 0
+    end
+    return
+end
+
+# Moves slot `slot` of `row` off screen.
+procedure hide_token(row: u8, slot: u8)
+    var cell: far ^u8
+    cell = overlay_screen + u32(slot_offset(row, slot))
+    cell[0] = u8(OFFSCREEN)
+    cell[1] = u8(OFFSCREEN >> 8)
+    return
+end
