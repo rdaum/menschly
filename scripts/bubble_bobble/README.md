@@ -59,6 +59,28 @@ The map includes wall quadrants and neighbour-dependent shadows. The arcade
 layout is documented in [Patch-A-Bobble's terrain code](https://github.com/kstenerud/patch-a-bobble/blob/master/src/Gfxset.cpp)
 and [room decoder](https://github.com/kstenerud/patch-a-bobble/blob/master/src/Lvlset.cpp).
 
+## Animation demo
+
+`run-demo.sh` builds and boots a demo of six characters cycling their
+animations in Xemu:
+
+```sh
+scripts/bubble_bobble/run-demo.sh             # build and run
+scripts/bubble_bobble/run-demo.sh --no-run    # build the ROM only
+```
+
+The 249 KB asset pack does not fit the kernel's 24 KB image segment, so
+`demo_assets.py` extracts the 36 cells the demo's six cycles use and writes
+them as module `BubbleDemoData` (`target/bubble-bobble/bubble-demo-data.mensch`):
+exported image and palette tables and the frame names, renumbered as demo
+cells. At startup the demo copies the images by DMA to `$46000` and puts the
+sprite pointer table at `$45000`, because the VIC-IV reads the table from a
+16-byte boundary and each image from a 64-byte one.
+
+`bubble-anim.mensch` is the animation library: `anim_init`, `anim_show` (which
+skips work when a slot already shows that frame), `anim_place`, and `anim_run`,
+which steps every cycle in parallel one frame per `hold` screen frames.
+
 ## Calling from Mensch
 
 Compile [bubble-video.mensch](bubble-video.mensch), the generated

@@ -1,0 +1,58 @@
+module BubbleDemo
+
+# Animation demo: six Bubble Bobble characters, each cycling through its own
+# animation, on the MEGA65.
+#
+# Run it with scripts/bubble_bobble/run-demo.sh, which regenerates the assets
+# and boots the result in Xemu.
+#
+# The full sprite pack is 249 KB, far more than the kernel's 24 KB image
+# segment, so `demo_assets.py` generates module `BubbleDemoData` with just the
+# 36 cells these six cycles use (4.6 KB of images, 1.7 KB of palettes).
+
+import Vic4
+import BubbleAnim
+import BubbleDemoData
+
+# The VIC-IV reads the sprite pointer table from a 16-byte boundary and each
+# image from a 64-byte one, so both go at fixed chip-RAM addresses (as in
+# examples/vic4-demo.mensch) and the images are copied there by DMA.
+const SPRITE_TABLE: u32 = $45000
+const SPRITE_IMAGES: u32 = $46000
+
+# Sprite slots, one per cycle.
+const SLOTS: [6]u8 = [0, 1, 2, 3, 4, 5]
+
+const SPRITES = 6
+const FIRST_Y = 80
+const ROW_GAP = 12
+const FIRST_X = 60
+const COLUMN_GAP = 48
+
+# Screen frames each animation frame is held for.
+const HOLD = 4
+
+# Screen memory for the 40x25 text screen the demo draws on.
+const SCREEN: u32 = $50000
+const COLUMNS = 40
+const ROWS = 25
+
+export function main(): u8
+    var cycle: u8
+    dma_copy(u32(addr(DEMO_IMAGES)), SPRITE_IMAGES, DEMO_CELLS * 128)
+    vic4_init()
+    vic4_text16(SCREEN, COLUMNS, 0)
+    vic4_fill_colour(0, 0, 0, COLUMNS * ROWS)
+    vic4_border(0)
+    vic4_background(0)
+    anim_init(SPRITE_TABLE, SPRITES)
+    anim_cycles()
+    for cycle = 0 to SPRITES - 1
+        anim_place(SLOTS[cycle],
+                   FIRST_X + u16(cycle) * COLUMN_GAP,
+                   FIRST_Y + cycle * ROW_GAP)
+    end
+    anim_on($3f)
+    anim_run(addr(SLOTS), SPRITE_IMAGES, u32(addr(DEMO_PALETTES)), HOLD, 255)
+    return 0
+end
