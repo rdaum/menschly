@@ -121,7 +121,7 @@ hero = actor_new(ACTOR_HARDWARE)
 bubble = actor_new(ACTOR_SOFTWARE)
 
 # Every frame, below the text area:
-actor_draw(hero, 120, 100, BUBBLUN_WALK_01, 1)  # mirrored: facing left
+actor_draw(hero, 120, 100, BUBBLUN_WALK_01, 1)  # mirrored: facing right (the sprites face left)
 actor_draw(bubble, 60, 20, BUBBLE_BLUE_01, 0)
 actors_frame()
 ```

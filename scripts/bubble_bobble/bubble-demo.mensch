@@ -67,9 +67,9 @@ const KIND: [CAST]u8 = [
 const STAND_COLUMN: [CAST]u8 = [6, 23, 9, 18, 12, 20]
 const STAND_ROW: [CAST]u8 = [23, 23, 18, 13, 8, 4]
 
-# Nonzero to mirror a cycle's frames: Bob turns to face Bub across the
-# floor, and Maita (drawn facing left) walks right.
-const MIRROR: [CAST]u8 = [0, 1, 0, 1, 0, 0]
+# Nonzero to mirror a cycle's frames, which face left: Bub turns to face Bob
+# across the floor, and Maita walks right.
+const MIRROR: [CAST]u8 = [1, 0, 0, 1, 0, 0]
 
 var cast: [CAST]u8
 
