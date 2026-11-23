@@ -36,11 +36,17 @@ if [[ ! -f "$assets/sprites.tsv" || ! -f "$assets/sprite_cells.bin" ]]; then
   (cd "$here" && python3 convert.py "$assets")
 fi
 (cd "$here" && python3 demo_assets.py)
+# The input replay module: replay.py writes one with a script of inputs;
+# otherwise the game reads the joystick.
+replay="${REPLAY_MODULE:-$assets/game-replay.mensch}"
+if [[ -z "${REPLAY_MODULE:-}" ]]; then
+  printf 'module GameReplay\nexport const REPLAY = 0\nexport const REPLAY_FRAMES = 1\nexport const REPLAY_INPUT: [1]u8 = [0]\n' > "$replay"
+fi
 
 # 2. Build the ROM, then boot it windowed.
 #    mensch-run-mega65 always runs Xemu headless (it is the test runner), so
 #    build with --no-run and start Xemu directly, as run-vic4-demo.sh does.
-rom="$assets/build/game.rom"
+rom="${GAME_ROM:-$assets/build/game.rom}"
 cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- \
   --no-run --rom "$rom" \
   --work-dir "$assets/build-game" \
@@ -50,7 +56,8 @@ cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- 
   "$here/bubble-video.mensch" \
   "$root/lib/vic4.mensch" \
   "$root/lib/actors.mensch" \
-  "$assets/bubble-demo-data.mensch"
+  "$assets/bubble-demo-data.mensch" \
+  "$replay"
 
 echo "rom: $rom"
 

@@ -18,7 +18,12 @@ module BubblePhysics
 # bubbles) comes back in at the bottom.
 #
 # Each frame a game moves a body sideways with body_walk (walls stop it) and
-# then calls body_step for gravity, landing and walking off edges.
+# then calls body_step for jumping, falling, landing and walking off edges.
+#
+# Vertical motion follows the arcade's frame by frame (measured in MAME,
+# bublboblr round 1): a jump is a fixed arc, the same however long the
+# button is held; walking off an edge is a slower fall that eases to 1 px a
+# frame for the last 10 px.
 
 export const ROOM_COLUMNS = 32
 export const ROOM_ROWS = 26
@@ -32,22 +37,47 @@ export const WALL = 2
 
 # Speeds are in sixteenths of a pixel per frame.
 export const SUBPIXELS = 16
-export const GRAVITY = 2
-export const TERMINAL = 24
-# Rises about 49 px: enough to jump up through a platform 5 rows above.
-export const JUMP = 56
+
+# A jump, pixels up per frame from take-off: up 42 px, then down again; it
+# goes on falling at the last 5 frames' pace (12 px per 5 frames) until it
+# lands.
+const JUMP_ARC = 50
+const JUMP_UP: [JUMP_ARC]i8 = [
+    2, 4, 2, 2, 2, 2, 4, 2, 2, 2, 2, 4, 2, 1, 1, 1, 2, 1, 1, 1,
+    1, 0, 1, 0, 0, 0, 0, -1, 0, 0, -1, -2, -1, -1, -1, -1, -2, -2, -2, -2,
+    -2, -4, -2, -2, -2, -2, -4, -2, -2, -4
+]
+const JUMP_TAIL: [5]u8 = [2, 2, 2, 2, 4]
+# Walking off an edge: pixels down per frame, starting with LEDGE_START's
+# frames and then repeating LEDGE_CYCLE's (18 px every 15 frames), until
+# ground is less than LEDGE_EASE px below; from there 1 px a frame.
+const LEDGE_START = 1
+const LEDGE_CYCLE = 15
+const LEDGE_DOWN: [LEDGE_START + LEDGE_CYCLE]u8 = [
+    1,
+    0, 1, 3, 0, 1, 2, 0, 2, 2, 0, 1, 2, 1, 1, 2
+]
+const LEDGE_EASE = 10
 
 export const MAX_BODIES = 16
 
 const SIZE = 16
-# The feet test the terrain under these columns of the body.
-const LEFT_FOOT = 3
-const RIGHT_FOOT = 12
+# A body stands on whatever is under any of its columns 1 to 15 (as the
+# arcade's do: they walk on until all of those are past an edge, 7 px either
+# side of the centre); these cover every 8-pixel cell under them.
+const LEFT_FOOT = 1
+const MIDDLE = 8
+const RIGHT_FOOT = 15
 # A side tests the terrain at these rows of the body.
 const HEAD = 2
 const KNEES = 13
 
-type Body = record(x: i16, y: i16, vy: i16, ground: u8)
+# `motion` counts frames into a jump (JUMPING) or a fall (FALLING).
+type Body = record(x: i16, y: i16, vy: i16, ground: u8, mode: u8, motion: u16)
+
+const STILL = 0
+const JUMPING = 1
+const FALLING = 2
 
 var bodies: parallel [MAX_BODIES]Body
 var cells: [ROOM_ROWS * ROOM_COLUMNS]u8
@@ -88,12 +118,25 @@ export function terrain(px: i16, py: i16): u8
     return cells[(u16(py) >> 3 << 5) + (u16(px) >> 3)]
 end
 
-# Whether a body at pixel x has ground under its feet at pixel row `feet`.
-function supported(px: i16, feet: i16): u8
+# Whether a body at pixel x has ground under it at pixel row `feet`.
+export function supported(px: i16, feet: i16): u8
     if terrain(px + LEFT_FOOT, feet) != EMPTY
         return 1
     end
+    if terrain(px + MIDDLE, feet) != EMPTY
+        return 1
+    end
     if terrain(px + RIGHT_FOOT, feet) != EMPTY
+        return 1
+    end
+    return 0
+end
+
+# Whether there is ground under the middle column of a body at pixel x, at
+# pixel row `feet` (where the arcade's enemies look for a platform to jump
+# up to).
+export function ground_under_middle(px: i16, feet: i16): u8
+    if terrain(px + MIDDLE, feet) != EMPTY
         return 1
     end
     return 0
@@ -118,6 +161,8 @@ export procedure body_place(body: u8, x: i16, y: i16)
     bodies[body].y = y << 4
     bodies[body].vy = 0
     bodies[body].ground = 0
+    bodies[body].mode = FALLING
+    bodies[body].motion = 0
     return
 end
 
@@ -155,15 +200,22 @@ export function body_walk(body: u8, dx: i16): u8
     return 0
 end
 
-# Jumps `body` upward at `speed` sixteenths of a pixel per frame, if it is
-# standing on something. 1 when it jumped.
-export function body_jump(body: u8, speed: i16): u8
+# Jumps `body`, if it is standing on something. 1 when it jumped.
+export function body_jump(body: u8): u8
     if bodies[body].ground == 0
         return 0
     end
-    bodies[body].vy = 0 - speed
-    bodies[body].ground = 0
+    body_launch(body)
     return 1
+end
+
+# Whether `body` is on a jump's arc (rather than standing or falling off an
+# edge).
+export function body_jumping(body: u8): u8
+    if bodies[body].ground == 0 and bodies[body].mode == JUMPING
+        return 1
+    end
+    return 0
 end
 
 # Whether `body` is in the air and moving down.
@@ -174,21 +226,57 @@ export function body_falling(body: u8): u8
     return 0
 end
 
-# Sends `body` upward at `speed` sixteenths of a pixel per frame, standing
-# or not (a bounce off something in mid-air).
-export procedure body_launch(body: u8, speed: i16)
-    bodies[body].vy = 0 - speed
+# Starts `body` on a jump's arc, standing or not (a bounce off something in
+# mid-air).
+export procedure body_launch(body: u8)
     bodies[body].ground = 0
+    bodies[body].mode = JUMPING
+    bodies[body].motion = 0
     return
 end
 
-# One frame of gravity for `body`: rising, falling, landing on what is under
-# it, starting to fall when it walks off an edge, and coming back in at the
-# top after falling out of the bottom.
+# Whether there is ground under a body at pixel x less than LEDGE_EASE px
+# below its feet.
+function ground_near(px: i16, feet: i16): u8
+    var top: i16
+    top = ((feet + 7) >> 3) << 3
+    while top - feet < LEDGE_EASE
+        if top > 0 and supported(px, top)
+            return 1
+        end
+        top = top + 8
+    end
+    return 0
+end
+
+# How far, in pixels (down positive), `body` moves this frame.
+function fall_step(body: u8, px: i16, feet: i16): i16
+    var frame: u16
+    frame = bodies[body].motion
+    bodies[body].motion = frame + 1
+    if bodies[body].mode == JUMPING
+        if frame < JUMP_ARC
+            return 0 - i16(JUMP_UP[frame])
+        end
+        return i16(JUMP_TAIL[u8((frame - JUMP_ARC) % 5)])
+    end
+    if ground_near(px, feet)
+        return 1
+    end
+    if frame >= LEDGE_START
+        frame = LEDGE_START + (frame - LEDGE_START) % LEDGE_CYCLE
+    end
+    return i16(LEDGE_DOWN[frame])
+end
+
+# One frame of `body` in the air, or of checking for ground under it:
+# rising, falling, landing on what is under it, starting to fall when it
+# walks off an edge, and coming back in at the top after falling out of
+# the bottom.
 export procedure body_step(body: u8)
     var px: i16
     var y: i16
-    var vy: i16
+    var dy: i16
     var feet_before: i16
     var feet_after: i16
     var top: i16
@@ -196,33 +284,32 @@ export procedure body_step(body: u8)
     if bodies[body].ground
         if not supported(px, (bodies[body].y >> 4) + SIZE)
             bodies[body].ground = 0
+            bodies[body].mode = FALLING
+            bodies[body].motion = 0
             bodies[body].vy = 0
         end
         return
     end
-    vy = bodies[body].vy + GRAVITY
-    if vy > TERMINAL
-        vy = TERMINAL
-    end
-    y = bodies[body].y + vy
-    if vy < 0
+    feet_before = (bodies[body].y >> 4) + SIZE
+    dy = fall_step(body, px, feet_before)
+    y = bodies[body].y + (dy << 4)
+    if dy < 0
         # Rising: through platforms, and out of the top back in at the
         # bottom.
         if (y >> 4) < 0 - SIZE
             y = y + ((ROOM_HEIGHT + SIZE) << 4)
         end
-    else
+    elsif dy > 0
         # Falling: land on terrain whose top the feet reach, having started
         # at or above it (so a body inside a platform falls on through).
-        feet_before = (bodies[body].y >> 4) + SIZE
         feet_after = (y >> 4) + SIZE
         top = (feet_after >> 3) << 3
         # The top row is never landed on: bodies come in through it.
         if feet_before <= top and top > 0
             if supported(px, top)
                 y = (top - SIZE) << 4
-                vy = 0
                 bodies[body].ground = 1
+                bodies[body].mode = STILL
             end
         end
         if (y >> 4) >= ROOM_HEIGHT
@@ -230,7 +317,7 @@ export procedure body_step(body: u8)
         end
     end
     bodies[body].y = y
-    bodies[body].vy = vy
+    bodies[body].vy = dy << 4
     return
 end
 

@@ -3001,7 +3001,7 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
     let caller = "
         module PhysicsTest
         import BubblePhysics
-        fixed($0e00) volatile var out: [19]i16
+        fixed($0e00) volatile var out: [23]i16
         var room_map: [832]u8
 
         # Side walls; ceiling and floor with a gap at columns 14-17; one
@@ -3063,7 +3063,7 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
             #    lands on it (row 20, top at y 160).
             body_place(2, 80, 184)
             steps(2, 1)
-            out[3] = i16(body_jump(2, JUMP))
+            out[3] = i16(body_jump(2))
             steps(2, 120)
             out[4] = body_y(2)
             out[5] = i16(body_on_ground(2))
@@ -3095,7 +3095,7 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
             steps(6, 10)
             out[12] = i16(body_falling(6))
             out[13] = body_y(6)
-            body_launch(6, JUMP)
+            body_launch(6)
             steps(6, 4)
             out[14] = i16(body_falling(6))
             out[15] = body_y(6)
@@ -3103,7 +3103,7 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
             #    of the top, in at the bottom, up through the floor and back
             #    down onto it.
             body_place(7, 40, 20)
-            body_launch(7, JUMP)
+            body_launch(7)
             went_above = 0
             for frame = 1 to 60
                 body_step(7)
@@ -3115,6 +3115,38 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
             steps(7, 200)
             out[17] = body_y(7)
             out[18] = i16(body_on_ground(7))
+            # 9. The arcade's jump on open floor: 50 frames in the air,
+            #    42 px up at the top.
+            body_place(8, 150, 184)
+            steps(8, 1)
+            frame = 0
+            went_above = 184
+            if body_jump(8)
+                repeat
+                    body_step(8)
+                    frame = frame + 1
+                    if body_y(8) < went_above
+                        went_above = body_y(8)
+                    end
+                until body_on_ground(8) or frame == 200
+            end
+            out[19] = i16(frame)
+            out[20] = went_above
+            # 10. Walking off the platform's left end (40 px above the
+            #     floor, as round 1's): 36 frames to land, as the arcade.
+            body_place(9, 70, 144)
+            steps(9, 1)
+            repeat
+                frame = u16(body_walk(9, -16))
+                body_step(9)
+            until body_on_ground(9) == 0
+            frame = 0
+            repeat
+                body_step(9)
+                frame = frame + 1
+            until body_on_ground(9) or frame == 200
+            out[21] = i16(frame)
+            out[22] = body_y(9)
             return 0
         end
         ";
@@ -3143,7 +3175,7 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
     };
     let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
     assert_eq!(run.exit_code, 0);
-    let out: Vec<i16> = (0..19)
+    let out: Vec<i16> = (0..23)
         .map(|i| i16::from_le_bytes([run.memory[0x0e00 + 2 * i], run.memory[0x0e01 + 2 * i]]))
         .collect();
     assert_eq!(&out[0..2], &[184, 1], "drop onto the floor");
@@ -3178,6 +3210,8 @@ fn bubble_physics_walks_jumps_lands_and_wraps() {
     );
     assert_eq!(out[16], 1, "out of the top, in at the bottom");
     assert_eq!(&out[17..19], &[184, 1], "then down onto the floor");
+    assert_eq!(&out[19..21], &[50, 142], "the arcade's jump: 50 frames, 42 px");
+    assert_eq!(&out[21..23], &[36, 184], "the arcade's 40 px ledge fall: 36 frames");
 }
 
 #[test]

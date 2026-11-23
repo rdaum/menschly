@@ -18,6 +18,7 @@ import BubbleDemoData
 import BubbleVideo
 import BubblePhysics
 import BubbleBubbles
+import GameReplay
 
 # Chip RAM, as in the animation demo.
 const ROOM_TILES: u32 = $44000
@@ -39,12 +40,20 @@ const QUIET_LINE = 256
 # ---------------------------------------------------------------- Bub
 
 const PLAYER = 0
-const WALK_SPEED = 16
+# Bub's sideways speed, pixels per frame in repeating 5-frame patterns (as
+# measured in MAME): walking 6 px per 5 frames, steering a jump 4, and
+# drifting while falling off an edge 1 px every 3 frames.
+const WALK_STEPS: [5]u8 = [1, 1, 1, 1, 2]
+const JUMP_STEPS: [5]u8 = [1, 1, 0, 1, 1]
+const FALL_EVERY = 3
 const START_X = 24
 const START_Y = 184
-# Frames Bub spins when caught, then frames he cannot be caught again.
-const CAUGHT_FRAMES = 60
-const SAFE_FRAMES = 90
+# Frames Bub spins when caught, then frames he cannot be caught again after
+# coming back (none at the start of a round), as the arcade. An enemy
+# catches him when their centres are within CATCH_DISTANCE px both ways.
+const CAUGHT_FRAMES = 186
+const SAFE_FRAMES = 180
+const CATCH_DISTANCE = 8
 # Frames between bubbles, and of the blowing animation.
 const BLOW_FRAMES = 16
 # Coming down with up held onto a bubble bounces off it: feet from
@@ -55,8 +64,6 @@ const BOUNCE_BELOW = 10
 const BOUNCE_SIDE = 12
 # Otherwise Bub pops a bubble he overlaps by this margin on every side.
 const POP_MARGIN = 5
-# A bounce is lower than a jump: about 30 px (speed^2 / 4 / 16).
-const BOUNCE_SPEED = 44
 
 const BUB_WALK: [6]u16 = [
     BUBBLUN_WALK_01, BUBBLUN_WALK_02, BUBBLUN_WALK_03,
@@ -74,6 +81,8 @@ const BUB_BLOW: [8]u16 = [
 var bub: u8
 var facing_left: u8
 var walk_step: u8
+# Frames of sideways input, for the step patterns.
+var stride: u8
 var caught: u8
 var safe: u8
 var blowing: u8
@@ -84,8 +93,48 @@ var buttons_now: u8
 
 const ENEMIES = 3
 const FIRST_ENEMY = 1
-const ENEMY_SPEED = 12
-const ANGRY_SPEED = 20
+# Zen-chan movement, as measured in MAME (round 1, bublboblr): walking 1 px
+# a frame; falling straight down at 1 px a frame; a jump is a 29-frame
+# crouch, then straight up 40 px (one platform) at 1 px a frame; about 2
+# frames' pause on turning at a wall and on landing. All three drop in at
+# x 120 from 47 px above the room (111 frames to the top platform) and walk
+# left. Angry Zen-chans' speed is a guess.
+const ENEMY_SPEED = 16
+const ANGRY_SPEED = 32
+const ENEMY_CROUCH = 29
+# How an enemy decides (the arcade's Zen-chan, bank 0 $8E3F): a cooldown
+# counts down its walking frames; when it runs out it is reloaded with
+# 10 + (enemy + 1) * the round's pace (round 1's is 120, so 130, 250 and
+# 114 after wrapping) and the enemy changes mind:
+# - chasing (mode 0): when Bub is above it, less than CHASE_RANGE px up,
+#   it turns to walk toward him, or (within CLOSE px across) starts
+#   climbing;
+# - climbing (mode 1): while Bub is above it, or being caught, it holds the
+#   cooldown at HOLD and jumps up to any platform it comes under; otherwise
+#   the cooldown soon runs out and it goes back to chasing.
+# It judges where Bub is from both their positions LAG frames ago. A jump
+# from the height of its last jump (it came back down) is the arcade's
+# other jump: rising while stepping 1 px forward every DRIFT_EVERY frames,
+# falling at once if a wall stops it (seen in MAME; how long it lasts away
+# from walls is a guess, as long as a jump).
+const ROUND_PACE = 120
+const HOLD = 2
+const CHASE_RANGE = 32
+const CLOSE = 16
+const LAG = 2
+const CHASING = 0
+const CLIMBING = 1
+const DRIFT_EVERY = 5
+const NO_JUMP = 1000
+const ENEMY_RISE = 40
+const DROP_Y = -47
+# Frames still after landing from the drop in, from a fall and from a jump.
+# (At a wall an enemy turns round where it stands, in one frame.)
+const ENTRY_PAUSE = 3
+const LAND_PAUSE = 1
+const RISE_PAUSE = 2
+# Frames at an edge before falling off it.
+const EDGE_PAUSE = 1
 const DROP_X = 120
 # Round 1's stagger: each drops in this many frames after the round starts.
 const DROP_DELAY: [ENEMIES]u8 = [1, 21, 41]
@@ -97,6 +146,13 @@ const WAITING = 0
 const ACTIVE = 1
 const TRAPPED = 2
 const GONE = 3
+
+# An active enemy's motion.
+const WALK = 0
+const FALL = 1
+const CROUCH = 2
+const RISE = 3
+const PAUSE = 4
 
 const ZEN_WALK: [4]u16 = [
     ZEN_CHAN_WALK_01, ZEN_CHAN_WALK_02, ZEN_CHAN_WALK_03, ZEN_CHAN_WALK_04
@@ -110,6 +166,21 @@ var enemy_state: [ENEMIES]u8
 var enemy_delay: [ENEMIES]u8
 var enemy_left: [ENEMIES]u8
 var enemy_angry: [ENEMIES]u8
+var enemy_motion: [ENEMIES]u8
+var enemy_timer: [ENEMIES]u8
+# Whether the enemy was under a platform it could jump to last frame.
+var enemy_cooldown: [ENEMIES]u8
+var enemy_mind: [ENEMIES]u8
+# The height (y) the enemy last jumped from, or NO_JUMP; and whether its
+# jump is the drifting one.
+var enemy_jumped_from: [ENEMIES]i16
+var enemy_drift: [ENEMIES]u8
+# Positions over the last LAG + 1 frames (index 0 this frame): Bub's, then
+# each enemy's.
+var seen_x: [(ENEMIES + 1) * (LAG + 1)]i16
+var seen_y: [(ENEMIES + 1) * (LAG + 1)]i16
+# Whether the enemy is still dropping in at the start of the round.
+var enemy_entering: [ENEMIES]u8
 var clearing: u8
 
 # ---------------------------------------------------------------- bubbles
@@ -148,8 +219,11 @@ procedure start_round()
     for i = 0 to ENEMIES - 1
         enemy_state[i] = WAITING
         enemy_delay[i] = DROP_DELAY[i]
-        enemy_left[i] = i & 1
+        enemy_left[i] = 1
         enemy_angry[i] = 0
+        enemy_cooldown[i] = reload(i)
+        enemy_mind[i] = CHASING
+        enemy_jumped_from[i] = NO_JUMP
         actor_hide(enemy_actor[i])
     end
     bubbles_reset()
@@ -176,19 +250,29 @@ procedure move_bub(buttons: u8)
         blowing = blowing - 1
     end
     dx = 0
-    if buttons & JOY_LEFT
-        dx = 0 - WALK_SPEED
-        facing_left = 1
-    elsif buttons & JOY_RIGHT
-        dx = WALK_SPEED
-        facing_left = 0
+    if buttons & (JOY_LEFT | JOY_RIGHT)
+        stride = stride + 1
+        if body_on_ground(PLAYER)
+            dx = i16(WALK_STEPS[stride % 5])
+        elsif body_jumping(PLAYER)
+            dx = i16(JUMP_STEPS[stride % 5])
+        elsif stride % FALL_EVERY == 0
+            dx = 1
+        end
+        dx = dx << 4
+        if buttons & JOY_LEFT
+            dx = 0 - dx
+            facing_left = 1
+        else
+            facing_left = 0
+        end
     end
     if body_walk(PLAYER, dx) == 0 and dx != 0
         walk_step = walk_step + 1
     end
     pressed = buttons & (buttons_before xor $ff)
     if pressed & JOY_UP
-        if body_jump(PLAYER, JUMP)
+        if body_jump(PLAYER)
             walk_step = 0
         end
     end
@@ -200,52 +284,196 @@ procedure move_bub(buttons: u8)
     return
 end
 
+function reload(i: u8): u8
+    return u8(10 + (u16(i) + 1) * ROUND_PACE)
+end
+
+# Remembers this frame's positions of Bub (body 0) and the enemies.
+procedure remember()
+    var k: u8
+    var at: u8
+    for k = 0 to ENEMIES
+        at = k * (LAG + 1)
+        seen_x[at + 2] = seen_x[at + 1]
+        seen_y[at + 2] = seen_y[at + 1]
+        seen_x[at + 1] = seen_x[at]
+        seen_y[at + 1] = seen_y[at]
+        seen_x[at] = body_x(k)
+        seen_y[at] = body_y(k)
+    end
+    return
+end
+
+# Bub's height above enemy `i`, and across from it, as it judges them.
+function bub_above(i: u8): i16
+    return seen_y[(i + 1) * (LAG + 1) + LAG] - seen_y[LAG]
+end
+
+function bub_across(i: u8): i16
+    return seen_x[LAG] - seen_x[(i + 1) * (LAG + 1) + LAG]
+end
+
+# Enemy `i`, walking (or about to) at (x, y), makes up its mind for this
+# frame: perhaps turning toward Bub, perhaps jumping up to a platform.
+procedure think(i: u8, x: i16, y: i16)
+    var up: i16
+    var across: i16
+    var under: u8
+    enemy_cooldown[i] = enemy_cooldown[i] - 1
+    if enemy_cooldown[i] == 0
+        enemy_cooldown[i] = reload(i)
+        enemy_mind[i] = enemy_mind[i] xor 1
+    end
+    up = bub_above(i)
+    across = bub_across(i)
+    if enemy_mind[i] == CHASING
+        if y == START_Y or caught or up <= 0 or up >= CHASE_RANGE
+            return
+        end
+        enemy_jumped_from[i] = NO_JUMP
+        if across > 0 - CLOSE and across < CLOSE
+            enemy_mind[i] = CLIMBING
+        elsif across < 0
+            enemy_left[i] = 1
+        else
+            enemy_left[i] = 0
+        end
+        return
+    end
+    if caught == 0 and up <= 0
+        return
+    end
+    enemy_cooldown[i] = HOLD
+    under = 0
+    if y + 16 - ENEMY_RISE > 8
+        under = ground_under_middle(x, y + 16 - ENEMY_RISE)
+    end
+    if under
+        # One more step, then the crouch.
+        enemy_motion[i] = CROUCH
+        enemy_timer[i] = ENEMY_CROUCH + 1
+        enemy_drift[i] = 0
+        if enemy_jumped_from[i] == y
+            enemy_drift[i] = 1
+            enemy_jumped_from[i] = NO_JUMP
+        else
+            enemy_jumped_from[i] = y
+        end
+    end
+    return
+end
+
 procedure move_enemy(i: u8)
     var body: u8
     var dx: i16
-    var dy: i16
-    var chance: u8
+    var x: i16
+    var y: i16
+    var under: u8
     body = FIRST_ENEMY + i
     if enemy_state[i] == WAITING
         enemy_delay[i] = enemy_delay[i] - 1
         if enemy_delay[i] == 0
-            body_place(body, DROP_X, -16)
+            body_place(body, DROP_X, DROP_Y)
             enemy_state[i] = ACTIVE
+            enemy_motion[i] = FALL
+            enemy_timer[i] = 0
+            enemy_entering[i] = 1
         end
         return
     end
     if enemy_state[i] != ACTIVE
         return
     end
-    dx = ENEMY_SPEED
-    chance = 63
-    if enemy_angry[i]
-        dx = ANGRY_SPEED
-        chance = 31
-    end
-    if enemy_left[i]
-        dx = 0 - dx
-    end
-    if body_walk(body, dx)
-        enemy_left[i] = enemy_left[i] xor 1
-    end
-    if body_on_ground(body)
-        dy = body_y(PLAYER) - body_y(body)
-        # Bub well above: now and then jump for him.
-        if dy < -24 and (random() & chance) == 0
-            if body_jump(body, JUMP)
-                dy = 0
+    x = body_x(body)
+    y = body_y(body)
+    if enemy_motion[i] == PAUSE
+        enemy_timer[i] = enemy_timer[i] - 1
+        if enemy_timer[i] == 0
+            # Ready to walk: it may decide to jump where it stands.
+            enemy_motion[i] = WALK
+            think(i, x, y)
+        end
+    elsif enemy_motion[i] == WALK
+        dx = ENEMY_SPEED
+        if enemy_angry[i]
+            dx = ANGRY_SPEED
+        end
+        if enemy_left[i]
+            dx = 0 - dx
+        end
+        # Turning round at a wall takes the frame (and does not count
+        # toward the jump cooldown).
+        if body_walk(body, dx)
+            enemy_left[i] = enemy_left[i] xor 1
+        else
+            x = body_x(body)
+            if not supported(x, y + 16)
+                enemy_motion[i] = FALL
+                enemy_timer[i] = EDGE_PAUSE
+            else
+                think(i, x, y)
             end
         end
-        # Bub on the same level: now and then turn to face him.
-        if dy > -8 and dy < 8 and (random() & 127) == 0
-            enemy_left[i] = 0
-            if body_x(PLAYER) < body_x(body)
-                enemy_left[i] = 1
+    elsif enemy_motion[i] == FALL and enemy_timer[i]
+        enemy_timer[i] = enemy_timer[i] - 1
+    elsif enemy_motion[i] == FALL
+        y = y + 1
+        if y >= ROOM_HEIGHT
+            y = y - ROOM_HEIGHT - 16
+        end
+        # Land on the top of a cell (not the top row's).
+        if ((y + 16) & 7) == 0 and y + 16 > 8 and supported(x, y + 16)
+            enemy_motion[i] = PAUSE
+            enemy_timer[i] = LAND_PAUSE
+            if enemy_entering[i]
+                enemy_timer[i] = ENTRY_PAUSE
+                enemy_entering[i] = 0
             end
         end
+        body_place(body, x, y)
+    elsif enemy_motion[i] == CROUCH
+        if enemy_timer[i] == ENEMY_CROUCH + 1
+            dx = ENEMY_SPEED
+            if enemy_left[i]
+                dx = 0 - dx
+            end
+            under = body_walk(body, dx)
+        end
+        enemy_timer[i] = enemy_timer[i] - 1
+        if enemy_timer[i] == 0
+            enemy_motion[i] = RISE
+            enemy_timer[i] = ENEMY_RISE
+        end
+    elsif enemy_motion[i] == RISE
+        y = y - 1
+        if enemy_drift[i] and (ENEMY_RISE - enemy_timer[i]) % DRIFT_EVERY == 0
+            dx = ENEMY_SPEED
+            if enemy_left[i]
+                dx = 0 - dx
+            end
+            under = body_walk(body, dx)
+            # Against a wall now: it turns, holds a frame, then falls.
+            if under or body_walk(body, dx)
+                enemy_left[i] = enemy_left[i] xor 1
+                body_place(body, body_x(body), y)
+                enemy_motion[i] = FALL
+                enemy_timer[i] = 1
+                return
+            end
+            under = body_walk(body, 0 - dx)
+            x = body_x(body)
+        end
+        enemy_timer[i] = enemy_timer[i] - 1
+        if enemy_timer[i] == 0
+            enemy_motion[i] = FALL
+            if supported(x, y + 16)
+                enemy_motion[i] = PAUSE
+                enemy_timer[i] = RISE_PAUSE
+            end
+            # Under another platform here: it may jump again at once.
+        end
+        body_place(body, x, y)
     end
-    body_step(body)
     return
 end
 
@@ -287,7 +515,7 @@ procedure bubbles_meet()
             end
         elsif bubble_state(b) == BUBBLE_FLOAT and caught == 0
             if lands_on(b) and (buttons_now & JOY_UP)
-                body_launch(PLAYER, BOUNCE_SPEED)
+                body_launch(PLAYER)
             elsif boxes_touch(bubble_x(b), bubble_y(b), body_x(PLAYER), body_y(PLAYER), POP_MARGIN)
                 enemy = bubble_pop(b)
                 if enemy != NO_CAPTIVE
@@ -299,10 +527,30 @@ procedure bubbles_meet()
         if enemy != NO_CAPTIVE
             body_place(FIRST_ENEMY + enemy, bubble_x(b), bubble_y(b))
             enemy_state[enemy] = ACTIVE
+            enemy_motion[enemy] = FALL
+            enemy_timer[enemy] = 0
             enemy_angry[enemy] = 1
         end
     end
     return
+end
+
+# Whether bodies `a` and `b`'s positions are within `distance` px both ways.
+function near(a: u8, b: u8, distance: i16): u8
+    var dx: i16
+    var dy: i16
+    dx = body_x(a) - body_x(b)
+    dy = body_y(a) - body_y(b)
+    if dx < 0
+        dx = 0 - dx
+    end
+    if dy < 0
+        dy = 0 - dy
+    end
+    if dx <= distance and dy <= distance
+        return 1
+    end
+    return 0
 end
 
 procedure check_caught()
@@ -311,7 +559,7 @@ procedure check_caught()
         return
     end
     for i = 0 to ENEMIES - 1
-        if enemy_state[i] == ACTIVE and bodies_touch(PLAYER, FIRST_ENEMY + i, 3)
+        if enemy_state[i] == ACTIVE and near(PLAYER, FIRST_ENEMY + i, CATCH_DISTANCE)
             caught = CAUGHT_FRAMES
         end
     end
@@ -415,6 +663,41 @@ procedure draw_bubbles()
     return
 end
 
+# Replay builds (replay.py) log each frame here, REPLAY_BYTES apiece, for
+# comparing with the arcade: Bub's x and y (i16), 2 if caught or 1, then
+# per enemy x and y (i16), its state and its motion.
+const REPLAY_LOG: u32 = $58000
+const REPLAY_BYTES = 32
+const REPLAY_LIMIT = 1024
+
+procedure log_put16(at: far ^u8, value: i16)
+    at[0] = u8(value)
+    at[1] = u8(u16(value) >> 8)
+    return
+end
+
+procedure log_frame()
+    var at: far ^u8
+    var i: u8
+    if tick >= REPLAY_LIMIT
+        return
+    end
+    at = REPLAY_LOG + u32(tick) * REPLAY_BYTES
+    log_put16(at, body_x(PLAYER))
+    log_put16(at + 2, body_y(PLAYER))
+    at[4] = 1
+    if caught
+        at[4] = 2
+    end
+    for i = 0 to ENEMIES - 1
+        log_put16(at + u32(5 + i * 6), body_x(FIRST_ENEMY + i))
+        log_put16(at + u32(7 + i * 6), body_y(FIRST_ENEMY + i))
+        at[9 + u16(i) * 6] = enemy_state[i]
+        at[10 + u16(i) * 6] = enemy_motion[i] | (enemy_left[i] << 4)
+    end
+    return
+end
+
 export function main(): u8
     var i: u8
     var buttons: u8
@@ -442,7 +725,14 @@ export function main(): u8
     start_round()
     repeat
         vic4_wait_line(QUIET_LINE)
-        buttons = joystick(2)
+        if REPLAY
+            buttons = 0
+            if tick < REPLAY_FRAMES
+                buttons = REPLAY_INPUT[tick]
+            end
+        else
+            buttons = joystick(2)
+        end
         buttons_now = buttons
         move_bub(buttons)
         for i = 0 to ENEMIES - 1
@@ -452,6 +742,10 @@ export function main(): u8
         bubbles_meet()
         check_caught()
         check_cleared()
+        remember()
+        if REPLAY
+            log_frame()
+        end
         buttons_before = buttons
         draw_bub()
         draw_enemies()
