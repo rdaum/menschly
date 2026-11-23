@@ -2442,6 +2442,12 @@ fn vic4_library_sets_up_the_screen_dma_palette_raster_and_sprites() {
         fixed($d100) volatile var red: [256]u8
         fixed($d300) volatile var blue: [256]u8
         fixed($0e30) volatile var sprite_out: [12]u8
+        fixed($d048) volatile var top_border: u16
+        fixed($d04a) volatile var bottom_border: u16
+        fixed($d04e) volatile var text_top: u16
+        fixed($d07b) volatile var display_rows: u8
+        fixed($0e40) volatile var rows_out: [6]u16
+        fixed($0e4c) volatile var rows_count: u8
 
         const PATTERN: [6]u8 = [1, 2, 3, 4, 5, 6]
         const COLOURS: [48]u8 = [
@@ -2480,6 +2486,14 @@ fn vic4_library_sets_up_the_screen_dma_palette_raster_and_sprites() {
             out[14] = sprite_x_high & 2
             out[15] = u8(vic4_tile_at($40040))
             out[16] = u8(vic4_tile_at($40040) >> 8)
+            rows_out[0] = top_border & $0fff
+            rows_out[1] = bottom_border & $0fff
+            rows_out[2] = text_top & $0fff
+            vic4_text_rows(26)
+            rows_out[3] = top_border & $0fff
+            rows_out[4] = bottom_border & $0fff
+            rows_out[5] = text_top & $0fff
+            rows_count = display_rows
             red[17] = 0
             vic4_sprite_palette(1)
             vic4_sprite_colours(1, addr(COLOURS))
@@ -2561,6 +2575,25 @@ fn vic4_library_sets_up_the_screen_dma_palette_raster_and_sprites() {
     );
     let frames = u16::from_le_bytes([memory[0x0e28], memory[0x0e29]]);
     assert!((2..=3).contains(&frames), "{frames} raster interrupts");
+    // 26 rows: 416 physical lines between the borders, around the same
+    // centre, with the text starting as far below the top border as before.
+    let rows = |i: usize| {
+        i32::from(u16::from_le_bytes([
+            memory[0x0e40 + 2 * i],
+            memory[0x0e41 + 2 * i],
+        ]))
+    };
+    let (top, bottom, text) = (rows(0), rows(1), rows(2));
+    let (new_top, new_bottom, new_text) = (rows(3), rows(4), rows(5));
+    assert_eq!(
+        new_bottom - new_top,
+        416,
+        "{:?}",
+        (top, bottom, new_top, new_bottom)
+    );
+    assert_eq!(new_text - new_top, text - top);
+    assert!(((new_top + new_bottom) - (top + bottom)).abs() <= 1);
+    assert_eq!(memory[0x0e4c], 25);
 }
 
 #[test]

@@ -60,6 +60,9 @@ fixed($d027) volatile var sprite_colours: [8]u8
 
 # VIC-III and VIC-IV registers.
 fixed($d030) volatile var vic3_rom: u8
+fixed($d048) volatile var top_border: [2]u8
+fixed($d04a) volatile var bottom_border: [2]u8
+fixed($d04e) volatile var text_top: [2]u8
 fixed($d054) volatile var vic4_control: u8
 fixed($d055) volatile var sprite_extended_height: u8
 fixed($d056) volatile var sprite_height: u8
@@ -72,6 +75,7 @@ fixed($d064) volatile var colour_pointer: u16
 fixed($d06b) volatile var sprite_16_colour: u8
 fixed($d06c) volatile var sprite_pointer_address: [3]u8
 fixed($d070) volatile var palette_select: u8
+fixed($d07b) volatile var display_rows: u8
 fixed($d100) volatile var palette_red: [256]u8
 fixed($d200) volatile var palette_green: [256]u8
 fixed($d300) volatile var palette_blue: [256]u8
@@ -151,6 +155,33 @@ export procedure vic4_text16(screen: u32, row_chars: u16, colour_offset: u16)
     screen_pointer[2] = u8(screen >> 16)
     screen_pointer[3] = (screen_pointer[3] & $c0) | (u8(row_chars >> 8) & $03) << 4 | (u8(screen >> 24) & $0f)
     colour_pointer = colour_offset
+    return
+end
+
+# Shows `rows` text rows (1-31 in the 200-line mode this library uses)
+# instead of 25, centred where the 25 rows were: the borders and the first
+# text line move by 8 lines for each row added or removed.
+export procedure vic4_text_rows(rows: u8)
+    var top: u16
+    var bottom: u16
+    var text: u16
+    var height: u16
+    top = u16(top_border[0]) | u16(top_border[1] & $0f) << 8
+    bottom = u16(bottom_border[0]) | u16(bottom_border[1] & $0f) << 8
+    text = u16(text_top[0]) | u16(text_top[1] & $0f) << 8
+    # A row is 8 lines, each two physical lines tall.
+    height = u16(rows) << 4
+    text = text - top
+    top = ((top + bottom) >> 1) - (height >> 1)
+    text = text + top
+    bottom = top + height
+    top_border[0] = u8(top)
+    top_border[1] = (top_border[1] & $f0) | u8(top >> 8)
+    bottom_border[0] = u8(bottom)
+    bottom_border[1] = (bottom_border[1] & $f0) | u8(bottom >> 8)
+    text_top[0] = u8(text)
+    text_top[1] = (text_top[1] & $f0) | u8(text >> 8)
+    display_rows = rows - 1
     return
 end
 
