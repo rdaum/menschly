@@ -3228,6 +3228,7 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
         module BubblesTest
         import BubblePhysics
         import BubbleBubbles
+        import BubbleAir
         fixed($0e00) volatile var out: [16]i16
         var room_map: [832]u8
 
@@ -3264,6 +3265,7 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
             var c: u8
             build()
             physics_room(u32(addr(room_map)))
+            bubbles_air(u32(addr(AIR_ROUND1)))
             bubbles_reset()
             # 1. Blown right from x 40 (as the arcade's): shows at 42, then
             #    shoots 3 px a frame for 21 frames and floats.
@@ -3272,8 +3274,8 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
             steps(1 + SHOT_FRAMES)
             out[1] = bubble_x(b)
             out[2] = i16(bubble_state(b))
-            # 2. Rises on round 1's air to y 24, goes across to x 104 and bobs
-            #    between y 16 and 24.
+            # 2. Rises on round 1's air (its column, 14, goes up to the top
+            #    rows, which go down) and bobs between y 16 and 24.
             steps(450)
             out[3] = bubble_y(b)
             out[4] = bubble_x(b)
@@ -3309,6 +3311,7 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
         ("0-caller", caller.to_owned()),
         ("1-physics", read("bubble-physics.mensch")),
         ("2-bubbles", read("bubble-bubbles.mensch")),
+        ("3-air", read("bubble-air.mensch")),
     ]
     .map(|(name, source)| mega65::KernelModule {
         name: name.to_owned(),
@@ -3334,8 +3337,8 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
     // States: free 0, shot 1, float 2, pop 3; no captive is $FF (-1 as i16 of u8 is 255).
     assert_eq!(&out[0..3], &[0, 105, 2], "shoots 63 px from x 42, then floats");
     assert!(
-        (16..=24).contains(&out[3]) && out[4] == 104,
-        "bobs at round 1's gathering point: ({}, {})",
+        (16..=24).contains(&out[3]) && out[4] == 106,
+        "bobs at the top of round 1's air: ({}, {})",
         out[4],
         out[3]
     );

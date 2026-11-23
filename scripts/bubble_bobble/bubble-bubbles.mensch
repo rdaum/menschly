@@ -12,10 +12,17 @@ module BubbleBubbles
 # The motion is the arcade's (measured in MAME, round 1): a shot goes 3 px a
 # frame for SHOT_FRAMES frames, then 1 px more, and rests a frame; a
 # floating bubble moves 1 px on 2 frames in every 5 (counted from when it
-# starts floating), following round 1's air: up to AIR_TOP, across
-# to AIR_X, then bobbing between AIR_BOB and AIR_TOP. It misses a move each
-# time it turns, and each time its bottom edge passes the top or bottom of
-# a platform.
+# starts floating), the way the round's air goes (BubbleAir's maps): when
+# it is on an 8-pixel line across the way it is going, it looks at the air
+# where it is, and if that goes another way it turns, missing that move.
+#
+# Bubbles push each other (the arcade's sub CPU, $0772): every frame each
+# floating bubble pushes any other floating bubble less than PUSH_REACH px
+# ahead of it, and less than PUSH_REACH px to either side, 1 px further
+# that way, which happens after that bubble's own move the next frame,
+# unless still air is in the way. Which way is the arcade's table's: a bubble
+# last moving up or right pushes up, moving left pushes left, and moving
+# down pushes right (so a crowd bobbing under the ceiling creeps right).
 
 import BubblePhysics
 
@@ -34,10 +41,6 @@ export const SHOT_FRAMES = 21
 const SHOT_SPEED = 48
 # A floating bubble moves on frames whose age (frames since it started
 # floating, after the shot's last pixel and rest) % 5 is 1 or 3.
-# Round 1's air currents.
-const AIR_TOP = 24
-const AIR_X = 104
-const AIR_BOB = 16
 # How long a floating bubble lasts: LIFE_UNIT * its life (the arcade's is 8
 # to 15, at random, given to bubble_blow) + LIFE_EXTRA frames; with an enemy
 # inside (a guess, not yet measured) CAPTIVE_FRAMES.
@@ -46,11 +49,20 @@ const LIFE_EXTRA = 23
 const CAPTIVE_FRAMES = 480
 export const POP_FRAMES = 31
 
-# Which way a floating bubble is going.
-const GOING_UP = 0
-const GOING_ACROSS = 1
-const BOBBING_UP = 2
-const BOBBING_DOWN = 3
+# The air: 0 or 1 up, 2 right, 3 left, 4 down.
+const AIR_RIGHT = 2
+const AIR_LEFT = 3
+const AIR_DOWN = 4
+
+const PUSH_REACH = 13
+const PUSH_TOP = 9
+# The way a bubble last moved.
+const UP = 0
+const RIGHT = 1
+const LEFT = 2
+const DOWN = 3
+# The way a bubble pushes, by the way it last moved (UP, RIGHT, LEFT, DOWN).
+const PUSH_WAY: [4]u8 = [UP, UP, LEFT, RIGHT]
 
 const SIZE = 16
 # A bubble appears this far in front of the one blowing it.
@@ -59,9 +71,40 @@ const MOUTH = 2
 # `age` counts frames since it started floating (the shot's last pixel is
 # at 1, a rest at 2); `skip` misses the next move.
 type Bubble = record(state: u8, captive: u8, escaped: u8, x: i16, y: i16, vx: i16, timer: u16,
-                     going: u8, age: u16, skip: u8, life: u8)
+                     air: u8, age: u16, skip: u8, life: u8,
+                     way: u8, push_x: i8, push_y: i8)
 
 var bubbles: parallel [MAX_BUBBLES]Bubble
+# The round's air (see BubbleAir).
+var air_map: [512]u8
+
+# Takes the round's air map (BubbleAir's format) from `map`.
+export procedure bubbles_air(map: u32)
+    var cell: far ^u8
+    var i: u16
+    cell = map
+    for i = 0 to 511
+        air_map[i] = cell[i]
+    end
+    return
+end
+
+# The air at a bubble at room pixel (x, y).
+function air_at(x: i16, y: i16): u8
+    var row: i16
+    var col: i16
+    var pair: u8
+    row = (y + 40) >> 3
+    col = (x + 8) >> 3
+    if row < 0 or row > 31 or col < 0 or col > 31
+        return 0
+    end
+    pair = air_map[(u16(row) << 4) + (u16(col) >> 1)]
+    if col & 1
+        return pair & $0f
+    end
+    return pair >> 4
+end
 
 export procedure bubbles_reset()
     var b: u8
@@ -107,9 +150,12 @@ end
 
 procedure start_float(b: u8)
     bubbles[b].state = BUBBLE_FLOAT
-    bubbles[b].going = GOING_UP
+    bubbles[b].air = air_at(bubbles[b].x >> 4, bubbles[b].y >> 4)
     bubbles[b].age = 0
     bubbles[b].skip = 0
+    bubbles[b].way = UP
+    bubbles[b].push_x = 0
+    bubbles[b].push_y = 0
     bubbles[b].timer = u16(bubbles[b].life) * LIFE_UNIT + LIFE_EXTRA
     if bubbles[b].captive != NO_CAPTIVE
         bubbles[b].timer = CAPTIVE_FRAMES
@@ -152,57 +198,128 @@ procedure shoot(b: u8)
     return
 end
 
-# Whether a bubble with its top at pixel row y has its bottom edge on the
-# top or bottom of terrain under its middle at pixel column px.
-function at_platform_edge(px: i16, y: i16): u8
-    var bottom: i16
-    bottom = y + SIZE
-    if bottom & 7
-        return 0
-    end
-    if terrain(px + 8, bottom) != EMPTY or terrain(px + 8, bottom - 1) != EMPTY
+# Whether a pushed bubble may be at pixel (x, y) having been pushed `dx`
+# or `dy` px: the air it is pushed into must not be still (0), as the
+# arcade's checks ($161F, $166B, $15E9, $1604), and it goes no higher than
+# PUSH_TOP.
+function may_push_to(x: i16, y: i16, dx: i16, dy: i16): u8
+    if dy < 0
+        if y < PUSH_TOP or air_at(x, y - 8) == 0
+            return 0
+        end
         return 1
     end
-    return 0
+    if dy > 0
+        if air_at(x, y + 8) == 0
+            return 0
+        end
+        return 1
+    end
+    if dx > 0
+        if air_at(x + 8, y - 8) == 0 or air_at(x + 8, y) == 0
+            return 0
+        end
+        return 1
+    end
+    if air_at(x - 8, y - 8) == 0 or air_at(x - 8, y) == 0
+        return 0
+    end
+    return 1
 end
 
-# One move of floating bubble `b` along round 1's air.
-procedure drift(b: u8)
+# Moves bubble `b` as the others pushed it, where the air lets it.
+procedure pushed(b: u8)
     var x: i16
     var y: i16
     x = bubbles[b].x >> 4
     y = bubbles[b].y >> 4
-    if bubbles[b].going == GOING_UP
-        y = y - 1
-        if y <= AIR_TOP
-            y = AIR_TOP
-            bubbles[b].going = GOING_ACROSS
-            bubbles[b].skip = 1
-        elsif at_platform_edge(x, y)
-            bubbles[b].skip = 1
+    if bubbles[b].push_y != 0 and may_push_to(x, y + i16(bubbles[b].push_y), 0, i16(bubbles[b].push_y))
+        y = y + i16(bubbles[b].push_y)
+    end
+    if bubbles[b].push_x != 0 and may_push_to(x + i16(bubbles[b].push_x), y, i16(bubbles[b].push_x), 0)
+        x = x + i16(bubbles[b].push_x)
+    end
+    bubbles[b].push_x = 0
+    bubbles[b].push_y = 0
+    bubbles[b].x = x << 4
+    bubbles[b].y = y << 4
+    return
+end
+
+# Floating bubble `a` pushes the floating bubbles just ahead of it.
+procedure push_from(a: u8)
+    var c: u8
+    var along: i16
+    var across: i16
+    var ax: i16
+    var ay: i16
+    var way: u8
+    ax = bubbles[a].x >> 4
+    ay = bubbles[a].y >> 4
+    way = PUSH_WAY[bubbles[a].way]
+    for c = 0 to MAX_BUBBLES - 1
+        if c != a and bubbles[c].state == BUBBLE_FLOAT
+            if way == UP or way == DOWN
+                along = ay - (bubbles[c].y >> 4)
+                across = (bubbles[c].x >> 4) - ax
+            else
+                along = (bubbles[c].x >> 4) - ax
+                across = ay - (bubbles[c].y >> 4)
+            end
+            if way == DOWN or way == LEFT
+                along = 0 - along
+            end
+            if across < 0
+                across = 0 - across
+            end
+            if along >= 0 and along < PUSH_REACH and across < PUSH_REACH
+                if way == UP
+                    bubbles[c].push_y = bubbles[c].push_y - 1
+                elsif way == DOWN
+                    bubbles[c].push_y = bubbles[c].push_y + 1
+                elsif way == RIGHT
+                    bubbles[c].push_x = bubbles[c].push_x + 1
+                else
+                    bubbles[c].push_x = bubbles[c].push_x - 1
+                end
+            end
         end
-    elsif bubbles[b].going == GOING_ACROSS
-        if x < AIR_X
-            x = x + 1
-        elsif x > AIR_X
-            x = x - 1
+    end
+    return
+end
+
+# One move of floating bubble `b` the way the air goes.
+procedure drift(b: u8)
+    var x: i16
+    var y: i16
+    var air: u8
+    var line: i16
+    x = bubbles[b].x >> 4
+    y = bubbles[b].y >> 4
+    air = bubbles[b].air
+    line = y
+    if air == AIR_RIGHT or air == AIR_LEFT
+        line = x
+    end
+    if (line & 7) == 0
+        line = i16(air_at(x, y))
+        if u8(line) != air
+            bubbles[b].air = u8(line)
+            return
         end
-        if x == AIR_X
-            bubbles[b].going = BOBBING_UP
-            bubbles[b].skip = 1
-        end
-    elsif bubbles[b].going == BOBBING_UP
-        y = y - 1
-        if y <= AIR_BOB
-            bubbles[b].going = BOBBING_DOWN
-            bubbles[b].skip = 1
-        end
-    else
+    end
+    if air == AIR_RIGHT
+        x = x + 1
+        bubbles[b].way = RIGHT
+    elsif air == AIR_LEFT
+        x = x - 1
+        bubbles[b].way = LEFT
+    elsif air == AIR_DOWN
         y = y + 1
-        if y >= AIR_TOP
-            bubbles[b].going = BOBBING_UP
-            bubbles[b].skip = 1
-        end
+        bubbles[b].way = DOWN
+    else
+        y = y - 1
+        bubbles[b].way = UP
     end
     bubbles[b].x = x << 4
     bubbles[b].y = y << 4
@@ -221,12 +338,9 @@ procedure float(b: u8)
             bubbles[b].x = bubbles[b].x - 16
         end
     elsif age > 2 and (age % 5 == 1 or age % 5 == 3)
-        if bubbles[b].skip
-            bubbles[b].skip = 0
-        else
-            drift(b)
-        end
+        drift(b)
     end
+    pushed(b)
     bubbles[b].timer = bubbles[b].timer - 1
     if bubbles[b].timer == 0
         if bubbles[b].captive != NO_CAPTIVE
@@ -252,6 +366,11 @@ export procedure bubbles_step()
             if bubbles[b].timer == 0
                 bubbles[b].state = BUBBLE_FREE
             end
+        end
+    end
+    for b = 0 to MAX_BUBBLES - 1
+        if bubbles[b].state == BUBBLE_FLOAT
+            push_from(b)
         end
     end
     return

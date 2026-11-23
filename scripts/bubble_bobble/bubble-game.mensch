@@ -18,6 +18,7 @@ import BubbleDemoData
 import BubbleVideo
 import BubblePhysics
 import BubbleBubbles
+import BubbleAir
 import GameReplay
 
 # Chip RAM, as in the animation demo.
@@ -735,11 +736,11 @@ end
 # Replay builds (replay.py) log each frame here, REPLAY_BYTES apiece, for
 # comparing with the arcade: Bub's x and y (i16), 2 if caught or 1; per
 # enemy x and y (i16), its state and its motion; then per bubble (the first
-# LOGGED_BUBBLES) x and y (i16) and its state.
+# LOGGED_BUBBLES) x, y + 40 and its state, a byte each.
 const REPLAY_LOG: u32 = $52000
-const REPLAY_BYTES = 56
-const REPLAY_LIMIT = 1024
-const LOGGED_BUBBLES = 6
+const REPLAY_BYTES = 80
+const REPLAY_LIMIT = 700
+const LOGGED_BUBBLES = 18
 
 procedure log_put16(at: far ^u8, value: i16)
     at[0] = u8(value)
@@ -767,9 +768,9 @@ procedure log_frame()
         at[10 + u16(i) * 6] = enemy_motion[i] | (enemy_left[i] << 4)
     end
     for i = 0 to LOGGED_BUBBLES - 1
-        log_put16(at + u32(23 + i * 5), bubble_x(i))
-        log_put16(at + u32(25 + i * 5), bubble_y(i))
-        at[27 + u16(i) * 5] = bubble_state(i)
+        at[23 + u16(i) * 3] = u8(bubble_x(i))
+        at[24 + u16(i) * 3] = u8(bubble_y(i) + 40)
+        at[25 + u16(i) * 3] = bubble_state(i)
     end
     return
 end
@@ -786,6 +787,7 @@ export function main(): u8
     bb_draw_room(1, 0, u32(addr(DEMO_ROOM_TILES)), u32(addr(DEMO_ROOM_PALETTES)),
                  u32(addr(DEMO_ROOM_MAP)), ROOM_TILES, ROOM_LEFT)
     physics_room(u32(addr(DEMO_ROOM_MAP)))
+    bubbles_air(u32(addr(AIR_ROUND1)))
     bub = actor_new(ACTOR_HARDWARE)
     body_place(PLAYER, START_X, START_Y)
     for i = 0 to ENEMIES - 1

@@ -53,6 +53,7 @@ cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- 
   "$here/bubble-game.mensch" \
   "$here/bubble-physics.mensch" \
   "$here/bubble-bubbles.mensch" \
+  "$here/bubble-air.mensch" \
   "$here/bubble-video.mensch" \
   "$root/lib/vic4.mensch" \
   "$root/lib/actors.mensch" \

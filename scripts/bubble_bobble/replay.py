@@ -47,8 +47,9 @@ INPUT_LEAD = 2
 FIRE_LEAD = 1
 ENEMIES = 3
 LOG = 0x52000
-LOG_BYTES = 56
-LOGGED_BUBBLES = 6
+LOG_BYTES = 80
+LOG_FRAMES = 700
+LOGGED_BUBBLES = 18
 # The arcade's bubbles: records from BUBBLE_BASE, BUBBLE_STRIDE apart;
 # state 2 shooting, 1 floating (then height and x, as the bodies').
 BUBBLE_BASE = 0xE76C
@@ -106,9 +107,9 @@ def run_ours(inputs, lives):
             enemies.append(visible((ex, ey)) if state == 1 else None)
         bubbles = []
         for i in range(LOGGED_BUBBLES):
-            x, y, state = struct.unpack_from("<hhB", rec, 23 + i * 5)
+            x, y, state = struct.unpack_from("<BBB", rec, 23 + i * 3)
             if state in OUR_BUBBLE_STATES:
-                bubbles.append((x, y))
+                bubbles.append((x, y - 40))
         frames.append(((bx, by, bstate), enemies, tuple(sorted(bubbles))))
     return frames
 
@@ -207,8 +208,8 @@ def main():
     parser.add_argument("--frames", type=int, default=600)
     parser.add_argument("--context", type=int, default=6)
     args = parser.parse_args()
-    if args.frames > 1024:
-        sys.exit("at most 1024 frames (the game's replay log)")
+    if args.frames > LOG_FRAMES:
+        sys.exit(f"at most {LOG_FRAMES} frames (the game's replay log)")
     inputs = parse(args.script, args.frames)
     arcade, lives = run_arcade(inputs)
     ours = run_ours(inputs, lives)
