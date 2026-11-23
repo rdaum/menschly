@@ -371,6 +371,9 @@ struct Known {
     /// Whether N/Z currently describe the value in A.
     nz_from_a: bool,
     next_value: usize,
+    /// Memory known to hold a copy of other memory: (copy, original), by
+    /// key, from a store of a register that held the original.
+    copies: Vec<(String, String)>,
 }
 
 const REG_A: usize = 0;
@@ -437,6 +440,15 @@ impl Known {
         for reg in &mut self.regs {
             reg.retain(|key| keep(key));
         }
+        self.copies
+            .retain(|(copy, original)| keep(copy) && keep(original));
+    }
+
+    /// Whether memory `key` holds a copy of a value register `reg` holds.
+    fn holds_copy_of(&self, key: &str, reg: usize) -> bool {
+        self.copies
+            .iter()
+            .any(|(copy, original)| copy == key && self.holds(reg, original))
     }
 
     /// The frame byte `(fp),y` names, when Y is a known immediate.
@@ -491,6 +503,12 @@ impl Known {
                 Some(key) => self.retain_keys(|held| held != key),
                 None => self.retain_keys(|held| !held.starts_with("fp:")),
             },
+            // Through a pointer: Mensch takes no address of compiler-owned
+            // storage (locals, parameters, temporaries), so only the stack
+            // frame may be reached.
+            Operand::IndirectY(_) | Operand::IndirectZ(_) | Operand::FlatZ(_) => {
+                self.retain_keys(|held| !held.starts_with("fp:"))
+            }
             _ => self.clobber_all_memory(),
         }
     }
@@ -614,12 +632,29 @@ fn eliminate_redundant(
             Op::Sta | Op::Stx | Op::Sty | Op::Stz => {
                 let reg = reg_index(op).expect("store register");
                 let key = known.key(operand);
-                if key.as_ref().is_some_and(|key| known.holds(reg, key)) {
+                // The memory already holds the register's value, or a copy
+                // of the memory the register was loaded from.
+                if key
+                    .as_ref()
+                    .is_some_and(|key| known.holds(reg, key) || known.holds_copy_of(key, reg))
+                {
                     delete[i] = true;
                     continue;
                 }
                 known.clobber(operand, 1);
                 if let Some(key) = key {
+                    let originals: Vec<String> = known.regs[reg]
+                        .iter()
+                        .filter(|held| {
+                            held.starts_with("a:")
+                                || held.starts_with("z:")
+                                || held.starts_with("fp:")
+                        })
+                        .cloned()
+                        .collect();
+                    for original in originals {
+                        known.copies.push((key.clone(), original));
+                    }
                     known.regs[reg].push(key);
                 }
             }

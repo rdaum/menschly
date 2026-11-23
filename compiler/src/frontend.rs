@@ -4541,6 +4541,59 @@ impl<'a> RoutineLowerer<'a> {
             }
             _ => {}
         }
+        // A constant with two bits set (3, 5, 6, 10, ...) multiplies as two
+        // shifts and an add.
+        if let (BinaryOp::Mul, Some(value)) = (op, constant) {
+            if value > 0 && value.count_ones() == 2 {
+                let high = 63 - value.leading_zeros() as u8;
+                let low = value.trailing_zeros() as u8;
+                if u16::from(high) < width.size_bytes() * 8 {
+                    // Shifting may use the registers: start from memory.
+                    let base = if matches!(
+                        lhs,
+                        Value::Accumulator | Value::IndexX | Value::IndexY | Value::Register(_)
+                    ) {
+                        let temp = self.parent.temp();
+                        self.body.push(IrInst::Move {
+                            width,
+                            dst: temp.clone(),
+                            src: lhs,
+                        });
+                        temp
+                    } else {
+                        lhs
+                    };
+                    let low_part = self.parent.temp();
+                    if low == 0 {
+                        self.body.push(IrInst::Move {
+                            width,
+                            dst: low_part.clone(),
+                            src: base.clone(),
+                        });
+                    } else {
+                        self.body.push(IrInst::ShiftLeft {
+                            width,
+                            dst: low_part.clone(),
+                            lhs: base.clone(),
+                            rhs: Value::Const(Const::U8(low)),
+                        });
+                    }
+                    self.body.push(IrInst::ShiftLeft {
+                        width,
+                        dst: dst.clone(),
+                        lhs: base,
+                        rhs: Value::Const(Const::U8(high)),
+                    });
+                    self.body.push(IrInst::Add {
+                        width,
+                        dst: dst.clone(),
+                        lhs: dst,
+                        rhs: low_part,
+                    });
+                    return Ok(());
+                }
+            }
+        }
         let rhs = self.expr_value(rhs, &lhs_ty)?;
         self.body.push(IrInst::Binary {
             op,
@@ -6143,7 +6196,7 @@ mod tests {
                 y = x * 16
                 y = x / 4
                 y = x % 8
-                y = x * 3
+                y = x * 7
                 return
             end
         ";
@@ -6177,6 +6230,35 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn multiplication_by_two_bit_constants_is_shifts_and_an_add() {
+        let source = "
+            module Mul
+            export procedure main()
+                var x: u16
+                var y: u16
+                y = x * 10
+                return
+            end
+        ";
+        let module = compile_source(source).unwrap();
+        let body = &module.routines[0].body;
+        assert!(!body.iter().any(|inst| matches!(
+            inst,
+            IrInst::Binary {
+                op: BinaryOp::Mul,
+                ..
+            }
+        )));
+        for count in [1, 3] {
+            assert!(body.iter().any(|inst| matches!(
+                inst,
+                IrInst::ShiftLeft { rhs: Value::Const(Const::U8(c)), .. } if *c == count
+            )));
+        }
+        assert!(body.iter().any(|inst| matches!(inst, IrInst::Add { .. })));
     }
 
     #[test]

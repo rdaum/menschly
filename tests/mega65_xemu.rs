@@ -2213,6 +2213,65 @@ fn constant_shifts_of_every_count_and_width() {
 }
 
 #[test]
+fn multiplication_by_two_bit_constants() {
+    // Constants with two bits set multiply by two shifts and an add; check
+    // them against Rust's wrapping products, in place too.
+    let constants = [3u32, 5, 6, 9, 10, 12, 17, 24, 40, 48, 96, 130, 160, 192];
+    let cases: [(&str, u32, u32); 3] = [("u8", 8, 0xb5), ("u16", 16, 0x9c37), ("i16", 16, 0xfed4)];
+    let mut source = String::from("module Multiply\n");
+    let mut expected = Vec::new();
+    let mut at = 0x1000u32;
+    for (ty, bits, value) in cases {
+        source.push_str(&format!("var v_{ty}: {ty} = ${value:x}\n"));
+        for c in constants {
+            if c >= (1 << bits) {
+                continue;
+            }
+            for in_place in [false, true] {
+                let name = format!("r_{ty}_{c}_{}", if in_place { "p" } else { "e" });
+                source.push_str(&format!("fixed(${at:x}) volatile var {name}: {ty}\n"));
+                let mask = (1u64 << bits) - 1;
+                let product = (u64::from(value) * u64::from(c)) & mask;
+                expected.push((
+                    at,
+                    bits / 8,
+                    product as u32,
+                    format!("{ty} * {c}{}", if in_place { " in place" } else { "" }),
+                ));
+                at += bits / 8;
+            }
+        }
+    }
+    source.push_str("export function main(): u8\n");
+    for (ty, bits, _) in cases {
+        source.push_str(&format!("    var w_{ty}: {ty}\n"));
+        let _ = bits;
+    }
+    for (ty, bits, _) in cases {
+        for c in constants {
+            if c >= (1 << bits) {
+                continue;
+            }
+            source.push_str(&format!("    r_{ty}_{c}_e = v_{ty} * {c}\n"));
+            source.push_str(&format!(
+                "    w_{ty} = v_{ty}\n    w_{ty} = w_{ty} * {c}\n    r_{ty}_{c}_p = w_{ty}\n"
+            ));
+        }
+    }
+    source.push_str("    return 0\nend\n");
+    let Some(run) = run_source("multiply", &source) else {
+        return;
+    };
+    for (at, bytes, product, what) in expected {
+        let at = at as usize;
+        let got = (0..bytes as usize)
+            .map(|i| u32::from(run.memory[at + i]) << (8 * i))
+            .sum::<u32>();
+        assert_eq!(got, product, "{what}");
+    }
+}
+
+#[test]
 fn parallel_arrays_past_256_bytes_index_by_variable() {
     // `wide`'s column starts 200 bytes in and `cell`'s 600: their element
     // addresses are formed from symbol + offset beyond a byte.
