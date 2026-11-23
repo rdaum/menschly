@@ -12,7 +12,8 @@ module Vic4
 #   address space (screen, colour RAM at $FF80000, tiles);
 # - the raster: reading it, waiting for a line, raster interrupts;
 # - the joysticks;
-# - the hardware sprites, with their pointers in a 16-bit table.
+# - the hardware sprites, with their pointers in a 16-bit table, in
+#   single-colour or 16-colour mode.
 #
 # Use it with `import Vic4`.
 #
@@ -48,8 +49,11 @@ fixed($d010) volatile var sprite_x_high: u8
 fixed($d011) volatile var vic_control1: u8
 fixed($d012) volatile var vic_raster: u8
 fixed($d015) volatile var sprite_enable: u8
+fixed($d017) volatile var sprite_tall: u8
 fixed($d019) volatile var vic_irq_status: u8
 fixed($d01a) volatile var vic_irq_mask: u8
+fixed($d01b) volatile var sprite_behind: u8
+fixed($d01d) volatile var sprite_wide: u8
 fixed($d020) volatile var vic_border: u8
 fixed($d021) volatile var vic_background: u8
 fixed($d027) volatile var sprite_colours: [8]u8
@@ -57,6 +61,8 @@ fixed($d027) volatile var sprite_colours: [8]u8
 # VIC-III and VIC-IV registers.
 fixed($d030) volatile var vic3_rom: u8
 fixed($d054) volatile var vic4_control: u8
+fixed($d055) volatile var sprite_extended_height: u8
+fixed($d056) volatile var sprite_height: u8
 fixed($d058) volatile var line_step: u16
 fixed($d05d) volatile var hot_registers: u8
 fixed($d05e) volatile var char_count: u8
@@ -64,6 +70,7 @@ fixed($d060) volatile var screen_pointer: [4]u8
 fixed($d064) volatile var colour_pointer: u16
 fixed($d06b) volatile var sprite_16_colour: u8
 fixed($d06c) volatile var sprite_pointer_address: [3]u8
+fixed($d070) volatile var palette_select: u8
 fixed($d100) volatile var palette_red: [256]u8
 fixed($d200) volatile var palette_green: [256]u8
 fixed($d300) volatile var palette_blue: [256]u8
@@ -112,9 +119,11 @@ var sprite_table: u32
 # ---------------------------------------------------------------- display
 
 # Takes over the VIC-IV: hot registers off, interrupts from the VIC and the
-# CIAs off, the RAM palette for every colour, black border and background.
+# CIAs off, the RAM palette for every colour, palette bank 0 for everything
+# (the machine starts with bank 3), black border and background.
 export procedure vic4_init()
     hot_registers = hot_registers & (HOTREG xor $ff)
+    palette_select = 0
     vic_irq_mask = 0
     vic_irq_status = $ff
     cia1_icr = $7f
@@ -190,6 +199,14 @@ export function vic4_tile_at(address: u32): u16
 end
 
 # ---------------------------------------------------------------- palette
+
+# There are four palettes (banks 0-3) of 256 colours. Text and tiles use
+# bank 0 here; sprites can use another (see vic4_sprite_palette).
+# vic4_palette_set and vic4_palette_load write the bank chosen here.
+export procedure vic4_palette_edit(bank: u8)
+    palette_select = (palette_select & $3f) | (bank & $03) << 6
+    return
+end
 
 # The palette registers hold each 8-bit intensity with its nybbles swapped.
 function swapped(value: u8): u8
@@ -330,8 +347,9 @@ end
 
 # ---------------------------------------------------------------- sprites
 
-# Sprite pointers come from a table of eight 16-bit entries at `table`; each
-# entry is a sprite's data address divided by 64.
+# Sprite pointers come from a table of eight 16-bit entries at `table` (16-
+# byte aligned, below $100000); each entry is a sprite's data address
+# divided by 64.
 export procedure vic4_sprite_table(table: u32)
     sprite_table = table
     sprite_pointer_address[0] = u8(table)
@@ -361,6 +379,8 @@ export procedure vic4_sprite_place(sprite: u8, x: u16, y: u8)
     return
 end
 
+# A single-colour sprite's colour; for a 16-colour sprite, the colour
+# index (0-15) that is transparent.
 export procedure vic4_sprite_colour(sprite: u8, colour: u8)
     sprite_colours[sprite] = colour
     return
@@ -372,9 +392,48 @@ export procedure vic4_sprites_on(mask: u8)
     return
 end
 
-# Selects 16-colour mode (16 pixels wide, a nybble per pixel, 8 bytes per
-# row) for the sprites in `mask`.
+# Selects 16-colour mode for the sprites in `mask`: 16 pixels wide, 8 bytes
+# per row, two pixels per byte with the left one in the high nybble. Sprite
+# n draws with entries n * 16 to n * 16 + 15 of the sprite palette.
 export procedure vic4_sprites_16_colour(mask: u8)
     sprite_16_colour = mask
+    return
+end
+
+# Draws sprites from palette `bank` (0-3).
+export procedure vic4_sprite_palette(bank: u8)
+    palette_select = (palette_select & $f3) | (bank & $03) << 2
+    return
+end
+
+# Loads the 16 colours of 16-colour sprite `sprite` from `rgb` (red, green,
+# blue byte triples) into the sprite palette.
+export procedure vic4_sprite_colours(sprite: u8, rgb: near ^u8)
+    var edited: u8
+    edited = palette_select & $c0
+    palette_select = (palette_select & $3f) | (palette_select & $0c) << 4
+    vic4_palette_load(sprite << 4, 16, rgb)
+    palette_select = (palette_select & $3f) | edited
+    return
+end
+
+# The sprites in `mask` are `rows` rows tall (1-255; they share the height);
+# the others are 21.
+export procedure vic4_sprite_height(rows: u8, mask: u8)
+    sprite_height = rows
+    sprite_extended_height = mask
+    return
+end
+
+# Doubles the width of the sprites in `wide`, the height of those in `tall`.
+export procedure vic4_sprites_double(wide: u8, tall: u8)
+    sprite_wide = wide
+    sprite_tall = tall
+    return
+end
+
+# The sprites in `mask` go behind the tiles' foreground pixels.
+export procedure vic4_sprites_behind(mask: u8)
+    sprite_behind = mask
     return
 end

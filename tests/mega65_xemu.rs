@@ -2266,8 +2266,22 @@ fn vic4_library_sets_up_the_screen_dma_palette_raster_and_sprites() {
         fixed($d214) volatile var green_20: u8
         fixed($d000) volatile var sprite_xy: [4]u8
         fixed($d010) volatile var sprite_x_high: u8
+        fixed($d070) volatile var palette_select: u8
+        fixed($d055) volatile var extended_height: u8
+        fixed($d056) volatile var sprite_height: u8
+        fixed($d06b) volatile var sixteen_colour: u8
+        fixed($d017) volatile var tall: u8
+        fixed($d01d) volatile var wide: u8
+        fixed($d01b) volatile var behind: u8
+        fixed($d100) volatile var red: [256]u8
+        fixed($d300) volatile var blue: [256]u8
+        fixed($0e30) volatile var sprite_out: [12]u8
 
         const PATTERN: [6]u8 = [1, 2, 3, 4, 5, 6]
+        const COLOURS: [48]u8 = [
+            0, 0, 0, $21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, $f0
+        ]
 
         export function main(): u8
             vic4_init()
@@ -2300,6 +2314,26 @@ fn vic4_library_sets_up_the_screen_dma_palette_raster_and_sprites() {
             out[14] = sprite_x_high & 2
             out[15] = u8(vic4_tile_at($40040))
             out[16] = u8(vic4_tile_at($40040) >> 8)
+            red[17] = 0
+            vic4_sprite_palette(1)
+            vic4_sprite_colours(1, addr(COLOURS))
+            vic4_sprites_16_colour($06)
+            vic4_sprite_height(24, $02)
+            vic4_sprites_double($04, $08)
+            vic4_sprites_behind($10)
+            sprite_out[0] = palette_select
+            sprite_out[1] = red[17]
+            vic4_palette_edit(1)
+            sprite_out[2] = red[17]
+            sprite_out[3] = blue[31]
+            vic4_palette_edit(0)
+            sprite_out[4] = sixteen_colour
+            sprite_out[5] = extended_height
+            sprite_out[6] = sprite_height
+            sprite_out[7] = wide
+            sprite_out[8] = tall
+            sprite_out[9] = behind
+            sprite_out[10] = palette_select
             vic4_wait_line(200)
             lines[0] = vic4_raster()
             vic4_wait_line(280)
@@ -2352,6 +2386,12 @@ fn vic4_library_sets_up_the_screen_dma_palette_raster_and_sprites() {
     let line = |i: usize| u16::from_le_bytes([memory[0x0e20 + 2 * i], memory[0x0e21 + 2 * i]]);
     assert!((200..204).contains(&line(0)), "raster {}", line(0));
     assert!((280..284).contains(&line(1)), "raster {}", line(1));
+    // Sprite 1's colours went to entries 16-31 of palette bank 1 (nybbles
+    // swapped), leaving bank 0 alone; the edited bank is back to 0.
+    assert_eq!(
+        &memory[0x0e30..0x0e3b],
+        &[0x04, 0x00, 0x12, 0x0f, 0x06, 0x02, 24, 0x04, 0x08, 0x10, 0x04]
+    );
     let frames = u16::from_le_bytes([memory[0x0e28], memory[0x0e29]]);
     assert!((2..=3).contains(&frames), "{frames} raster interrupts");
 }
@@ -2410,7 +2450,8 @@ fn vic4_demo_draws_its_room_and_sets_up_its_sprite() {
     assert!(memory[0x40000..0x40040].iter().all(|&pixel| pixel == 0));
     assert_eq!(memory[0x40040], 48, "the wall's top row is mortar");
     assert_eq!(memory[0x40080], 56, "the ledge's top row is grass");
-    // Sprite 0 points at $46000 / 64, where the creature was copied.
-    assert_eq!(&memory[0x45000..0x45002], &[0x80, 0x11]);
-    assert_eq!(&memory[0x46000..0x46003], &[0x00, 0x7e, 0x00]);
+    // The hero at $46000 and the wisp at $46080 (pointers / 64).
+    assert_eq!(&memory[0x45000..0x45004], &[0x80, 0x11, 0x82, 0x11]);
+    assert_eq!(&memory[0x46000..0x46008], &[0, 0, 0, 0x11, 0x11, 0, 0, 0]);
+    assert_eq!(&memory[0x46080..0x46088], &[0, 0, 0, 0x01, 0x10, 0, 0, 0]);
 }
