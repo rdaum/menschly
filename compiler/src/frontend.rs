@@ -8,12 +8,78 @@ use crate::ir::{
     Value, Vector, Width,
 };
 
+/// Finds the source text of a module named in an `import`.
+pub trait ModuleSource {
+    fn module_source(&self, name: &str) -> Result<String, String>;
+}
+
+/// No modules to import from.
+pub struct NoModules;
+
+impl ModuleSource for NoModules {
+    fn module_source(&self, name: &str) -> Result<String, String> {
+        Err(format!(
+            "module {name} was not found (no modules to import from)"
+        ))
+    }
+}
+
+/// Modules given as source texts, found by their `module` names.
+pub struct SourceSet {
+    modules: BTreeMap<String, String>,
+}
+
+impl SourceSet {
+    pub fn new<'s>(sources: impl IntoIterator<Item = &'s str>) -> Self {
+        let modules = sources
+            .into_iter()
+            .filter_map(|source| Some((declared_module_name(source)?, source.to_owned())))
+            .collect();
+        Self { modules }
+    }
+}
+
+impl ModuleSource for SourceSet {
+    fn module_source(&self, name: &str) -> Result<String, String> {
+        self.modules
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("module {name} was not found"))
+    }
+}
+
+/// The name in a source's `module` line, read without parsing the rest.
+pub fn declared_module_name(source: &str) -> Option<String> {
+    let tokens = lex(source).ok()?;
+    match (&tokens.first()?.kind, &tokens.get(1)?.kind) {
+        (TokenKind::Ident(keyword), TokenKind::Ident(name)) if keyword == "module" => {
+            Some(name.clone())
+        }
+        _ => None,
+    }
+}
+
 pub fn parse_source(source: &str) -> Result<SourceModule, FrontendError> {
-    Parser::new(lex(source)?)?.parse_module()
+    parse_source_with(source, &NoModules)
+}
+
+/// Parses a module, reading the modules it imports through `modules`.
+pub fn parse_source_with(
+    source: &str,
+    modules: &dyn ModuleSource,
+) -> Result<SourceModule, FrontendError> {
+    Parser::new(lex(source)?, modules, Vec::new()).parse_module()
 }
 
 pub fn compile_source(source: &str) -> Result<Module, FrontendError> {
     lower_module(parse_source(source)?)
+}
+
+pub fn compile_source_with(
+    source: &str,
+    modules: &dyn ModuleSource,
+) -> Result<Module, FrontendError> {
+    lower_module(parse_source_with(source, modules)?)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,12 +101,12 @@ pub struct SourceModule {
 pub struct TypeDecl {
     pub name: String,
     pub ty: Type,
+    pub export: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportDecl {
     pub module: String,
-    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +125,7 @@ pub struct ConstDecl {
     pub name: String,
     pub value: i64,
     pub ty: Type,
+    pub export: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -606,7 +673,7 @@ fn read_number_or_empty(
     Ok((value, digits))
 }
 
-struct Parser {
+struct Parser<'m> {
     tokens: Vec<Token>,
     pos: usize,
     types: BTreeMap<String, Type>,
@@ -614,17 +681,114 @@ struct Parser {
     consts: BTreeMap<String, i64>,
     /// The type declaration being parsed, which may point at itself.
     defining: Option<String>,
+    /// Where imported modules come from.
+    modules: &'m dyn ModuleSource,
+    /// The modules whose imports led to this one, outermost first.
+    importers: Vec<String>,
 }
 
-impl Parser {
-    fn new(tokens: Vec<Token>) -> Result<Self, FrontendError> {
-        Ok(Self {
+/// What a module takes in from the modules it imports: their exported
+/// types, constants and routines.
+#[derive(Default)]
+struct Imported {
+    modules: Vec<String>,
+    types: Vec<TypeDecl>,
+    consts: Vec<ConstDecl>,
+    externals: Vec<ExternalDecl>,
+}
+
+impl<'m> Parser<'m> {
+    fn new(tokens: Vec<Token>, modules: &'m dyn ModuleSource, importers: Vec<String>) -> Self {
+        Self {
             tokens,
             pos: 0,
             types: BTreeMap::new(),
             consts: BTreeMap::new(),
             defining: None,
-        })
+            modules,
+            importers,
+        }
+    }
+
+    /// Parses module `name` for an `import` in module `importer` and takes
+    /// in its exports.
+    fn import_module(
+        &mut self,
+        name: &str,
+        importer: &str,
+        imported: &mut Imported,
+    ) -> Result<(), FrontendError> {
+        if imported.modules.iter().any(|module| module == name) {
+            return Err(FrontendError::Parse(format!(
+                "module {name} is imported twice"
+            )));
+        }
+        let mut chain = self.importers.clone();
+        chain.push(importer.to_owned());
+        if chain.iter().any(|module| module == name) {
+            return Err(FrontendError::Parse(format!(
+                "import cycle: {} -> {name}",
+                chain.join(" -> ")
+            )));
+        }
+        let in_module = |error: FrontendError| {
+            FrontendError::Parse(format!("in imported module {name}: {error}"))
+        };
+        let source = self
+            .modules
+            .module_source(name)
+            .map_err(|error| FrontendError::Parse(format!("import {name}: {error}")))?;
+        let module = Parser::new(lex(&source).map_err(in_module)?, self.modules, chain)
+            .parse_module()
+            .map_err(in_module)?;
+        if module.name != name {
+            return Err(FrontendError::Parse(format!(
+                "import {name}: the source found declares module {}",
+                module.name
+            )));
+        }
+        imported.modules.push(name.to_owned());
+        for decl in module.types.into_iter().filter(|decl| decl.export) {
+            if self
+                .types
+                .insert(decl.name.clone(), decl.ty.clone())
+                .is_some()
+            {
+                return Err(FrontendError::Parse(format!(
+                    "type {} imported from {name} is already declared",
+                    decl.name
+                )));
+            }
+            imported.types.push(TypeDecl {
+                export: false,
+                ..decl
+            });
+        }
+        for decl in module.consts.into_iter().filter(|decl| decl.export) {
+            if self.consts.insert(decl.name.clone(), decl.value).is_some() {
+                return Err(FrontendError::Parse(format!(
+                    "constant {} imported from {name} is already declared",
+                    decl.name
+                )));
+            }
+            imported.consts.push(ConstDecl {
+                export: false,
+                ..decl
+            });
+        }
+        for routine in module.routines.into_iter().filter(|routine| routine.export) {
+            imported.externals.push(ExternalDecl {
+                name: routine.name,
+                kind: routine.kind,
+                result_in_carry: routine.result_in_carry,
+                abi: routine.abi,
+                interrupt_preserve: routine.interrupt_preserve,
+                interrupt_raw: routine.interrupt_raw,
+                interrupt_cop: routine.interrupt_cop,
+                params: routine.params,
+            });
+        }
+        Ok(())
     }
 
     fn parse_module(&mut self) -> Result<SourceModule, FrontendError> {
@@ -643,7 +807,40 @@ impl Parser {
 
         while !self.at_eof() {
             if self.take_keyword("import") {
-                imports.push(self.parse_import_decl()?);
+                let module = self.parse_import_decl()?;
+                let mut imported = Imported {
+                    modules: imports
+                        .iter()
+                        .map(|import: &ImportDecl| import.module.clone())
+                        .collect(),
+                    ..Imported::default()
+                };
+                self.import_module(&module.module, &name, &mut imported)?;
+                types.extend(imported.types);
+                consts.extend(imported.consts);
+                externals.extend(imported.externals);
+                imports.push(module);
+            } else if self.is_keyword_at(0, "export")
+                && (self.is_keyword_at(1, "type") || self.is_keyword_at(1, "const"))
+            {
+                self.take_keyword("export");
+                if self.take_keyword("type") {
+                    types.push(TypeDecl {
+                        export: true,
+                        ..self.parse_type_decl()?
+                    });
+                } else {
+                    self.take_keyword("const");
+                    let ConstOrTable::Const(decl) = self.parse_const_decl()? else {
+                        return Err(self.parse_error(
+                            "only scalar constants can be exported (tables are data)",
+                        ));
+                    };
+                    consts.push(ConstDecl {
+                        export: true,
+                        ..decl
+                    });
+                }
             } else if self.take_keyword("library") {
                 libraries.push(self.parse_library_decl()?);
             } else if self.take_keyword("application") {
@@ -692,13 +889,9 @@ impl Parser {
     }
 
     fn parse_import_decl(&mut self) -> Result<ImportDecl, FrontendError> {
-        let module = self.expect_ident()?;
-        let alias = if self.take_keyword("as") {
-            Some(self.expect_ident()?)
-        } else {
-            None
-        };
-        Ok(ImportDecl { module, alias })
+        Ok(ImportDecl {
+            module: self.expect_ident()?,
+        })
     }
 
     fn parse_library_decl(&mut self) -> Result<LibraryDecl, FrontendError> {
@@ -742,7 +935,11 @@ impl Parser {
         if self.types.insert(name.clone(), ty.clone()).is_some() {
             return Err(FrontendError::Parse(format!("duplicate type {name}")));
         }
-        Ok(TypeDecl { name, ty })
+        Ok(TypeDecl {
+            name,
+            ty,
+            export: false,
+        })
     }
 
     /// `const NAME = expr`, `const NAME: scalar = expr`, or a table:
@@ -785,7 +982,12 @@ impl Parser {
             None => const_type(value),
         };
         self.consts.insert(name.clone(), value);
-        Ok(ConstOrTable::Const(ConstDecl { name, value, ty }))
+        Ok(ConstOrTable::Const(ConstDecl {
+            name,
+            value,
+            ty,
+            export: false,
+        }))
     }
 
     /// An initialiser for a value of type `ty`.
@@ -1961,7 +2163,6 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
         .iter()
         .map(|import| Import {
             module: import.module.clone(),
-            alias: import.alias.clone(),
         })
         .collect();
     module.libraries = source
@@ -5782,7 +5983,6 @@ mod tests {
     fn compiles_application_level_types_and_metadata() {
         let source = "
             module App
-            import Bytes as B
             library strings
             application main
             arena var heap: [16]u8
@@ -5796,8 +5996,6 @@ mod tests {
 
         let module = compile_source(source).unwrap();
 
-        assert_eq!(module.imports[0].module, "Bytes");
-        assert_eq!(module.imports[0].alias.as_deref(), Some("B"));
         assert_eq!(module.libraries[0].name, "strings");
         assert_eq!(module.entry.as_ref().unwrap().routine, "main");
         assert!(module.routines[0].abi == Abi::Exported);
@@ -5814,7 +6012,6 @@ mod tests {
         let asm = crate::ca65::emit_module(&lowered);
 
         assert!(asm.contains("\t.asciiz \"entry.application=main\"\n"));
-        assert!(asm.contains("\t.asciiz \"import.B=Bytes\"\n"));
         assert!(asm.contains("\t.asciiz \"library=strings\"\n"));
         assert!(asm.contains("\t.asciiz \"arena=heap:16\"\n"));
     }
@@ -6070,6 +6267,135 @@ mod tests {
         // Only the end-of-pass test, versus that plus the one before the loop.
         assert_eq!(compares(constant), 1);
         assert_eq!(compares(variable), 2);
+    }
+
+    const SHAPES: &str = "
+        module Shapes
+        export type Point = record(x: u8, y: u8)
+        export const ORIGIN_X = 4
+        export const LIMIT: u16 = ORIGIN_X * 100
+        const PRIVATE = 9
+        type Hidden = record(z: u8)
+
+        export function area(p: near ^Point): u16
+            return u16(p^.x) * u16(p^.y)
+        end
+
+        export stack procedure clear(p: near ^Point)
+            p^.x = 0
+            return
+        end
+
+        function helper(): u8
+            return PRIVATE
+        end
+        ";
+
+    #[test]
+    fn imports_take_in_exported_types_constants_and_routines() {
+        let modules = SourceSet::new([SHAPES]);
+        let module = compile_source_with(
+            "
+            module Plot
+            import Shapes
+            var corner: Point
+            fixed($0800) var out: u16
+
+            export procedure main()
+                corner.x = ORIGIN_X
+                corner.y = 3
+                out = area(addr(corner)) + LIMIT
+                clear(addr(corner))
+                return
+            end
+            ",
+            &modules,
+        )
+        .unwrap();
+        assert_eq!(module.imports[0].module, "Shapes");
+        assert_eq!(module.external_routines, ["area", "clear"]);
+
+        let error = |source: &str| {
+            compile_source_with(source, &modules)
+                .expect_err("source should be rejected")
+                .to_string()
+        };
+        let hidden = error(
+            "
+            module Plot
+            import Shapes
+            export function main(): u8
+                return helper()
+            end
+            ",
+        );
+        assert!(hidden.contains("helper"), "{hidden}");
+        let private = error(
+            "
+            module Plot
+            import Shapes
+            export function main(): u8
+                return PRIVATE
+            end
+            ",
+        );
+        assert!(private.contains("PRIVATE"), "{private}");
+        let clash = error(
+            "
+            module Plot
+            const ORIGIN_X = 1
+            import Shapes
+            ",
+        );
+        assert!(clash.contains("already declared"), "{clash}");
+        let twice = error("module Plot\nimport Shapes\nimport Shapes\n");
+        assert!(twice.contains("imported twice"), "{twice}");
+        let missing = error("module Plot\nimport Lines\n");
+        assert!(missing.contains("module Lines was not found"), "{missing}");
+        let table = compile_error("module T\nexport const TABLE: [2]u8 = [1, 2]\n");
+        assert!(table.contains("only scalar constants"), "{table}");
+    }
+
+    #[test]
+    fn imports_are_not_passed_on_and_cycles_are_rejected() {
+        let modules = SourceSet::new([
+            SHAPES,
+            "
+            module Scene
+            import Shapes
+            export function width(p: near ^Point): u8
+                return p^.x + ORIGIN_X
+            end
+            ",
+            "module Loop1\nimport Loop2\n",
+            "module Loop2\nimport Loop1\n",
+        ]);
+        // Scene's own use of Shapes compiles; Shapes' names do not reach
+        // Scene's importers.
+        let error = compile_source_with(
+            "
+            module Top
+            import Scene
+            export function main(): u8
+                return ORIGIN_X
+            end
+            ",
+            &modules,
+        )
+        .expect_err("ORIGIN_X is not Scene's")
+        .to_string();
+        assert!(error.contains("ORIGIN_X"), "{error}");
+        let error = compile_source_with("module Top\nimport Loop1\n", &modules)
+            .expect_err("a cycle")
+            .to_string();
+        assert!(
+            error.contains("import cycle: Top -> Loop1 -> Loop2 -> Loop1"),
+            "{error}"
+        );
+        let error = compile_source_with("module Loop1\nimport Loop2\n", &modules)
+            .expect_err("a cycle")
+            .to_string();
+        assert!(error.contains("import cycle"), "{error}");
     }
 
     #[test]

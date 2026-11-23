@@ -14,6 +14,8 @@ module Vic4
 # - the joysticks;
 # - the hardware sprites, with their pointers in a 16-bit table.
 #
+# Use it with `import Vic4`.
+#
 # Addresses are linear 28-bit values in a u32 (bank 0 is $00000-$0FFFF,
 # chip RAM runs to $5FFFF, colour RAM is at $FF80000).
 #
@@ -21,7 +23,7 @@ module Vic4
 # to a VIC-II register such as $D011 or $D018 recomputes the screen pointer,
 # line step and borders from VIC-II rules, undoing what this library sets.
 
-const COLOUR_RAM: u32 = $ff80000
+export const COLOUR_RAM: u32 = $ff80000
 
 const CHR16 = $01
 const FCLRHI = $04
@@ -312,11 +314,11 @@ end
 
 # ---------------------------------------------------------------- input
 
-const JOY_UP = $01
-const JOY_DOWN = $02
-const JOY_LEFT = $04
-const JOY_RIGHT = $08
-const JOY_FIRE = $10
+export const JOY_UP = $01
+export const JOY_DOWN = $02
+export const JOY_LEFT = $04
+export const JOY_RIGHT = $08
+export const JOY_FIRE = $10
 
 # Joystick `port` (1 or 2) as JOY_* bits, set while pressed.
 export function joystick(port: u8): u8

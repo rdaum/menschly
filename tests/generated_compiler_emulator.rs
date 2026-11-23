@@ -944,7 +944,6 @@ fn generated_frontend_application_result_program_runs() {
         "frontend-application-result",
         "
         module AppDemo
-        import Bytes as B
         library strings
         application main
         arena var heap: [16]u8

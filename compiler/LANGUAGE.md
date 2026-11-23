@@ -174,6 +174,30 @@ A routine type with parameters must be `stack` (or, equivalently,
 Routines without parameters can be pointed at whatever their ABI, except
 `far` and `interrupt` routines.
 
+## Modules
+
+```text
+module Vic4
+export const JOY_FIRE = $10
+export type Point = record(x: u8, y: u8)
+export procedure vic4_init() ... end
+
+module Game
+import Vic4                     # vic4_init, JOY_FIRE and Point are now known
+```
+
+`import M` takes in what module `M` exports: its exported routines (called
+as if declared `external`), and its `export const` and `export type`
+declarations. Only scalar constants can be exported. Names a module imports
+are its own: they do not pass on to the modules that import it, and an
+imported name may not clash with one already declared. Import cycles are
+rejected.
+
+The compiler finds an imported module among the sources it is given
+together (every module of a MEGA65 kernel or game, for instance) and, for
+`menschc`, in the directories named with `-I`. The imported module must
+still be compiled and linked into the program.
+
 ## Names
 
 Module-level names (globals and routines) cannot be assembler register

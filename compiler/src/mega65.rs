@@ -983,13 +983,15 @@ fn compile_with_budget(
 ) -> Result<Vec<(String, String)>, String> {
     let mut assignments = Vec::new();
     let mut out = Vec::new();
+    let sources =
+        crate::frontend::SourceSet::new(modules.iter().map(|module| module.source.as_str()));
     for module in modules {
         let name = &module.name;
         let used: u16 = assignments
             .iter()
             .map(|assignment: &crate::storage::StorageAssignment| assignment.direct_page_bytes)
             .sum();
-        let ir = crate::frontend::compile_source(&module.source)
+        let ir = crate::frontend::compile_source_with(&module.source, &sources)
             .map_err(|error| format!("{name}: {error}"))?;
         let (mut lowered, assignment) =
             crate::lower_45gs02::lower_module_with_storage_budget(&ir, budget.saturating_sub(used))

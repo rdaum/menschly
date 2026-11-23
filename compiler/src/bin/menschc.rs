@@ -5,7 +5,7 @@ use std::process;
 
 use clap::Parser;
 use mensch_systems_tests::driver::{self, Target};
-use mensch_systems_tests::storage;
+use mensch_systems_tests::{frontend, storage};
 
 fn main() {
     if let Err(error) = run() {
@@ -19,6 +19,11 @@ fn run() -> Result<(), String> {
     if config.sources.is_empty() {
         config.sources.push(PathBuf::from("-"));
     }
+    let mut texts = Vec::new();
+    for path in &config.sources {
+        texts.push(read_source(path)?);
+    }
+    let modules = driver::import_sources(&texts, &config.import_paths)?;
 
     if config.sources.len() > 1 {
         let Some(output_dir) = &config.output else {
@@ -27,15 +32,17 @@ fn run() -> Result<(), String> {
         fs::create_dir_all(output_dir)
             .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
         let mut assignments = Vec::new();
-        for source_path in &config.sources {
+        for (source_path, source) in config.sources.iter().zip(&texts) {
             if source_path == Path::new("-") {
                 return Err("stdin cannot be used with multiple input paths".to_owned());
             }
             let remaining_direct_page = config
                 .direct_page_budget
                 .saturating_sub(assignments_direct_page_bytes(&assignments));
-            let compiled = compile_path(
+            let compiled = compile_text(
                 source_path,
+                source,
+                &modules,
                 config.target,
                 config.storage_report,
                 remaining_direct_page,
@@ -60,8 +67,10 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    let compiled = compile_path(
+    let compiled = compile_text(
         &config.sources[0],
+        &texts[0],
+        &modules,
         config.target,
         config.storage_report,
         config.direct_page_budget,
@@ -89,23 +98,28 @@ struct CompiledSource {
     assignment: storage::StorageAssignment,
 }
 
-fn compile_path(
+fn read_source(path: &Path) -> Result<String, String> {
+    if path != Path::new("-") {
+        return fs::read_to_string(path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()));
+    }
+    let mut source = String::new();
+    io::stdin()
+        .read_to_string(&mut source)
+        .map_err(|error| format!("failed to read stdin: {error}"))?;
+    Ok(source)
+}
+
+fn compile_text(
     path: &Path,
+    source: &str,
+    modules: &dyn frontend::ModuleSource,
     target: Target,
     storage_report: bool,
     direct_page_budget: u16,
 ) -> Result<CompiledSource, String> {
-    let mut source = String::new();
-    if path == Path::new("-") {
-        io::stdin()
-            .read_to_string(&mut source)
-            .map_err(|error| format!("failed to read stdin: {error}"))?;
-    } else {
-        source = fs::read_to_string(path)
-            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-    }
-
-    let compiled = driver::compile_source(&source, target, direct_page_budget)?;
+    let compiled = driver::compile_source_with(source, modules, target, direct_page_budget)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     let assignment = compiled.assignment;
     if storage_report {
         if path == Path::new("-") {
@@ -145,6 +159,11 @@ struct Config {
     #[arg(long, default_value_t = storage::DEFAULT_DIRECT_PAGE_BUDGET)]
     direct_page_budget: u16,
 
+    /// A directory of modules to import from (repeatable); the sources
+    /// given are always importable.
+    #[arg(short = 'I', long = "import-path", value_name = "DIR")]
+    import_paths: Vec<PathBuf>,
+
     /// Target CPU/machine: `65816` (x65-alike) or `mega65` (45GS02).
     #[arg(long, default_value = "65816")]
     target: Target,
@@ -179,8 +198,16 @@ mod tests {
         )
         .expect("source fixture should be written");
 
-        let compiled =
-            compile_path(&path, Target::W65816, false, 2).expect("source should compile");
+        let source = read_source(&path).expect("source should be readable");
+        let compiled = compile_text(
+            &path,
+            &source,
+            &frontend::NoModules,
+            Target::W65816,
+            false,
+            2,
+        )
+        .expect("source should compile");
 
         assert_eq!(compiled.assignment.direct_page_bytes, 2);
         assert!(compiled.asm.contains("$01,s"));

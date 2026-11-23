@@ -68,8 +68,48 @@ pub fn compile_source(
     target: Target,
     direct_page_budget: u16,
 ) -> Result<Compiled, String> {
-    let module = frontend::compile_source(source).map_err(|error| error.to_string())?;
+    compile_source_with(source, &frontend::NoModules, target, direct_page_budget)
+}
+
+/// Compiles a module whose imports are found through `modules`.
+pub fn compile_source_with(
+    source: &str,
+    modules: &dyn frontend::ModuleSource,
+    target: Target,
+    direct_page_budget: u16,
+) -> Result<Compiled, String> {
+    let module =
+        frontend::compile_source_with(source, modules).map_err(|error| error.to_string())?;
     compile_module(&module, target, direct_page_budget)
+}
+
+/// The modules in `sources` and in the `.mensch` files of `directories`,
+/// for imports. A module given in `sources` wins over one in a directory.
+pub fn import_sources(
+    sources: &[String],
+    directories: &[std::path::PathBuf],
+) -> Result<frontend::SourceSet, String> {
+    let mut texts = Vec::new();
+    for directory in directories {
+        let entries = std::fs::read_dir(directory)
+            .map_err(|error| format!("failed to read {}: {error}", directory.display()))?;
+        let mut paths = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "mensch")
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            texts.push(
+                std::fs::read_to_string(&path)
+                    .map_err(|error| format!("failed to read {}: {error}", path.display()))?,
+            );
+        }
+    }
+    texts.extend(sources.iter().cloned());
+    Ok(frontend::SourceSet::new(texts.iter().map(String::as_str)))
 }
 
 pub fn compile_module(

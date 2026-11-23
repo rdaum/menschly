@@ -107,7 +107,6 @@ impl<I> AsmModule<I> {
             .iter()
             .map(|import| ModuleImport {
                 module: import.module.clone(),
-                alias: import.alias.clone(),
             })
             .collect();
         out.libraries = module
@@ -254,7 +253,6 @@ pub struct ModuleMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleImport {
     pub module: String,
-    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

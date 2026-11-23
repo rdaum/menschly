@@ -6,24 +6,7 @@ vector irq = sky
 # interrupt (it shows through the tiles' transparent pixels), and a sprite
 # moved with the joystick in port 2. Run it with scripts/run-vic4-demo.sh.
 
-external procedure vic4_init()
-external procedure vic4_text16(screen: u32, row_chars: u16, colour_offset: u16)
-external procedure vic4_put(column: u8, row: u8, tile: u16)
-external procedure vic4_fill_screen(tile: u16, cells: u16)
-external procedure vic4_fill_colour(offset: u16, low: u8, high: u8, cells: u16)
-external procedure vic4_border(colour: u8)
-external procedure vic4_palette_set(index: u8, red: u8, green: u8, blue: u8)
-external function vic4_tile_at(address: u32): u16
-external procedure dma_fill(dest: u32, value: u8, count: u16)
-external procedure dma_copy(source: u32, dest: u32, count: u16)
-external procedure vic4_wait_line(line: u16)
-external reentrant procedure vic4_raster_irq(line: u16)
-external function joystick(port: u8): u8
-external procedure vic4_sprite_table(table: u32)
-external procedure vic4_sprite_image(sprite: u8, data: u32)
-external procedure vic4_sprite_place(sprite: u8, x: u16, y: u8)
-external procedure vic4_sprite_colour(sprite: u8, colour: u8)
-external procedure vic4_sprites_on(mask: u8)
+import Vic4
 
 # Memory: tiles from $40000, sprite pointers at $45000, sprite images at
 # $46000, the screen at $50000; colour RAM from its start.
@@ -50,12 +33,6 @@ const LEDGE = 2
 const FIRST_LINE = 50
 const BAND_LINES = 8
 const FRAME_LINE = 251
-
-const JOY_UP = $01
-const JOY_DOWN = $02
-const JOY_LEFT = $04
-const JOY_RIGHT = $08
-const JOY_FIRE = $10
 
 # A 24x21 single-colour sprite: a round creature with two eyes.
 const CREATURE: [63]u8 = [

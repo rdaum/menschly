@@ -238,11 +238,7 @@ fn emit_module_metadata<I>(out: &mut String, module: &crate::asm::AsmModule<I>) 
         emit_metadata(out, &format!("entry.{}={}", entry.kind, entry.routine));
     }
     for import in &module.imports {
-        let value = match &import.alias {
-            Some(alias) => format!("import.{}={}", alias, import.module),
-            None => format!("import={}", import.module),
-        };
-        emit_metadata(out, &value);
+        emit_metadata(out, &format!("import={}", import.module));
     }
     for library in &module.libraries {
         emit_metadata(out, &format!("library={}", library.name));

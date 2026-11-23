@@ -2220,26 +2220,6 @@ fn self_referential_records_field_calls_and_element_addresses() {
     );
 }
 
-/// The `external` declarations a program needs to use `lib/vic4.mensch`.
-const VIC4_EXTERNALS: &str = "
-external procedure vic4_init()
-external procedure vic4_text16(screen: u32, row_chars: u16, colour_offset: u16)
-external procedure vic4_put(column: u8, row: u8, tile: u16)
-external procedure vic4_fill_screen(tile: u16, cells: u16)
-external procedure vic4_palette_set(index: u8, red: u8, green: u8, blue: u8)
-external procedure dma_fill(dest: u32, value: u8, count: u16)
-external procedure dma_fill_step(dest: u32, value: u8, count: u16, step: u8)
-external procedure dma_copy(source: u32, dest: u32, count: u16)
-external function vic4_raster(): u16
-external procedure vic4_wait_line(line: u16)
-external reentrant procedure vic4_raster_irq(line: u16)
-external procedure vic4_raster_irq_off()
-external procedure vic4_sprite_table(table: u32)
-external procedure vic4_sprite_image(sprite: u8, data: u32)
-external procedure vic4_sprite_place(sprite: u8, x: u16, y: u8)
-external function vic4_tile_at(address: u32): u16
-";
-
 fn vic4_rom(name: &str, caller: &str) -> (PathBuf, Vec<u8>) {
     let library =
         std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lib/vic4.mensch"))
@@ -2247,7 +2227,7 @@ fn vic4_rom(name: &str, caller: &str) -> (PathBuf, Vec<u8>) {
     let sources = [
         mega65::KernelModule {
             name: "0-caller".to_owned(),
-            source: caller.replace("#EXTERNALS", VIC4_EXTERNALS),
+            source: caller.to_owned(),
             window: None,
         },
         mega65::KernelModule {
@@ -2273,7 +2253,7 @@ fn vic4_library_sets_up_the_screen_dma_palette_raster_and_sprites() {
         "
         module Vic4Test
         vector irq = frame
-        #EXTERNALS
+        import Vic4
         fixed($0e00) volatile var out: [32]u8
         fixed($0e20) volatile var lines: [4]u16
         fixed($0e28) volatile var frames: u16

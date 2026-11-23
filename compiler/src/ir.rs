@@ -130,7 +130,6 @@ pub struct Metadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Import {
     pub module: String,
-    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
