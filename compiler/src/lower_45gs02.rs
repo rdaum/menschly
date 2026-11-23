@@ -220,8 +220,9 @@ pub fn place_in_window(module: &mut AsmModule, bank: u8) -> Result<(), String> {
     for routine in &module.routines {
         for inst in &routine.insts {
             if let Inst::Op(_, Operand::Immediate(text)) = inst {
-                if let Some(symbol) = text.strip_prefix(['<', '>', '^']) {
-                    reach(symbol);
+                if let Some(expression) = text.strip_prefix(['<', '>', '^']) {
+                    let expression = expression.trim_start_matches('(').trim_end_matches(')');
+                    reach(expression.split('+').next().unwrap_or(expression));
                 }
             }
         }
@@ -1287,7 +1288,8 @@ impl<'a> RoutineLowerer<'a> {
                     self.implied(Op::Clc);
                     for (i, part) in ["<", ">"].into_iter().enumerate() {
                         let i = i as u16;
-                        self.emit(Op::Lda, Operand::Immediate(format!("{part}{base}")));
+                        // Parenthesised: ca65 applies `<`/`>` before `+`.
+                        self.emit(Op::Lda, Operand::Immediate(format!("{part}({base})")));
                         self.value_op(Op::Adc, index, i)?;
                         self.emit(Op::Sta, Operand::Base(offset(PTR_SYMBOL, i)));
                     }

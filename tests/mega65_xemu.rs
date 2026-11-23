@@ -2150,6 +2150,36 @@ fn parallel_arrays_store_each_field_as_a_column() {
 }
 
 #[test]
+fn parallel_arrays_past_256_bytes_index_by_variable() {
+    // `wide`'s column starts 200 bytes in and `cell`'s 600: their element
+    // addresses are formed from symbol + offset beyond a byte.
+    let Some(run) = run_source(
+        "parallel-wide",
+        "
+        module ParallelWide
+        type Item = record(tag: u8, wide: u16, cell: u16)
+        var items: parallel [200]Item
+        fixed($0870) volatile var out: [4]u8
+
+        export function main(): u8
+            var i: u8
+            i = 199
+            items[i].cell = $1234
+            items[i].wide = $5678
+            out[0] = u8(items[i].cell)
+            out[1] = u8(items[i].cell >> 8)
+            out[2] = u8(items[i].wide)
+            out[3] = u8(items[i].wide >> 8)
+            return 0
+        end
+        ",
+    ) else {
+        return;
+    };
+    assert_eq!(&run.memory[0x0870..0x0874], &[0x34, 0x12, 0x78, 0x56]);
+}
+
+#[test]
 fn parallel_array_elements_are_only_reached_through_fields() {
     let error = driver::compile_source(
         "
