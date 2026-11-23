@@ -59,7 +59,7 @@ const CAUGHT_FRAMES = 186
 const SAFE_FRAMES = 180
 const CATCH_DISTANCE = 8
 # Frames between bubbles, and of the blowing animation.
-const BLOW_FRAMES = 16
+const BLOW_FRAMES = 22
 # Coming down with up held onto a bubble bounces off it: feet from
 # BOUNCE_ABOVE pixels above its top to BOUNCE_BELOW below, and within
 # BOUNCE_SIDE pixels of it sideways.
@@ -87,6 +87,8 @@ var facing_left: u8
 var walk_step: u8
 # Frames of sideways input, for the step patterns.
 var stride: u8
+# Bubble lives taken from a replay's list.
+var lives_used: u16
 # Moves steered during the current jump.
 var steers: u8
 var caught: u8
@@ -237,6 +239,16 @@ procedure start_round()
     return
 end
 
+# A new bubble's life: the arcade's is 8 to 15 at random; a replay build
+# takes the arcade's own, in order.
+function bubble_life(): u8
+    if REPLAY and lives_used < REPLAY_LIVES_COUNT
+        lives_used = lives_used + 1
+        return REPLAY_LIVES[lives_used - 1]
+    end
+    return 8 + (random() & 7)
+end
+
 # The controls: the joystick, or in a replay build the script's input for
 # frame `frame` (a frame's later reads see the next frame's).
 function read_buttons(frame: u16): u8
@@ -310,7 +322,7 @@ procedure move_bub(buttons: u8)
         walk_step = walk_step + 1
     end
     if (pressed & JOY_FIRE) and blowing == 0
-        b = bubble_blow(body_x(PLAYER), body_y(PLAYER), facing_left)
+        b = bubble_blow(body_x(PLAYER), body_y(PLAYER), facing_left, bubble_life())
         blowing = BLOW_FRAMES
     end
     body_step(PLAYER)
@@ -721,11 +733,13 @@ procedure draw_bubbles()
 end
 
 # Replay builds (replay.py) log each frame here, REPLAY_BYTES apiece, for
-# comparing with the arcade: Bub's x and y (i16), 2 if caught or 1, then
-# per enemy x and y (i16), its state and its motion.
-const REPLAY_LOG: u32 = $58000
-const REPLAY_BYTES = 32
+# comparing with the arcade: Bub's x and y (i16), 2 if caught or 1; per
+# enemy x and y (i16), its state and its motion; then per bubble (the first
+# LOGGED_BUBBLES) x and y (i16) and its state.
+const REPLAY_LOG: u32 = $52000
+const REPLAY_BYTES = 56
 const REPLAY_LIMIT = 1024
+const LOGGED_BUBBLES = 6
 
 procedure log_put16(at: far ^u8, value: i16)
     at[0] = u8(value)
@@ -751,6 +765,11 @@ procedure log_frame()
         log_put16(at + u32(7 + i * 6), body_y(FIRST_ENEMY + i))
         at[9 + u16(i) * 6] = enemy_state[i]
         at[10 + u16(i) * 6] = enemy_motion[i] | (enemy_left[i] << 4)
+    end
+    for i = 0 to LOGGED_BUBBLES - 1
+        log_put16(at + u32(23 + i * 5), bubble_x(i))
+        log_put16(at + u32(25 + i * 5), bubble_y(i))
+        at[27 + u16(i) * 5] = bubble_state(i)
     end
     return
 end

@@ -3265,29 +3265,32 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
             build()
             physics_room(u32(addr(room_map)))
             bubbles_reset()
-            # 1. Blown right from x 40: starts at 48, shoots 48 px.
-            b = bubble_blow(40, 184, 0)
+            # 1. Blown right from x 40 (as the arcade's): shows at 42, then
+            #    shoots 3 px a frame for 21 frames and floats.
+            b = bubble_blow(40, 184, 0, 8)
             out[0] = i16(b)
-            steps(SHOT_FRAMES)
+            steps(1 + SHOT_FRAMES)
             out[1] = bubble_x(b)
             out[2] = i16(bubble_state(b))
-            # 2. Rises half a pixel a frame to y 8, then drifts to the middle.
-            steps(360)
+            # 2. Rises on round 1's air to y 24, goes across to x 104 and bobs
+            #    between y 16 and 24.
+            steps(450)
             out[3] = bubble_y(b)
             out[4] = bubble_x(b)
-            # 3. Bursts when its 600 floating frames run out, then is free.
-            steps(240)
+            # 3. Bursts when its life of 8 runs out (8 * 60 + 23 floating
+            #    frames), then is free.
+            steps(53)
             out[5] = i16(bubble_state(b))
             steps(POP_FRAMES)
             out[6] = i16(bubble_state(b))
             # 4. Blown at the right wall (column 30, x 240): stops at 224.
-            b = bubble_blow(200, 184, 0)
-            steps(8)
+            b = bubble_blow(200, 184, 0, 8)
+            steps(9)
             out[7] = bubble_x(b)
             out[8] = i16(bubble_state(b))
             # 5. A trapped enemy floats, then breaks out after 480 frames.
             bubbles_reset()
-            b = bubble_blow(40, 184, 0)
+            b = bubble_blow(40, 184, 0, 8)
             out[9] = i16(bubble_capture(b, 2))
             out[10] = i16(bubble_state(b))
             steps(479)
@@ -3295,7 +3298,7 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
             steps(1)
             out[12] = i16(bubble_escapee(b))
             # 6. Popping an empty floating bubble frees no one.
-            c = bubble_blow(80, 184, 1)
+            c = bubble_blow(80, 184, 1, 8)
             steps(SHOT_FRAMES)
             out[13] = i16(bubble_pop(c))
             out[14] = i16(bubble_state(c))
@@ -3329,16 +3332,12 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
         .map(|i| i16::from_le_bytes([run.memory[0x0e00 + 2 * i], run.memory[0x0e01 + 2 * i]]))
         .collect();
     // States: free 0, shot 1, float 2, pop 3; no captive is $FF (-1 as i16 of u8 is 255).
-    assert_eq!(
-        &out[0..3],
-        &[0, 96, 2],
-        "shoots 48 px from x 48, then floats"
-    );
-    assert_eq!(out[3], 8, "rises to just under the ceiling");
+    assert_eq!(&out[0..3], &[0, 105, 2], "shoots 63 px from x 42, then floats");
     assert!(
-        out[4] > 96 && out[4] <= 120,
-        "drifts toward the middle: {}",
-        out[4]
+        (16..=24).contains(&out[3]) && out[4] == 104,
+        "bobs at round 1's gathering point: ({}, {})",
+        out[4],
+        out[3]
     );
     assert_eq!(&out[5..7], &[3, 0], "bursts, then is free");
     assert_eq!(&out[7..9], &[224, 2], "stops at the wall and floats");

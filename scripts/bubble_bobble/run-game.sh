@@ -40,7 +40,7 @@ fi
 # otherwise the game reads the joystick.
 replay="${REPLAY_MODULE:-$assets/game-replay.mensch}"
 if [[ -z "${REPLAY_MODULE:-}" ]]; then
-  printf 'module GameReplay\nexport const REPLAY = 0\nexport const REPLAY_FRAMES = 1\nexport const REPLAY_INPUT: [1]u8 = [0]\n' > "$replay"
+  printf 'module GameReplay\nexport const REPLAY = 0\nexport const REPLAY_FRAMES = 1\nexport const REPLAY_INPUT: [1]u8 = [0]\nexport const REPLAY_LIVES_COUNT = 0\nexport const REPLAY_LIVES: [1]u8 = [0]\n' > "$replay"
 fi
 
 # 2. Build the ROM, then boot it windowed.
