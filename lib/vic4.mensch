@@ -63,6 +63,7 @@ fixed($d030) volatile var vic3_rom: u8
 fixed($d054) volatile var vic4_control: u8
 fixed($d055) volatile var sprite_extended_height: u8
 fixed($d056) volatile var sprite_height: u8
+fixed($d057) volatile var sprite_extended_width: u8
 fixed($d058) volatile var line_step: u16
 fixed($d05d) volatile var hot_registers: u8
 fixed($d05e) volatile var char_count: u8
@@ -396,6 +397,7 @@ end
 # per row, two pixels per byte with the left one in the high nybble. Sprite
 # n draws with entries n * 16 to n * 16 + 15 of the sprite palette.
 export procedure vic4_sprites_16_colour(mask: u8)
+    sprite_extended_width = (sprite_extended_width & (sprite_16_colour xor $ff)) | mask
     sprite_16_colour = mask
     return
 end

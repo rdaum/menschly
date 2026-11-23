@@ -2281,6 +2281,7 @@ fn vic4_library_sets_up_the_screen_dma_palette_raster_and_sprites() {
         fixed($d070) volatile var palette_select: u8
         fixed($d055) volatile var extended_height: u8
         fixed($d056) volatile var sprite_height: u8
+        fixed($d057) volatile var extended_width: u8
         fixed($d06b) volatile var sixteen_colour: u8
         fixed($d017) volatile var tall: u8
         fixed($d01d) volatile var wide: u8
@@ -2346,6 +2347,7 @@ fn vic4_library_sets_up_the_screen_dma_palette_raster_and_sprites() {
             sprite_out[8] = tall
             sprite_out[9] = behind
             sprite_out[10] = palette_select
+            sprite_out[11] = extended_width
             vic4_wait_line(200)
             lines[0] = vic4_raster()
             vic4_wait_line(280)
@@ -2401,8 +2403,8 @@ fn vic4_library_sets_up_the_screen_dma_palette_raster_and_sprites() {
     // Sprite 1's colours went to entries 16-31 of palette bank 1 (nybbles
     // swapped), leaving bank 0 alone; the edited bank is back to 0.
     assert_eq!(
-        &memory[0x0e30..0x0e3b],
-        &[0x04, 0x00, 0x12, 0x0f, 0x06, 0x02, 24, 0x04, 0x08, 0x10, 0x04]
+        &memory[0x0e30..0x0e3c],
+        &[0x04, 0x00, 0x12, 0x0f, 0x06, 0x02, 24, 0x04, 0x08, 0x10, 0x04, 0x06]
     );
     let frames = u16::from_le_bytes([memory[0x0e28], memory[0x0e29]]);
     assert!((2..=3).contains(&frames), "{frames} raster interrupts");
