@@ -43,6 +43,7 @@ cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- 
   --work-dir "$assets/build" \
   "$here/bubble-demo.mensch" \
   "$here/bubble-anim.mensch" \
+  "$here/bubble-video.mensch" \
   "$root/lib/vic4.mensch" \
   "$assets/bubble-demo-data.mensch"
 

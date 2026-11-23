@@ -13,44 +13,59 @@ module BubbleDemo
 import Vic4
 import BubbleAnim
 import BubbleDemoData
+import BubbleVideo
 
 # The VIC-IV reads the sprite pointer table from a 16-byte boundary and each
 # image from a 64-byte one, so both go at fixed chip-RAM addresses (as in
 # examples/vic4-demo.mensch) and the images are copied there by DMA.
 const SPRITE_TABLE: u32 = $45000
 const SPRITE_IMAGES: u32 = $46000
+# Room 1's twelve full-colour characters (character $1100 on).
+const ROOM_TILES: u32 = $44000
 
 # Sprite slots, one per cycle.
 const SLOTS: [6]u8 = [0, 1, 2, 3, 4, 5]
 
 const SPRITES = 6
-const FIRST_Y = 80
-const ROW_GAP = 12
-const FIRST_X = 60
-const COLUMN_GAP = 48
+
+# Where each cycle stands, in room cells: the sprite's left column and top
+# row. A 16x16 sprite is two cells square, so one standing on a platform in
+# row R has its top in row R - 2. Room 1's floor is row 25 and its platforms
+# are rows 10, 15 and 20.
+const STAND_COLUMN: [SPRITES]u8 = [6, 23, 9, 18, 12, 20]
+const STAND_ROW: [SPRITES]u8 = [23, 23, 18, 13, 8, 4]
 
 # Screen frames each animation frame is held for.
 const HOLD = 4
 
-# Screen memory for the 40x25 text screen the demo draws on.
+# The screen: 40 columns by 26 rows, the room's 32 columns centred.
 const SCREEN: u32 = $50000
 const COLUMNS = 40
-const ROWS = 25
+const ROWS = 26
+const ROOM_LEFT = (COLUMNS - 32) / 2
+
+# Sprite coordinates of the top-left of screen cell (0, 0).
+const CELL_X = 24
+const CELL_Y = 46
 
 export function main(): u8
     var cycle: u8
     dma_copy(u32(addr(DEMO_IMAGES)), SPRITE_IMAGES, DEMO_CELLS * 128)
     vic4_init()
     vic4_text16(SCREEN, COLUMNS, 0)
+    vic4_text_rows(ROWS)
+    vic4_fill_screen(0, COLUMNS * ROWS)
     vic4_fill_colour(0, 0, 0, COLUMNS * ROWS)
     vic4_border(0)
     vic4_background(0)
+    bb_draw_room(1, 0, u32(addr(DEMO_ROOM_TILES)), u32(addr(DEMO_ROOM_PALETTES)),
+                 u32(addr(DEMO_ROOM_MAP)), ROOM_TILES, ROOM_LEFT)
     anim_init(SPRITE_TABLE, SPRITES)
     anim_cycles()
     for cycle = 0 to SPRITES - 1
         anim_place(SLOTS[cycle],
-                   FIRST_X + u16(cycle) * COLUMN_GAP,
-                   FIRST_Y + cycle * ROW_GAP)
+                   CELL_X + (u16(ROOM_LEFT + STAND_COLUMN[cycle]) << 3),
+                   CELL_Y + (STAND_ROW[cycle] << 3))
     end
     anim_on($3f)
     anim_run(addr(SLOTS), SPRITE_IMAGES, u32(addr(DEMO_PALETTES)), HOLD, 255)

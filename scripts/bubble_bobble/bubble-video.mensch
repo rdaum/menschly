@@ -23,9 +23,10 @@ export procedure bb_sprite_frame(slot: u8, frame: u16, images: u32, palettes: u3
     return
 end
 
-# Draw a one-based room into an initialized 32-column or wider FCM screen.
+# Draw a one-based room into an initialized FCM screen of at least 26 rows
+# and `left` + 32 columns, with its left edge in column `left`.
 # tile_ram is a 64-byte aligned FCM destination for this room's 12 characters.
-export procedure bb_draw_room(room: u8, super_mode: u8, characters: u32, palettes: u32, maps: u32, tile_ram: u32)
+export procedure bb_draw_room(room: u8, super_mode: u8, characters: u32, palettes: u32, maps: u32, tile_ram: u32, left: u8)
     var number: u32
     var offset: u32
     var cell: far ^u8
@@ -49,7 +50,7 @@ export procedure bb_draw_room(room: u8, super_mode: u8, characters: u32, palette
     first_tile = vic4_tile_at(tile_ram)
     for y = 0 to 25
         for x = 0 to 31
-            vic4_put(x, y, first_tile + u16(cell^))
+            vic4_put(left + x, y, first_tile + u16(cell^))
             cell = cell + 1
         end
     end

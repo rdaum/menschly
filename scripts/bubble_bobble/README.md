@@ -103,8 +103,9 @@ import Vic4
 # Inside initialization, with room 1 staged:
 vic4_init()
 vic4_text16(SCREEN, 32, 0)
+vic4_text_rows(26)
 vic4_fill_colour(0, 0, 0, 32 * 26)
-bb_draw_room(1, 0, LEVEL_TILES, LEVEL_PALETTES, ROOM_MAPS, TILE_RAM)
+bb_draw_room(1, 0, LEVEL_TILES, LEVEL_PALETTES, ROOM_MAPS, TILE_RAM, 0)
 bb_sprites_init(SPRITE_TABLE, $01, 1)
 bb_sprite_frame(0, BUBBLUN_WALK_01, SPRITE_IMAGES, SPRITE_PALETTES)
 vic4_sprite_place(0, 120, 100)
@@ -112,7 +113,8 @@ vic4_sprites_on($01)
 ```
 
 The example names in capitals other than the generated frame name are
-application-supplied addresses. The room wrapper writes 26 screen rows;
-reserve that screen memory and choose a display height or viewport accordingly.
-Its second argument selects normal (0) or super (nonzero) colours. Sprites
+application-supplied addresses. The room wrapper writes 26 screen rows, so
+reserve that screen memory; `vic4_text_rows(26)` shows them all. Its second
+argument selects normal (0) or super (nonzero) colours, and its last the
+screen column of the room's left edge. Sprites
 use palette bank 1 in this example, leaving bank 0 for the room.
