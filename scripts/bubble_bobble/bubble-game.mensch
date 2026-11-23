@@ -28,7 +28,7 @@ const SCREEN: u32 = $50000
 
 const COLUMNS = 40
 const ROWS = 26
-const SLOTS = 24
+const SLOTS = 32
 const ENTRIES = 32
 const ROOM_LEFT = (COLUMNS - 32) / 2
 const ROOM_X = ROOM_LEFT * 8
@@ -431,6 +431,8 @@ export function main(): u8
     body_place(PLAYER, START_X, START_Y)
     for i = 0 to ENEMIES - 1
         enemy_actor[i] = actor_new(ACTOR_SOFTWARE)
+        # Enemies never lose their slots to bubbles.
+        actor_priority(enemy_actor[i], 1)
     end
     for i = 0 to MAX_BUBBLES - 1
         bubble_actor[i] = actor_new(ACTOR_SOFTWARE)

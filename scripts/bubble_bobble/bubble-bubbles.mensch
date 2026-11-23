@@ -11,7 +11,7 @@ module BubbleBubbles
 
 import BubblePhysics
 
-export const MAX_BUBBLES = 20
+export const MAX_BUBBLES = 40
 export const NO_BUBBLE = $ff
 export const NO_CAPTIVE = $ff
 
