@@ -1448,6 +1448,15 @@ fn rewrite_address(
         },
         Address::NearPtr(value) => Address::NearPtr(rewrite_value(value, layout, direct_aliases)),
         Address::FarPtr(value) => Address::FarPtr(rewrite_value(value, layout, direct_aliases)),
+        Address::PointerOffset {
+            pointer,
+            far,
+            offset,
+        } => Address::PointerOffset {
+            pointer: rewrite_value(pointer, layout, direct_aliases),
+            far: *far,
+            offset: *offset,
+        },
         Address::Indexed {
             base,
             index,
@@ -2046,6 +2055,9 @@ fn collect_temp_address(addr: &Address, out: &mut Vec<(String, u16)>) {
         Address::ValueOffset { base, .. } => collect_temp_value(base, 2, out),
         Address::NearPtr(value) => collect_temp_value(value, 2, out),
         Address::FarPtr(value) => collect_temp_value(value, 4, out),
+        Address::PointerOffset { pointer, far, .. } => {
+            collect_temp_value(pointer, if *far { 4 } else { 2 }, out)
+        }
         Address::Indexed { index, .. } => collect_temp_value(index, 2, out),
         _ => {}
     }
@@ -2053,7 +2065,9 @@ fn collect_temp_address(addr: &Address, out: &mut Vec<(String, u16)>) {
 
 fn collect_direct_required_address(addr: &Address, out: &mut BTreeSet<BindingKey>) {
     match addr {
-        Address::NearPtr(value) | Address::FarPtr(value) => {
+        Address::NearPtr(value)
+        | Address::FarPtr(value)
+        | Address::PointerOffset { pointer: value, .. } => {
             collect_direct_required_value(value, out);
         }
         _ => {}
@@ -2077,6 +2091,7 @@ fn collect_local_address(addr: &Address, out: &mut Vec<String>) {
         Address::ValueOffset { base, .. } => collect_local_value(base, out),
         Address::NearPtr(value) => collect_local_value(value, out),
         Address::FarPtr(value) => collect_local_value(value, out),
+        Address::PointerOffset { pointer, .. } => collect_local_value(pointer, out),
         Address::Indexed { index, .. } => collect_local_value(index, out),
         _ => {}
     }
@@ -2087,6 +2102,7 @@ fn collect_param_address(addr: &Address, out: &mut Vec<String>) {
         Address::ValueOffset { base, .. } => collect_param_value(base, out),
         Address::NearPtr(value) => collect_param_value(value, out),
         Address::FarPtr(value) => collect_param_value(value, out),
+        Address::PointerOffset { pointer, .. } => collect_param_value(pointer, out),
         Address::Indexed { index, .. } => collect_param_value(index, out),
         _ => {}
     }

@@ -745,8 +745,89 @@ pub enum Address {
     },
     NearPtr(Value),
     FarPtr(Value),
+    /// `offset` bytes past a near or far pointer. The 45GS02 reaches it by
+    /// starting Z at `offset`; `legalize_pointer_offsets` turns it into a
+    /// computed pointer for targets that do not.
+    PointerOffset {
+        pointer: Value,
+        far: bool,
+        offset: u8,
+    },
     Absolute(u32),
     AbsoluteIndexedX(u32),
+}
+
+/// The largest `PointerOffset` offset: its last byte, of a 4-byte value,
+/// must still be within 255 of the pointer.
+pub const MAX_POINTER_OFFSET: u16 = 0xfb;
+
+/// Rewrites every `PointerOffset` access into a copy of the pointer, plus
+/// the offset, used as a plain pointer: for targets with no indexed form to
+/// fold the offset into. Temporaries are named `__pointer_offset_N`.
+pub fn legalize_pointer_offsets(module: &Module) -> Module {
+    let mut out = module.clone();
+    let mut temps = 0usize;
+    for routine in &mut out.routines {
+        let mut body = Vec::with_capacity(routine.body.len());
+        for inst in routine.body.drain(..) {
+            let (addr, rebuild): (Address, Box<dyn Fn(Address) -> IrInst>) = match inst {
+                IrInst::Load { width, dst, addr } => (
+                    addr,
+                    Box::new(move |addr| IrInst::Load {
+                        width,
+                        dst: dst.clone(),
+                        addr,
+                    }),
+                ),
+                IrInst::Store { width, addr, src } => (
+                    addr,
+                    Box::new(move |addr| IrInst::Store {
+                        width,
+                        addr,
+                        src: src.clone(),
+                    }),
+                ),
+                other => {
+                    body.push(other);
+                    continue;
+                }
+            };
+            let Address::PointerOffset {
+                pointer,
+                far,
+                offset,
+            } = addr
+            else {
+                body.push(rebuild(addr));
+                continue;
+            };
+            let temp = Value::Temp(format!("__pointer_offset_{temps}"));
+            temps += 1;
+            let (width, offset) = if far {
+                (Width::Quad, Const::U32(u32::from(offset)))
+            } else {
+                (Width::Word, Const::U16(u16::from(offset)))
+            };
+            body.push(IrInst::Move {
+                width,
+                dst: temp.clone(),
+                src: pointer,
+            });
+            body.push(IrInst::Add {
+                width,
+                dst: temp.clone(),
+                lhs: temp.clone(),
+                rhs: Value::Const(offset),
+            });
+            body.push(rebuild(if far {
+                Address::FarPtr(temp)
+            } else {
+                Address::NearPtr(temp)
+            }));
+        }
+        routine.body = body;
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

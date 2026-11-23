@@ -1293,7 +1293,7 @@ impl<'a> RoutineLowerer<'a> {
                         self.value_op(Op::Adc, index, i)?;
                         self.emit(Op::Sta, Operand::Base(offset(PTR_SYMBOL, i)));
                     }
-                    (AddressForm::IndirectZ(PTR_SYMBOL.to_owned()), true)
+                    (AddressForm::IndirectZ(PTR_SYMBOL.to_owned(), 0), true)
                 }
             }
             Address::Absolute(address) => {
@@ -1319,15 +1319,28 @@ impl<'a> RoutineLowerer<'a> {
             },
             Address::NearPtr(pointer) => {
                 let base = self.pointer_in_base_page(pointer)?;
-                (AddressForm::IndirectZ(base), true)
+                (AddressForm::IndirectZ(base, 0), true)
             }
             Address::FarPtr(pointer) => {
-                // Copy the 32-bit far pointer into the flat pointer.
-                for i in 0..4 {
-                    self.load_byte_to_a(pointer, i)?;
-                    self.emit(Op::Sta, Operand::Base(offset(FARP_SYMBOL, i)));
-                }
-                (AddressForm::FlatZ(FARP_SYMBOL.to_owned()), true)
+                let base = self.far_pointer_in_base_page(pointer)?;
+                (AddressForm::FlatZ(base, 0), true)
+            }
+            // The offset goes in Z: no copy of the pointer plus offset.
+            Address::PointerOffset {
+                pointer,
+                far: false,
+                offset: start,
+            } => {
+                let base = self.pointer_in_base_page(pointer)?;
+                (AddressForm::IndirectZ(base, *start), true)
+            }
+            Address::PointerOffset {
+                pointer,
+                far: true,
+                offset: start,
+            } => {
+                let base = self.far_pointer_in_base_page(pointer)?;
+                (AddressForm::FlatZ(base, *start), true)
             }
         })
     }
@@ -1354,6 +1367,19 @@ impl<'a> RoutineLowerer<'a> {
         Ok(PTR_SYMBOL.to_owned())
     }
 
+    /// Returns a base-page symbol holding the far pointer `pointer`, copying
+    /// it into the flat pointer when it lives elsewhere.
+    fn far_pointer_in_base_page(&mut self, pointer: &Value) -> Result<String, LowerError> {
+        if let Value::Direct(name) = pointer {
+            return Ok(name.clone());
+        }
+        for i in 0..4 {
+            self.load_byte_to_a(pointer, i)?;
+            self.emit(Op::Sta, Operand::Base(offset(FARP_SYMBOL, i)));
+        }
+        Ok(FARP_SYMBOL.to_owned())
+    }
+
     /// Emits `op` (LDA or STA) on byte `i` of an address form.
     fn address_op(&mut self, op: Op, form: &AddressForm, i: u16) -> Result<(), LowerError> {
         match form {
@@ -1364,15 +1390,17 @@ impl<'a> RoutineLowerer<'a> {
                 let fp_offset = self.frame_offset(stack_offset + i)?;
                 self.frame_op(op, fp_offset);
             }
-            AddressForm::IndirectZ(name) => {
-                if i > 0 {
-                    self.emit(Op::Ldz, Operand::imm_byte(i as u8));
+            AddressForm::IndirectZ(name, start) => {
+                let z = u16::from(*start) + i;
+                if z > 0 {
+                    self.emit(Op::Ldz, Operand::imm_byte(z as u8));
                 }
                 self.emit(op, Operand::IndirectZ(name.clone()));
             }
-            AddressForm::FlatZ(name) => {
-                if i > 0 {
-                    self.emit(Op::Ldz, Operand::imm_byte(i as u8));
+            AddressForm::FlatZ(name, start) => {
+                let z = u16::from(*start) + i;
+                if z > 0 {
+                    self.emit(Op::Ldz, Operand::imm_byte(z as u8));
                 }
                 self.emit(op, Operand::FlatZ(name.clone()));
             }
@@ -1387,7 +1415,7 @@ impl<'a> RoutineLowerer<'a> {
             self.address_op(Op::Lda, &form, i)?;
             self.store_a_to_byte(dst, i)?;
         }
-        if uses_z && bytes > 1 {
+        if uses_z && (bytes > 1 || form.z_start() > 0) {
             self.emit(Op::Ldz, Operand::imm_byte(0));
         }
         Ok(())
@@ -1400,7 +1428,7 @@ impl<'a> RoutineLowerer<'a> {
             self.load_byte_to_a(src, i)?;
             self.address_op(Op::Sta, &form, i)?;
         }
-        if uses_z && bytes > 1 {
+        if uses_z && (bytes > 1 || form.z_start() > 0) {
             self.emit(Op::Ldz, Operand::imm_byte(0));
         }
         Ok(())
@@ -1413,8 +1441,19 @@ enum AddressForm {
     Base(String),
     /// Frame bytes, by storage-pass stack offset (remapped when emitted).
     Frame(u16),
-    IndirectZ(String),
-    FlatZ(String),
+    /// Through a base-page pointer, by Z from a starting offset.
+    IndirectZ(String, u8),
+    FlatZ(String, u8),
+}
+
+impl AddressForm {
+    /// Where Z starts for byte 0 of a Z-indexed form.
+    fn z_start(&self) -> u8 {
+        match self {
+            AddressForm::IndirectZ(_, start) | AddressForm::FlatZ(_, start) => *start,
+            _ => 0,
+        }
+    }
 }
 
 trait WidthExt {
@@ -1505,3 +1544,69 @@ impl fmt::Display for LowerError {
 }
 
 impl std::error::Error for LowerError {}
+
+#[cfg(test)]
+mod tests {
+    use crate::driver::{compile_source, Target, DEFAULT_DIRECT_PAGE_BUDGET};
+
+    const FIELDS: &str = "
+        module Fields
+        type Pair = record(a: u8, b: u16, c: u8)
+        export function read_b(p: near ^Pair): u16
+            return p^.b
+        end
+        export procedure write_c(p: far ^Pair, v: u8)
+            p^.c = v
+            return
+        end
+        ";
+
+    fn routine<'a>(asm: &'a str, name: &str) -> &'a str {
+        let start = asm
+            .find(&format!(".proc {name}\n"))
+            .expect("routine emitted");
+        let end = asm[start..].find(".endproc").expect("routine ends") + start;
+        &asm[start..end]
+    }
+
+    #[test]
+    fn constant_offsets_through_pointers_start_z_at_the_offset() {
+        let asm = compile_source(FIELDS, Target::Mega65, DEFAULT_DIRECT_PAGE_BUDGET)
+            .unwrap()
+            .asm;
+        // The near pointer is read in place, from Z = 1 and 2; Z ends at 0.
+        let read = routine(&asm, "read_b");
+        assert!(read.contains("lda (__dp_read_b_param_p),z"), "{read}");
+        assert!(
+            !read.contains("adc") && !read.contains("__m65_ptr"),
+            "{read}"
+        );
+        assert!(read.contains("ldz #$00"), "{read}");
+        // The far pointer stays in its base-page parameter; Z = 3 for `c`.
+        let write = routine(&asm, "write_c");
+        assert!(
+            write.contains("ldz #$03\n\tsta [__dp_write_c_param_p],z"),
+            "{write}"
+        );
+        assert!(
+            !write.contains("__m65_farp") && !write.contains("adc"),
+            "{write}"
+        );
+    }
+
+    #[test]
+    fn other_targets_get_pointer_offsets_as_computed_pointers() {
+        // Near only: the 65816 has no 32-bit arithmetic for far pointers yet.
+        let near = FIELDS.split("export procedure write_c").next().unwrap();
+        let asm = compile_source(near, Target::W65816, DEFAULT_DIRECT_PAGE_BUDGET)
+            .unwrap()
+            .asm;
+        // The 65816 adds the offset to a copy of the pointer and reads
+        // through the copy, as before.
+        let read = routine(&asm, "read_b");
+        assert!(
+            read.contains("inc __dp_scratch_0\n\tlda (__dp_scratch_0)"),
+            "{read}"
+        );
+    }
+}

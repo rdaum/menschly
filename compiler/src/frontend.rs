@@ -3692,6 +3692,16 @@ impl<'a> RoutineLowerer<'a> {
                 pointer,
                 far,
                 offset,
+                index: None,
+            } if offset <= crate::ir::MAX_POINTER_OFFSET => Address::PointerOffset {
+                pointer,
+                far,
+                offset: offset as u8,
+            },
+            Place::Pointer {
+                pointer,
+                far,
+                offset,
                 index,
             } => {
                 // Form pointer + index + offset in a temporary.

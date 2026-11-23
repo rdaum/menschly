@@ -1,8 +1,8 @@
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, ArgRegister, BinaryOp, Const, CopRegister, InterruptPreserve, IrInst, Label,
-    Module, Routine, RoutineKind, Type, Value, Width,
+    legalize_pointer_offsets, Abi, Address, ArgRegister, BinaryOp, Const, CopRegister,
+    InterruptPreserve, IrInst, Label, Module, Routine, RoutineKind, Type, Value, Width,
 };
 use crate::optimize_65816::optimize_module;
 use crate::storage::{
@@ -114,7 +114,8 @@ const MATH_ROUTINE_SOURCE: [(&str, &str); 3] = [
     ),
 ];
 pub fn lower_module(module: &Module) -> Result<AsmModule, LowerError> {
-    Ok(optimize_module(&lower_module_unoptimized(module)?))
+    let module = legalize_pointer_offsets(module);
+    Ok(optimize_module(&lower_module_unoptimized(&module)?))
 }
 
 fn lower_module_unoptimized(module: &Module) -> Result<AsmModule, LowerError> {
@@ -195,16 +196,18 @@ fn lower_module_declarations(module: &Module, out: &mut AsmModule) {
 pub fn lower_module_with_storage(
     module: &Module,
 ) -> Result<(AsmModule, StorageAssignment), LowerError> {
-    let assignment = assign_storage(module);
-    lower_module_with_assignment(module, assignment)
+    let module = legalize_pointer_offsets(module);
+    let assignment = assign_storage(&module);
+    lower_module_with_assignment(&module, assignment)
 }
 
 pub fn lower_module_with_storage_budget(
     module: &Module,
     direct_page_budget: u16,
 ) -> Result<(AsmModule, StorageAssignment), LowerError> {
-    let assignment = assign_storage_with_budget(module, direct_page_budget);
-    lower_module_with_assignment(module, assignment)
+    let module = legalize_pointer_offsets(module);
+    let assignment = assign_storage_with_budget(&module, direct_page_budget);
+    lower_module_with_assignment(&module, assignment)
 }
 
 fn lower_module_with_assignment(
@@ -1093,6 +1096,9 @@ fn operand_for_address(addr: &Address, outgoing_stack_bytes: u16) -> Result<Oper
         Address::Symbol(name) => Ok(Operand::Absolute(Symbol::Named(name.clone()))),
         Address::SymbolIndexedX(name) => Ok(Operand::AbsoluteIndexedX(Symbol::Named(name.clone()))),
         Address::Indexed { .. } => unreachable!("indexed addresses are prepared by the caller"),
+        Address::PointerOffset { .. } => {
+            unreachable!("pointer offsets are legalized before lowering")
+        }
         Address::Direct(name) => Ok(Operand::Direct(Symbol::Named(name.clone()))),
         Address::ValueOffset { base, offset } => {
             operand_for_value_offset(base, *offset, outgoing_stack_bytes)
