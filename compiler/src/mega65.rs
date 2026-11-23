@@ -1010,6 +1010,14 @@ fn compile_with_budget(
 /// Assembles and links generated modules with the runtime into a ROM image.
 ///
 /// `modules` are `(name, ca65 source)` pairs. Intermediate files go in `dir`.
+/// A closed-ROM style version stamp ("V" and a YYMMDD-like date) at offset
+/// `$16`. Xemu reads it to choose the DMA chip revision and otherwise stops
+/// at boot with a "ROM version cannot be detected" dialog. 920000 selects
+/// F018B (revision 1), which the runtime's DMA lists use. The first `$2000`
+/// bytes of the file are never copied into RAM, so the stamp is inert.
+const ROM_VERSION_OFFSET: usize = 0x16;
+const ROM_VERSION: &[u8] = b"V920000";
+
 pub fn build_rom(dir: &Path, modules: &[(&str, &str)]) -> Result<Vec<u8>, String> {
     let windowed = modules
         .iter()
@@ -1020,13 +1028,14 @@ pub fn build_rom(dir: &Path, modules: &[(&str, &str)]) -> Result<Vec<u8>, String
     } else {
         ("bank0", BANK0_SERVICES)
     });
-    let image = link(dir, "kernel", &linker_config(windowed), &runtime, modules)?;
+    let mut image = link(dir, "kernel", &linker_config(windowed), &runtime, modules)?;
     if image.len() != ROM_SIZE {
         return Err(format!(
             "linked ROM is {} bytes, expected {ROM_SIZE}",
             image.len()
         ));
     }
+    image[ROM_VERSION_OFFSET..ROM_VERSION_OFFSET + ROM_VERSION.len()].copy_from_slice(ROM_VERSION);
     Ok(image)
 }
 
