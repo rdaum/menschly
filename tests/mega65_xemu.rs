@@ -2852,8 +2852,8 @@ fn actors_draw_hardware_sprites_and_raster_rewrite_characters() {
             actor_draw(c, 200, 40, 0, 1)
             actor_draw(h, 10, 20, 0, 1)
             actors_frame()
-            dma_copy(COLOUR_RAM, $0f00, 6 * 18)
-            dma_copy($50000, $0e80, 6 * 18)
+            dma_copy(COLOUR_RAM, $0f00, 6 * 20)
+            dma_copy($50000, $0e80, 6 * 20)
             # Frame 2: a moves along its rows, b goes, c moves down a row.
             actor_draw(a, 120, 13, 0, 0)
             actor_hide(b)
@@ -2877,47 +2877,118 @@ fn actors_draw_hardware_sprites_and_raster_rewrite_characters() {
     let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
     assert_eq!(run.exit_code, 4);
     let memory = &run.memory;
-    // Rows are 4 background characters, 2 slots of 2 and a closing token:
-    // 18 bytes. Slot s of row r is at r * 18 + 8 + s * 4.
+    // Rows are 4 background characters, 2 slots of 2 and a closing slot of
+    // 2: 20 bytes.
+    let slot = |row: usize, slot: usize| row * 20 + 8 + slot * 4;
     let screen = |at: usize| &memory[0x0e80 + at..0x0e80 + at + 4];
     let colour = |at: usize| &memory[0x0f00 + at..0x0f00 + at + 4];
     // a: x 100, y 13 = row 1 line 5; characters $1180-$1181 ($46000 / 64),
     // palette group 1. Row 1 shifts the top character down 5 and shows
     // lines 5-7, row 2 shifts it up 3, row 3 shows the bottom one's lines 0-4.
-    assert_eq!(screen(26), &[100, 0xb0, 0x80, 0x11]);
-    assert_eq!(colour(26), &[0x98, 0xe0, 0x08, 0x1f]);
-    assert_eq!(screen(44), &[100, 0x60, 0x80, 0x11]);
-    assert_eq!(colour(44), &[0x98, 0xff, 0x08, 0x1f]);
-    assert_eq!(screen(62), &[100, 0x60, 0x81, 0x11]);
-    assert_eq!(colour(62), &[0x98, 0x1f, 0x08, 0x1f]);
+    assert_eq!(screen(slot(1, 0)), &[100, 0xb0, 0x80, 0x11]);
+    assert_eq!(colour(slot(1, 0)), &[0x98, 0xe0, 0x08, 0x1f]);
+    assert_eq!(screen(slot(2, 0)), &[100, 0x60, 0x80, 0x11]);
+    assert_eq!(colour(slot(2, 0)), &[0x98, 0xff, 0x08, 0x1f]);
+    assert_eq!(screen(slot(3, 0)), &[100, 0x60, 0x81, 0x11]);
+    assert_eq!(colour(slot(3, 0)), &[0x98, 0x1f, 0x08, 0x1f]);
     // b: x 40, y 16 = row 2 line 0, slot 1 in rows 2 and 3; its cell is the
     // stored image mirrored, so the characters flip. Same palette, same group.
-    assert_eq!(screen(48), &[40, 0x00, 0x82, 0x11]);
-    assert_eq!(colour(48), &[0x98, 0xff, 0x48, 0x1f]);
-    assert_eq!(screen(66), &[40, 0x00, 0x83, 0x11]);
+    assert_eq!(screen(slot(2, 1)), &[40, 0x00, 0x82, 0x11]);
+    assert_eq!(colour(slot(2, 1)), &[0x98, 0xff, 0x48, 0x1f]);
+    assert_eq!(screen(slot(3, 1)), &[40, 0x00, 0x83, 0x11]);
     // c: cell 0 mirrored, at row 5: a's characters, flipped.
-    assert_eq!(screen(98), &[200, 0x00, 0x80, 0x11]);
-    assert_eq!(colour(98), &[0x98, 0xff, 0x48, 0x1f]);
-    // Unused slots and the closing tokens point past x 320.
-    assert_eq!(&screen(30)[..2], &[0x40, 0x01]);
-    assert_eq!(&screen(34)[..2], &[0x40, 0x01]);
-    assert_eq!(&colour(34)[..2], &[0x98, 0xff]);
+    assert_eq!(screen(slot(5, 0)), &[200, 0x00, 0x80, 0x11]);
+    assert_eq!(colour(slot(5, 0)), &[0x98, 0xff, 0x48, 0x1f]);
+    // Unused slots point past x 320; each row closes with a token there
+    // and a character.
+    assert_eq!(&screen(slot(1, 1))[..2], &[0x40, 0x01]);
+    assert_eq!(screen(slot(1, 2)), &[0x40, 0x01, 0, 0]);
+    assert_eq!(colour(slot(1, 2)), &[0x98, 0xff, 0, 0]);
     // Frame 2. a keeps its slots with the new x; b's slots are off screen;
     // c freed row 5 and took the slot b left in row 3, and one in row 4.
     let now = |at: usize| &memory[0x50000 + at..0x50000 + at + 4];
-    assert_eq!(now(26), &[120, 0xb0, 0x80, 0x11]);
-    assert_eq!(now(44), &[120, 0x60, 0x80, 0x11]);
-    assert_eq!(now(62), &[120, 0x60, 0x81, 0x11]);
-    assert_eq!(&now(48)[..2], &[0x40, 0x01]);
-    assert_eq!(now(66), &[200, 0x00, 0x80, 0x11]);
-    assert_eq!(now(80), &[200, 0x00, 0x81, 0x11]);
-    assert_eq!(&now(98)[..2], &[0x40, 0x01]);
+    assert_eq!(now(slot(1, 0)), &[120, 0xb0, 0x80, 0x11]);
+    assert_eq!(now(slot(2, 0)), &[120, 0x60, 0x80, 0x11]);
+    assert_eq!(now(slot(3, 0)), &[120, 0x60, 0x81, 0x11]);
+    assert_eq!(&now(slot(2, 1))[..2], &[0x40, 0x01]);
+    assert_eq!(now(slot(3, 1)), &[200, 0x00, 0x80, 0x11]);
+    assert_eq!(now(slot(4, 0)), &[200, 0x00, 0x81, 0x11]);
+    assert_eq!(&now(slot(5, 0))[..2], &[0x40, 0x01]);
     // The pool holds each cell's image once, each byte's pixels swapped.
     assert_eq!(&memory[0x46000..0x46008], &[0x21, 0, 0, 0, 0, 0, 0, 0x43]);
     // The hardware actor's buffer holds the image mirrored, and sprite 0
     // sits at (10 + 24, 20 + 46), on.
     assert_eq!(&memory[0x47000..0x47008], &[0x43, 0, 0, 0, 0, 0, 0, 0x21]);
     assert_eq!(&memory[0x0e00..0x0e05], &[34, 66, 0x01, 0x65, 2]);
+}
+
+#[test]
+fn actors_priority_takes_slots_and_the_loser_retries() {
+    let (dir, rom) = library_rom(
+        "actors-priority",
+        "
+        module ActorsPriorityTest
+        import Vic4
+        import Actors
+        fixed($0e00) volatile var out: [8]u8
+
+        var images: [128]u8
+        var palettes: [48]u8
+        const CELLS: [2]u16 = [0, 0]
+
+        export function main(): u8
+            var p: u8
+            var q: u8
+            var b: u8
+            vic4_init()
+            actors_sheet(u32(addr(images)), u32(addr(palettes)), u32(addr(CELLS)))
+            # Two slots a row: bubbles p and q fill rows 1 and 2.
+            actors_software($50000, 4, 6, 2, $46000, 4)
+            p = actor_new(ACTOR_SOFTWARE)
+            q = actor_new(ACTOR_SOFTWARE)
+            b = actor_new(ACTOR_SOFTWARE)
+            actor_priority(b, 1)
+            actor_draw(p, 30, 8, 0, 0)
+            actor_draw(q, 70, 8, 0, 0)
+            actor_draw(b, 50, 8, 0, 0)
+            actors_frame()
+            out[0] = u8(actors_missing())
+            dma_copy($50000, $0f00, 6 * 20)
+            # Nothing moves; p is still short and tries again.
+            actors_frame()
+            out[1] = u8(actors_missing())
+            # b goes: p is placed before b gives its slots back ...
+            actor_hide(b)
+            actors_frame()
+            out[2] = u8(actors_missing())
+            # ... and gets them the frame after.
+            actors_frame()
+            out[3] = u8(actors_missing())
+            return 0
+        end
+        ",
+        &["vic4", "actors"],
+    );
+    let Some(xemu) = mega65::find_xemu() else {
+        eprintln!("skipping actors priority: Xemu not found (set MENSCH_XMEGA65)");
+        return;
+    };
+    let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
+    assert_eq!(run.exit_code, 0);
+    let memory = &run.memory;
+    let slot = |row: usize, slot: usize| row * 20 + 8 + slot * 4;
+    // Frame 1: b took p's slot 0 in both rows; q keeps slot 1. p's two rows
+    // are missing, frame after frame, until b goes.
+    let first = |at: usize| memory[0x0f00 + at];
+    assert_eq!(first(slot(1, 0)), 50);
+    assert_eq!(first(slot(2, 0)), 50);
+    assert_eq!(first(slot(1, 1)), 70);
+    assert_eq!(first(slot(2, 1)), 70);
+    assert_eq!(&memory[0x0e00..0x0e04], &[2, 2, 2, 0]);
+    let now = |at: usize| memory[0x50000 + at];
+    assert_eq!(now(slot(1, 0)), 30);
+    assert_eq!(now(slot(2, 0)), 30);
+    assert_eq!(now(slot(1, 1)), 70);
 }
 
 #[test]

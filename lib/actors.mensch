@@ -44,7 +44,7 @@ export const ACTOR_HARDWARE = 1
 export const ACTOR_SOFTWARE = 2
 export const NO_ACTOR = $ff
 
-const MAX_ACTORS = 32
+const MAX_ACTORS = 64
 const HARDWARE_SPRITES = 8
 const MAX_ROWS = 32
 const MAX_SLOTS = 32
@@ -86,6 +86,11 @@ type Actor = record(
     dirty: u8,
     first_row: u8,
     rows: u8,
+    written_entry: u8,
+    written_attributes: u8,
+    written_colour: u8,
+    priority: u8,
+    short: u8,
     x: u16,
     y: u16,
     cell: u16,
@@ -120,8 +125,16 @@ var entry_mirrored: [MAX_ENTRIES]u8
 var entry_palette: [MAX_ENTRIES]u16
 # Which slots are taken, MAX_SLOTS per row, and each software actor's slot
 # in each of the up to three rows it holds.
-var slot_taken: [MAX_ROWS * MAX_SLOTS]u8
+# Per row slot, the actor holding it, or NO_ACTOR.
+var slot_owner: [MAX_ROWS * MAX_SLOTS]u8
 var held: [MAX_ACTORS * 3]u8
+# Actor rows that found no free slot when last placed.
+var missing: u16
+# Per row, the lowest slot that may be free (every slot below it is taken).
+var free_hint: [MAX_ROWS]u8
+# An actor's slots while it moves rows, and which of its old ones it keeps.
+var moving: [3]u8
+var kept: [3]u8
 # Where each row's first slot is, in the screen and in colour RAM.
 var row_screen: [MAX_ROWS]u32
 var row_colour: [MAX_ROWS]u32
@@ -137,6 +150,9 @@ var placing_x: u16
 var placing_character: u16
 var placing_attributes: u8
 var placing_colour: u8
+# Whether the placing actor's characters and colours must be written too,
+# or only its tokens' positions.
+var placing_full: u8
 
 # Bank-0 staging: DMA brings images and palettes here for the CPU and the
 # palette loader.
@@ -189,7 +205,9 @@ export procedure actors_software(screen: u32, columns: u8, rows: u8, slots: u8, 
     var slot: u8
     var group: u8
     var entry: u8
-    row_chars = u16(columns) + (u16(slots) << 1) + 1
+    # The slots, then a closing slot: a token to the right edge and a
+    # character, which the VIC-IV needs to end a row of tokens.
+    row_chars = u16(columns) + (u16(slots) << 1) + 2
     vic4_text16(screen, row_chars, 0)
     vic4_text_rows(rows)
     vic4_fill_screen(0, row_chars * u16(rows))
@@ -208,13 +226,14 @@ export procedure actors_software(screen: u32, columns: u8, rows: u8, slots: u8, 
     for row = 0 to rows - 1
         row_screen[row] = screen + u32(u16(row) * row_bytes + first)
         row_colour[row] = COLOUR_RAM + u32(u16(row) * row_bytes + first)
-        # Every slot, and the closing token after them, starts off screen.
+        # Every slot, and the closing one after them, starts off screen.
         for slot = 0 to slots
             put_token(row, slot, OFFSCREEN, 0, $ff)
             if slot != slots
-                slot_taken[(u16(row) << 5) + u16(slot)] = 0
+                slot_owner[(u16(row) << 5) + u16(slot)] = NO_ACTOR
             end
         end
+        free_hint[row] = 0
     end
     for group = 0 to GROUPS - 1
         group_palette[group] = NOTHING
@@ -248,6 +267,9 @@ export function actor_new(kind: u8): u8
     actors[actor].entry = NO_ENTRY
     actors[actor].dirty = 0
     actors[actor].rows = 0
+    actors[actor].written_entry = NO_ENTRY
+    actors[actor].priority = 0
+    actors[actor].short = 0
     actor_count = actor_count + 1
     return actor
 end
@@ -272,6 +294,17 @@ export procedure actor_draw(actor: u8, x: u16, y: u16, cell: u16, mirrored: u8)
     return
 end
 
+# Makes software actor `actor` a priority one (`priority` nonzero), like
+# the player and enemies: when a row has no free slot it takes one from an
+# ordinary actor (a bubble, say), which waits for another.
+export procedure actor_priority(actor: u8, priority: u8)
+    actors[actor].priority = 0
+    if priority
+        actors[actor].priority = 1
+    end
+    return
+end
+
 export procedure actor_hide(actor: u8)
     actors[actor].visible = 0
     actors[actor].dirty = 1
@@ -280,6 +313,15 @@ export procedure actor_hide(actor: u8)
         vic4_sprites_on(sprites_shown)
     end
     return
+end
+
+# How many actor rows found no free slot (their part is not drawn) since
+# the last call; for measuring.
+export function actors_missing(): u16
+    var count: u16
+    count = missing
+    missing = 0
+    return count
 end
 
 # Brings the software actors' slots up to date with what changed since the
@@ -538,10 +580,24 @@ procedure place(actor: u8)
     if line == 0
         count = 2
     end
-    if actors[actor].rows != count or actors[actor].first_row != row
-        free_slots(actor)
-        take_slots(actor, row, count)
+    if actors[actor].rows != count or actors[actor].first_row != row or actors[actor].short
+        move_slots(actor, row, count)
     end
+    # Short of a slot in some row: try again next frame.
+    if actors[actor].short
+        actors[actor].dirty = 1
+    end
+    # Same slots, characters and colours as last time: only the tokens'
+    # positions change.
+    placing_full = 1
+    if actors[actor].written_entry == entry
+        if actors[actor].written_attributes == placing_attributes and actors[actor].written_colour == placing_colour
+            placing_full = 0
+        end
+    end
+    actors[actor].written_entry = entry
+    actors[actor].written_attributes = placing_attributes
+    actors[actor].written_colour = placing_colour
     if line == 0
         write_slot(actor, 0, 0, $ff, 0)
         write_slot(actor, 1, 0, $ff, 1)
@@ -557,32 +613,109 @@ procedure place(actor: u8)
     return
 end
 
-# Gives `actor` a free slot in each of the `count` rows from `row`
-# (NO_SLOT where a row is full or off the screen).
-procedure take_slots(actor: u8, row: u8, count: u8)
-    var k: u8
+# A free slot in `row`, now held by `actor`: NO_SLOT when the row is off
+# the screen, or full (of priority actors, for a priority actor, which
+# takes a slot from an ordinary one if it has to).
+function claim_slot(actor: u8, row: u8): u8
     var slot: u8
     var at: u16
-    actors[actor].first_row = row
-    actors[actor].rows = count
-    k = 0
-    while k != count
-        slot = NO_SLOT
-        if row + k < overlay_rows
-            at = u16(row + k) << 5
+    var victim: u8
+    if row >= overlay_rows
+        return NO_SLOT
+    end
+    at = u16(row) << 5
+    slot = free_hint[row]
+    while slot != overlay_slots and slot_owner[at + u16(slot)] != NO_ACTOR
+        slot = slot + 1
+    end
+    if slot == overlay_slots
+        free_hint[row] = overlay_slots
+        if actors[actor].priority
             slot = 0
-            while slot != overlay_slots and slot_taken[at + u16(slot)]
+            while slot != overlay_slots and actors[slot_owner[at + u16(slot)]].priority
                 slot = slot + 1
             end
-            if slot == overlay_slots
-                slot = NO_SLOT
-            else
-                slot_taken[at + u16(slot)] = 1
+        end
+        if slot == overlay_slots
+            missing = missing + 1
+            return NO_SLOT
+        end
+        victim = slot_owner[at + u16(slot)]
+        held[victim * 3 + (row - actors[victim].first_row)] = NO_SLOT
+        actors[victim].short = 1
+        actors[victim].dirty = 1
+        missing = missing + 1
+        slot_owner[at + u16(slot)] = actor
+        return slot
+    end
+    slot_owner[at + u16(slot)] = actor
+    free_hint[row] = slot + 1
+    return slot
+end
+
+# Gives back slot `slot` of `row`, moving it off screen.
+procedure release_slot(row: u8, slot: u8)
+    slot_owner[(u16(row) << 5) + u16(slot)] = NO_ACTOR
+    if slot < free_hint[row]
+        free_hint[row] = slot
+    end
+    hide_token(row, slot)
+    return
+end
+
+# Moves `actor` to the `count` rows from `row`: it keeps its slots in rows
+# it already holds, takes a free slot in each new one (NO_SLOT where a row
+# is full or off the screen), and gives back the rest.
+procedure move_slots(actor: u8, row: u8, count: u8)
+    var k: u8
+    var held_rows: u8
+    var first: u8
+    var d: u8
+    var slot: u8
+    first = actors[actor].first_row
+    held_rows = actors[actor].rows
+    kept[0] = 0
+    kept[1] = 0
+    kept[2] = 0
+    actors[actor].short = 0
+    k = 0
+    while k != count
+        # Rows count up from `first` modulo 256, as rows above the screen
+        # are 255, 254 ...
+        d = row + k - first
+        slot = NO_SLOT
+        if d < held_rows
+            slot = held[actor * 3 + d]
+            kept[d] = 1
+        end
+        if slot == NO_SLOT
+            slot = claim_slot(actor, row + k)
+            # A new slot holds someone else's character: write it all.
+            actors[actor].written_entry = NO_ENTRY
+            if slot == NO_SLOT and row + k < overlay_rows
+                actors[actor].short = 1
             end
         end
-        held[actor * 3 + k] = slot
+        moving[k] = slot
         k = k + 1
     end
+    k = 0
+    while k != held_rows
+        if kept[k] == 0
+            slot = held[actor * 3 + k]
+            if slot != NO_SLOT
+                release_slot(first + k, slot)
+            end
+        end
+        k = k + 1
+    end
+    k = 0
+    while k != count
+        held[actor * 3 + k] = moving[k]
+        k = k + 1
+    end
+    actors[actor].first_row = row
+    actors[actor].rows = count
     return
 end
 
@@ -590,18 +723,16 @@ end
 procedure free_slots(actor: u8)
     var k: u8
     var slot: u8
-    var row: u8
     k = 0
     while k != actors[actor].rows
         slot = held[actor * 3 + k]
         if slot != NO_SLOT
-            row = actors[actor].first_row + k
-            slot_taken[(u16(row) << 5) + u16(slot)] = 0
-            hide_token(row, slot)
+            release_slot(actors[actor].first_row + k, slot)
         end
         k = k + 1
     end
     actors[actor].rows = 0
+    actors[actor].written_entry = NO_ENTRY
     return
 end
 
@@ -625,18 +756,20 @@ procedure write_slot(actor: u8, k: u8, shift: u8, mask: u8, half: u8)
     cell = row_screen[row] + offset
     cell[0] = u8(placing_x)
     cell[1] = (u8(placing_x >> 8) & $03) | shift
-    cell[2] = u8(character)
-    cell[3] = u8(character >> 8)
     colour = row_colour[row] + offset
-    colour[0] = TOKEN_ATTRIBUTES
     colour[1] = mask
-    colour[2] = placing_attributes
-    colour[3] = placing_colour
+    if placing_full
+        cell[2] = u8(character)
+        cell[3] = u8(character >> 8)
+        colour[0] = TOKEN_ATTRIBUTES
+        colour[2] = placing_attributes
+        colour[3] = placing_colour
+    end
     return
 end
 
 # Writes slot `slot` of `row` as a token to `x` with shift and mask, then
-# character 0.
+# character 0 (slot `overlay_slots` is the closing one).
 procedure put_token(row: u8, slot: u8, x: u16, shift: u8, mask: u8)
     var cell: far ^u8
     var colour: far ^u8
@@ -648,13 +781,10 @@ procedure put_token(row: u8, slot: u8, x: u16, shift: u8, mask: u8)
     colour = row_colour[row] + offset
     colour[0] = TOKEN_ATTRIBUTES
     colour[1] = mask
-    # The closing token has no character after it.
-    if slot != overlay_slots
-        cell[2] = 0
-        cell[3] = 0
-        colour[2] = 0
-        colour[3] = 0
-    end
+    cell[2] = 0
+    cell[3] = 0
+    colour[2] = 0
+    colour[3] = 0
     return
 end
 
