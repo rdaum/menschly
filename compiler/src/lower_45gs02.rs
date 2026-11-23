@@ -945,7 +945,9 @@ impl<'a> RoutineLowerer<'a> {
 
     /// Constant shifts: whole bytes move first, then the remaining bits
     /// ripple through the bytes in the base-page accumulator. A `signed`
-    /// right shift fills with copies of the sign bit.
+    /// right shift fills with copies of the sign bit. When most of a byte
+    /// is left over (`<< 7`), the bytes move one further and the bits shift
+    /// back the other way, the byte that moved out feeding them in.
     fn shift(
         &mut self,
         width: Width,
@@ -960,7 +962,23 @@ impl<'a> RoutineLowerer<'a> {
         };
         let count = u16::from(count.byte(0));
         let bytes = width.size_bytes();
-        let (byte_shift, bit_shift) = (count / 8, count % 8);
+        let (mut byte_shift, mut bit_shift) = (count / 8, count % 8);
+        // Shifting back costs (8 - bits) passes plus saving the dropped byte.
+        let back = bit_shift > 0
+            && byte_shift + 1 < bytes
+            && bytes * (8 - bit_shift) + 3 < bytes * bit_shift;
+        if back {
+            // The byte that moves out: its bits come back in.
+            let dropped = if left {
+                bytes - 1 - byte_shift
+            } else {
+                byte_shift
+            };
+            self.load_byte_to_a(lhs, dropped)?;
+            self.implied(Op::Pha);
+            byte_shift += 1;
+            bit_shift = 8 - bit_shift;
+        }
         // Shift in place when the destination is compiler-owned memory (a
         // user global may be an I/O register); otherwise in the base-page
         // accumulator.
@@ -1010,6 +1028,27 @@ impl<'a> RoutineLowerer<'a> {
                     self.emit(Op::Stz, target);
                 }
             }
+        }
+        if back {
+            self.implied(Op::Pla);
+            for _ in 0..bit_shift {
+                if left {
+                    // Bits 0, 1, ... of the dropped byte enter at the top.
+                    self.implied(Op::Lsr);
+                    for i in (0..bytes).rev() {
+                        let target = operand(self, i);
+                        self.emit(Op::Ror, target);
+                    }
+                } else {
+                    // Bits 7, 6, ... of the dropped byte enter at the bottom.
+                    self.implied(Op::Asl);
+                    for i in 0..bytes {
+                        let target = operand(self, i);
+                        self.emit(Op::Rol, target);
+                    }
+                }
+            }
+            bit_shift = 0;
         }
         for _ in 0..bit_shift {
             if left {

@@ -2150,6 +2150,69 @@ fn parallel_arrays_store_each_field_as_a_column() {
 }
 
 #[test]
+fn constant_shifts_of_every_count_and_width() {
+    // Every constant shift of 8-, 16- and 32-bit values, signed and
+    // unsigned, against Rust's own shifts.
+    let cases: [(&str, u32, u32); 6] = [
+        ("u8", 8, 0xb5),
+        ("i8", 8, 0xb5),
+        ("u16", 16, 0xbcde),
+        ("i16", 16, 0xbcde),
+        ("u32", 32, 0x89ab_cdef),
+        ("i32", 32, 0x89ab_cdef),
+    ];
+    let mut source = String::from("module Shifts\n");
+    let mut expected = Vec::new();
+    let mut at = 0x1000u32;
+    for (ty, bits, value) in cases {
+        source.push_str(&format!("var v_{ty}: {ty} = ${value:x}\n"));
+        let bytes = bits / 8;
+        for count in 1..bits {
+            for left in [true, false] {
+                let op = if left { "<<" } else { ">>" };
+                source.push_str(&format!(
+                    "fixed(${at:x}) volatile var r_{ty}_{}_{count}: {ty}\n",
+                    if left { "l" } else { "r" }
+                ));
+                let result = match (ty.starts_with('i'), left) {
+                    (_, true) => (u64::from(value) << count) as u32,
+                    (false, false) => value >> count,
+                    (true, false) => {
+                        let signed = (value << (32 - bits)) as i32 >> (32 - bits);
+                        (signed >> count) as u32
+                    }
+                };
+                expected.push((at, bytes, result, format!("{ty} {op} {count}")));
+                at += bytes;
+            }
+        }
+    }
+    source.push_str("export function main(): u8\n");
+    for (ty, bits, _) in cases {
+        for count in 1..bits {
+            source.push_str(&format!("    r_{ty}_l_{count} = v_{ty} << {count}\n"));
+            source.push_str(&format!("    r_{ty}_r_{count} = v_{ty} >> {count}\n"));
+        }
+    }
+    source.push_str("    return 0\nend\n");
+    let Some(run) = run_source("shifts", &source) else {
+        return;
+    };
+    for (at, bytes, result, what) in expected {
+        let at = at as usize;
+        let got = (0..bytes as usize)
+            .map(|i| u32::from(run.memory[at + i]) << (8 * i))
+            .sum::<u32>();
+        let mask = if bytes == 4 {
+            u32::MAX
+        } else {
+            (1 << (8 * bytes)) - 1
+        };
+        assert_eq!(got, result & mask, "{what}");
+    }
+}
+
+#[test]
 fn parallel_arrays_past_256_bytes_index_by_variable() {
     // `wide`'s column starts 200 bytes in and `cell`'s 600: their element
     // addresses are formed from symbol + offset beyond a byte.
