@@ -1,0 +1,46 @@
+module SoundTest
+
+# Alternates a 440 Hz tone on SID voice 0 (sawtooth) with one on FM channel
+# 0 (sine), a second each, to check lib/sound.mensch on the MEGA65 or Xemu.
+#
+#   mensch-run-mega65 --no-run --rom sound-test.rom examples/sound-test.mensch lib/sound.mensch lib/vic4.mensch
+
+import Sound
+import Vic4
+
+# 440 Hz: the SID's register is frequency * 2^24 / its clock (Xemu's SIDs
+# run at 1 MHz), the OPL2's F-number frequency * 2^(20 - block) / 49716.
+const SID_A4 = 7382
+const FM_A4 = 580
+const FM_A4_BLOCK = 4
+
+# A plain sine: the modulator silent (level $3F), the carrier at full level,
+# sustaining while the key is down, both instant attack and fast release.
+const SINE: [11]u8 = [$01, $21, $3f, $00, $f0, $f0, $0f, $0f, $00, $00, $00]
+
+const FRAMES_PER_TONE = 50
+
+procedure wait_frames(frames: u8)
+    var i: u8
+    for i = 1 to frames
+        vic4_wait_line(250)
+    end
+    return
+end
+
+export function main(): u8
+    sound_init()
+    sid_waveform(0, SID_SAWTOOTH)
+    sid_envelope(0, $00, $f0)
+    sid_frequency(0, SID_A4)
+    fm_instrument(0, addr(SINE))
+    repeat
+        sid_gate_on(0)
+        wait_frames(FRAMES_PER_TONE)
+        sid_gate_off(0)
+        fm_note_on(0, FM_A4, FM_A4_BLOCK)
+        wait_frames(FRAMES_PER_TONE)
+        fm_note_off(0)
+    until 0
+    return 0
+end

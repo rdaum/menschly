@@ -1,0 +1,277 @@
+module Sound
+
+# MEGA65 sound hardware: four SIDs, an OPL2-compatible FM chip, and the
+# audio mixer that sets their levels. This is the hardware layer: values are
+# the chips' own (SID frequency registers, OPL F-numbers and blocks), with no
+# notes or sequencing.
+#
+# Use it with `import Sound`; call sound_init first.
+#
+# SIDs: four at $D400, $D420, $D440 and $D460, three voices each. Voices are
+# numbered 0-11 across them (voice n is SID n / 3, voice n mod 3). SID
+# registers are write-only, so the library keeps a copy of each voice's
+# control register to gate it on and off without changing its waveform.
+#
+# FM: OPL2 registers at linear $FE00000 + register, one write each (as Xemu
+# maps the MEGA65's FM chip). Nine two-operator channels, 0-8.
+#
+# Mixer: coefficient n is written by putting n in $D6F4 and the value in
+# $D6F5. Each input has a 16-bit gain (high byte at the even coefficient) for
+# the left and right speaker outputs (n and n + $20) and the left and right
+# headphone outputs (n + $C0 and n + $E0).
+
+# ---------------------------------------------------------------- SIDs
+
+export const SIDS = 4
+export const SID_VOICES = 12
+
+# Waveform and control bits (a voice's control register).
+export const SID_GATE = $01
+export const SID_SYNC = $02
+export const SID_RING = $04
+export const SID_TEST = $08
+export const SID_TRIANGLE = $10
+export const SID_SAWTOOTH = $20
+export const SID_PULSE = $40
+export const SID_NOISE = $80
+
+# Filter modes (the high nibble of a SID's mode/volume register).
+export const SID_LOW_PASS = $10
+export const SID_BAND_PASS = $20
+export const SID_HIGH_PASS = $40
+export const SID_VOICE_3_OFF = $80
+
+fixed($d400) volatile var sid_registers: [128]u8
+
+# A voice's first register, relative to $D400: SID * 32 + voice * 7.
+const VOICE_REGISTERS: [SID_VOICES]u8 = [
+    0, 7, 14, 32, 39, 46, 64, 71, 78, 96, 103, 110
+]
+
+# Registers within a voice and within a SID.
+const FREQUENCY_LOW = 0
+const FREQUENCY_HIGH = 1
+const PULSE_LOW = 2
+const PULSE_HIGH = 3
+const CONTROL = 4
+const ATTACK_DECAY = 5
+const SUSTAIN_RELEASE = 6
+const CUTOFF_LOW = 21
+const CUTOFF_HIGH = 22
+const RESONANCE_ROUTING = 23
+const MODE_VOLUME = 24
+const SID_REGISTERS = 25
+
+var voice_control: [SID_VOICES]u8
+
+# Sets `voice`'s frequency register (the SID's own units: about
+# frequency * 16777216 / its clock in Hz).
+export procedure sid_frequency(voice: u8, frequency: u16)
+    var at: u8
+    at = VOICE_REGISTERS[voice]
+    sid_registers[at + FREQUENCY_LOW] = u8(frequency)
+    sid_registers[at + FREQUENCY_HIGH] = u8(frequency >> 8)
+    return
+end
+
+# Sets `voice`'s pulse width (12 bits; $800 is a square wave).
+export procedure sid_pulse_width(voice: u8, width: u16)
+    var at: u8
+    at = VOICE_REGISTERS[voice]
+    sid_registers[at + PULSE_LOW] = u8(width)
+    sid_registers[at + PULSE_HIGH] = u8(width >> 8) & $0f
+    return
+end
+
+# Sets `voice`'s envelope: attack and decay (high and low nibble), sustain
+# and release.
+export procedure sid_envelope(voice: u8, attack_decay: u8, sustain_release: u8)
+    var at: u8
+    at = VOICE_REGISTERS[voice]
+    sid_registers[at + ATTACK_DECAY] = attack_decay
+    sid_registers[at + SUSTAIN_RELEASE] = sustain_release
+    return
+end
+
+# Sets `voice`'s waveform and control bits (SID_TRIANGLE ... SID_NOISE,
+# SID_SYNC, SID_RING, SID_TEST), keeping its gate as it is.
+export procedure sid_waveform(voice: u8, waveform: u8)
+    voice_control[voice] = (waveform & (SID_GATE xor $ff)) | (voice_control[voice] & SID_GATE)
+    sid_registers[VOICE_REGISTERS[voice] + CONTROL] = voice_control[voice]
+    return
+end
+
+# Opens `voice`'s gate: its envelope starts the attack.
+export procedure sid_gate_on(voice: u8)
+    voice_control[voice] = voice_control[voice] | SID_GATE
+    sid_registers[VOICE_REGISTERS[voice] + CONTROL] = voice_control[voice]
+    return
+end
+
+# Closes `voice`'s gate: its envelope starts the release.
+export procedure sid_gate_off(voice: u8)
+    voice_control[voice] = voice_control[voice] & (SID_GATE xor $ff)
+    sid_registers[VOICE_REGISTERS[voice] + CONTROL] = voice_control[voice]
+    return
+end
+
+# Sets SID `sid`'s filter: an 11-bit cutoff, the resonance (high nibble)
+# and which voices go through it (bits 0-2, plus bit 3 for the external
+# input).
+export procedure sid_filter(sid: u8, cutoff: u16, resonance_routing: u8)
+    var at: u8
+    at = sid << 5
+    sid_registers[at + CUTOFF_LOW] = u8(cutoff) & $07
+    sid_registers[at + CUTOFF_HIGH] = u8(cutoff >> 3)
+    sid_registers[at + RESONANCE_ROUTING] = resonance_routing
+    return
+end
+
+# Sets SID `sid`'s filter mode (SID_LOW_PASS ... SID_VOICE_3_OFF) and its
+# volume (0-15).
+export procedure sid_mode_volume(sid: u8, mode: u8, volume: u8)
+    sid_registers[(sid << 5) + MODE_VOLUME] = (mode & $f0) | (volume & $0f)
+    return
+end
+
+# ---------------------------------------------------------------- FM
+
+export const FM_CHANNELS = 9
+
+# Register groups: add an operator's offset (fm_operator) or a channel.
+export const FM_CHARACTER = $20
+export const FM_LEVEL = $40
+export const FM_ATTACK_DECAY = $60
+export const FM_SUSTAIN_RELEASE = $80
+export const FM_WAVEFORM = $e0
+export const FM_FREQUENCY_LOW = $a0
+export const FM_KEY_BLOCK = $b0
+export const FM_FEEDBACK = $c0
+export const FM_KEY_ON = $20
+
+const FM_REGISTERS: u32 = $fe00000
+const FM_TEST = $01
+const FM_WAVEFORM_SELECT = $20
+const FM_RHYTHM = $bd
+
+# The operator offsets of each channel's modulator; its carrier is 3 more.
+const MODULATORS: [FM_CHANNELS]u8 = [0, 1, 2, 8, 9, 10, 16, 17, 18]
+
+# Each channel's key-on/block/F-number-high register, so that a note can be
+# released without changing its pitch.
+var key_block: [FM_CHANNELS]u8
+
+# Writes FM register `register`.
+export procedure fm_write(register: u8, value: u8)
+    var chip: far ^u8
+    chip = FM_REGISTERS + u32(register)
+    chip^ = value
+    return
+end
+
+# The register offset of `channel`'s modulator (operator 0) or carrier
+# (operator 1), to add to FM_CHARACTER ... FM_WAVEFORM.
+export function fm_operator(channel: u8, operator: u8): u8
+    if operator
+        return MODULATORS[channel] + 3
+    end
+    return MODULATORS[channel]
+end
+
+# Loads an instrument into `channel` from 11 bytes: modulator and carrier
+# character ($20), level ($40), attack/decay ($60), sustain/release ($80)
+# and waveform ($E0), each modulator first, then feedback/connection ($C0).
+export procedure fm_instrument(channel: u8, instrument: near ^u8)
+    var modulator: u8
+    var carrier: u8
+    modulator = MODULATORS[channel]
+    carrier = modulator + 3
+    fm_write(FM_CHARACTER + modulator, instrument[0])
+    fm_write(FM_CHARACTER + carrier, instrument[1])
+    fm_write(FM_LEVEL + modulator, instrument[2])
+    fm_write(FM_LEVEL + carrier, instrument[3])
+    fm_write(FM_ATTACK_DECAY + modulator, instrument[4])
+    fm_write(FM_ATTACK_DECAY + carrier, instrument[5])
+    fm_write(FM_SUSTAIN_RELEASE + modulator, instrument[6])
+    fm_write(FM_SUSTAIN_RELEASE + carrier, instrument[7])
+    fm_write(FM_WAVEFORM + modulator, instrument[8])
+    fm_write(FM_WAVEFORM + carrier, instrument[9])
+    fm_write(FM_FEEDBACK + channel, instrument[10])
+    return
+end
+
+# Starts a note on `channel` at F-number `fnumber` (10 bits) in octave
+# `block` (0-7).
+export procedure fm_note_on(channel: u8, fnumber: u16, block: u8)
+    fm_write(FM_FREQUENCY_LOW + channel, u8(fnumber))
+    key_block[channel] = FM_KEY_ON | (block & 7) << 2 | (u8(fnumber >> 8) & $03)
+    fm_write(FM_KEY_BLOCK + channel, key_block[channel])
+    return
+end
+
+# Releases `channel`'s note, keeping its pitch for the release.
+export procedure fm_note_off(channel: u8)
+    key_block[channel] = key_block[channel] & (FM_KEY_ON xor $ff)
+    fm_write(FM_KEY_BLOCK + channel, key_block[channel])
+    return
+end
+
+# ---------------------------------------------------------------- mixer
+
+# Mixer inputs: each takes a left and a right gain.
+export const MIX_SIDS_1_2 = $00
+export const MIX_SIDS_3_4 = $02
+export const MIX_FM = $1c
+export const MIX_MASTER = $1e
+
+fixed($d6f4) volatile var mixer_select: u8
+fixed($d6f5) volatile var mixer_value: u8
+
+# Sets mixer input `input`'s gains ($0000 silent, $FFFF full) on both the
+# speaker and the headphone outputs.
+export procedure sound_mix(input: u8, left: u16, right: u16)
+    mix_coefficient(input, left)
+    mix_coefficient(input + $20, right)
+    mix_coefficient(input + $c0, left)
+    mix_coefficient(input + $e0, right)
+    return
+end
+
+procedure mix_coefficient(coefficient: u8, gain: u16)
+    mixer_select = coefficient
+    mixer_value = u8(gain >> 8)
+    mixer_select = coefficient + 1
+    mixer_value = u8(gain)
+    return
+end
+
+# ---------------------------------------------------------------- setup
+
+# Silences every SID voice and FM channel and sets the mixer: SIDs 1-2
+# left, 3-4 right, FM in both, master full.
+export procedure sound_init()
+    var i: u8
+    for i = 0 to (SIDS << 5) - 1
+        sid_registers[i] = 0
+    end
+    for i = 0 to SID_VOICES - 1
+        voice_control[i] = 0
+    end
+    for i = 0 to SIDS - 1
+        sid_mode_volume(i, 0, 15)
+    end
+    # Every FM register from $20 up to 0, then waveforms enabled.
+    for i = FM_CHARACTER to $f5
+        fm_write(i, 0)
+    end
+    for i = 0 to FM_CHANNELS - 1
+        key_block[i] = 0
+    end
+    fm_write(FM_RHYTHM, 0)
+    fm_write(FM_TEST, FM_WAVEFORM_SELECT)
+    sound_mix(MIX_SIDS_1_2, $bebe, $4040)
+    sound_mix(MIX_SIDS_3_4, $4040, $bebe)
+    sound_mix(MIX_FM, $bebe, $bebe)
+    sound_mix(MIX_MASTER, $ffff, $ffff)
+    return
+end
