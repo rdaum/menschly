@@ -3410,7 +3410,7 @@ impl<'a> RoutineLowerer<'a> {
                             symbol,
                             offset: 0,
                             index: None,
-                            whole: binding.ty.size_bytes(),
+                            span: binding.ty.size_bytes(),
                             pending: None,
                         },
                         binding.ty,
@@ -3426,8 +3426,15 @@ impl<'a> RoutineLowerer<'a> {
                 let field = record_field(&ty, name)?.clone();
                 if let Some((len, index)) = place.take_pending() {
                     // A parallel element: the field's column, then the
-                    // element within it.
+                    // element within it, whose offset stays inside the
+                    // column (so a column of up to 256 bytes indexes by X).
                     place.add_offset(field.offset * len)?;
+                    if let Place::Global {
+                        span, index: None, ..
+                    } = &mut place
+                    {
+                        *span = len * field.ty.size_bytes();
+                    }
                     self.apply_index(&mut place, &index, Some(len), field.ty.size_bytes())?;
                 } else {
                     place.add_offset(field.offset)?;
@@ -3664,7 +3671,7 @@ impl<'a> RoutineLowerer<'a> {
                 symbol,
                 offset,
                 index: Some(index),
-                whole,
+                span,
                 ..
             } => Address::Indexed {
                 base: if offset == 0 {
@@ -3673,7 +3680,7 @@ impl<'a> RoutineLowerer<'a> {
                     format!("{symbol}+{offset}")
                 },
                 index,
-                byte_offset: whole <= 0x100,
+                byte_offset: span <= 0x100,
             },
             Place::Value { base, offset } => Address::ValueOffset { base, offset },
             Place::Pointer {
@@ -5003,12 +5010,13 @@ fn routine_type_of(name: &str, sig: &RoutineSig) -> Result<RoutineType, Frontend
 /// IR address: a constant offset into something, plus a dynamic 16-bit
 /// byte offset where there is one.
 enum Place {
-    /// Inside a global (`whole` bytes long).
+    /// Inside a global. Any index offset is below `span`: the global's size,
+    /// or a parallel array's column's.
     Global {
         symbol: String,
         offset: u16,
         index: Option<Value>,
-        whole: u16,
+        span: u16,
         /// An element of a parallel array waiting for its field: the
         /// array's length and the (unevaluated) index.
         pending: Option<(u16, Expr)>,
@@ -5052,7 +5060,7 @@ impl Place {
     /// 256 bytes.
     fn offset_width(&self) -> Width {
         match self {
-            Place::Global { whole, .. } if *whole <= 0x100 => Width::Byte,
+            Place::Global { span, .. } if *span <= 0x100 => Width::Byte,
             _ => Width::Word,
         }
     }
@@ -6697,5 +6705,47 @@ mod tests {
             ",
         );
         assert!(clash.contains("counter"), "{clash}");
+    }
+
+    #[test]
+    fn parallel_columns_index_by_their_own_size() {
+        // 32 18-byte records: 576 bytes in all, but each column is 32 or 64
+        // bytes, so element offsets fit a byte; the 300-element table's
+        // 600-byte column does not.
+        let module = compile_source(
+            "
+            module Columns
+            type Actor = record(kind: u8, pad: [15]u8, x: u16)
+            type Wide = record(a: u8, b: u16)
+            var actors: parallel [32]Actor
+            var wide: parallel [300]Wide
+            export function main(i: u8, j: u16): u16
+                actors[i].kind = 1
+                return actors[i].x + wide[j].b
+            end
+            ",
+        )
+        .unwrap();
+        let byte_offsets: Vec<(String, bool)> = module.routines[0]
+            .body
+            .iter()
+            .filter_map(|inst| match inst {
+                IrInst::Load { addr, .. } | IrInst::Store { addr, .. } => match addr {
+                    Address::Indexed {
+                        base, byte_offset, ..
+                    } => Some((base.clone(), *byte_offset)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            byte_offsets,
+            [
+                ("actors".to_owned(), true),
+                ("actors+512".to_owned(), true),
+                ("wide+300".to_owned(), false),
+            ]
+        );
     }
 }
