@@ -45,6 +45,7 @@ cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- 
   "$here/bubble-anim.mensch" \
   "$here/bubble-video.mensch" \
   "$root/lib/vic4.mensch" \
+  "$root/lib/actors.mensch" \
   "$assets/bubble-demo-data.mensch"
 
 echo "rom: $rom"

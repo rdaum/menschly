@@ -1,77 +1,137 @@
 module BubbleDemo
 
-# Animation demo: six Bubble Bobble characters, each cycling through its own
-# animation, on the MEGA65.
+# Animation demo on the MEGA65: six Bubble Bobble characters standing in
+# room 1, each cycling through its own animation, under two rows of bobbing
+# bubbles.
+#
+# Every one of them is an actor (lib/actors.mensch). The cast declares which
+# are hardware sprites and which are drawn in software by the raster rewrite
+# buffer; the 22 bubbles are software, as far more of them share a line than
+# the eight hardware sprites could show.
 #
 # Run it with scripts/bubble_bobble/run-demo.sh, which regenerates the assets
 # and boots the result in Xemu.
 #
 # The full sprite pack is 147 KB, far more than the kernel's 24 KB image
 # segment, so `demo_assets.py` generates module `BubbleDemoData` with just the
-# 36 cells these six cycles use (4.7 KB) and room 1 (1.7 KB).
+# 33 cells these six cycles use (4.1 KB) and room 1 (1.7 KB).
 
 import Vic4
+import Actors
 import BubbleAnim
 import BubbleDemoData
 import BubbleVideo
 
-# The VIC-IV reads the sprite pointer table from a 16-byte boundary and each
-# image from a 64-byte one, so both go at fixed chip-RAM addresses (as in
-# examples/vic4-demo.mensch): the table, and the eight 128-byte buffers the
-# sprites show, which bb_sprite_show copies each frame into.
-const SPRITE_TABLE: u32 = $45000
-const SLOT_IMAGES: u32 = $46000
-# Room 1's twelve full-colour characters (character $1100 on).
+# Chip RAM. The VIC-IV reads the sprite pointer table from a 16-byte boundary
+# and sprite images and characters from 64-byte ones.
 const ROOM_TILES: u32 = $44000
+const SPRITE_TABLE: u32 = $45000
+const SPRITE_BUFFERS: u32 = $46000
+const ACTOR_CHARACTERS: u32 = $48000
+const SCREEN: u32 = $50000
 
-# Sprite slots, one per cycle.
-const SLOTS: [6]u8 = [0, 1, 2, 3, 4, 5]
+# The screen: 40 columns by 26 rows, the room's 32 columns centred, and room
+# for 24 software actors on any one row, showing up to 32 distinct cells.
+const COLUMNS = 40
+const ROWS = 26
+const SLOTS = 24
+const ENTRIES = 32
+const ROOM_LEFT = (COLUMNS - 32) / 2
+const ROOM_X = ROOM_LEFT * 8
 
-const SPRITES = 6
+# Sprite coordinates of the top-left of the text area.
+const SPRITE_X0 = 24
+const SPRITE_Y0 = 46
 
-# Where each cycle stands, in room cells: the sprite's left column and top
-# row. A 16x16 sprite is two cells square, so one standing on a platform in
-# row R has its top in row R - 2. Room 1's floor is row 25 and its platforms
-# are rows 10, 15 and 20.
-const STAND_COLUMN: [SPRITES]u8 = [6, 23, 9, 18, 12, 20]
-const STAND_ROW: [SPRITES]u8 = [23, 23, 18, 13, 8, 4]
-# Nonzero to mirror a cycle's frames: Bob turns to face Bub across the
-# floor, and Maita (drawn facing left) walks right.
-const MIRROR: [SPRITES]u8 = [0, 1, 0, 1, 0, 0]
+# Below the text area: the raster line to update the actors on.
+const QUIET_LINE = 256
 
 # Screen frames each animation frame is held for.
 const HOLD = 4
 
-# The screen: 40 columns by 26 rows, the room's 32 columns centred.
-const SCREEN: u32 = $50000
-const COLUMNS = 40
-const ROWS = 26
-const ROOM_LEFT = (COLUMNS - 32) / 2
+# ---------------------------------------------------------------- the cast
 
-# Sprite coordinates of the top-left of screen cell (0, 0).
-const CELL_X = 24
-const CELL_Y = 46
+const CAST = 6
+
+# Which actors are hardware sprites and which are software: Maita is drawn by
+# the raster rewrite buffer, the rest by sprites.
+const KIND: [CAST]u8 = [
+    ACTOR_HARDWARE, ACTOR_HARDWARE, ACTOR_HARDWARE,
+    ACTOR_SOFTWARE, ACTOR_HARDWARE, ACTOR_HARDWARE
+]
+
+# Where each cycle stands, in room cells: the actor's left column and top
+# row. A 16x16 actor is two cells square, so one standing on a platform in
+# row R has its top in row R - 2. Room 1's floor is row 25 and its platforms
+# are rows 10, 15 and 20.
+const STAND_COLUMN: [CAST]u8 = [6, 23, 9, 18, 12, 20]
+const STAND_ROW: [CAST]u8 = [23, 23, 18, 13, 8, 4]
+
+# Nonzero to mirror a cycle's frames: Bob turns to face Bub across the
+# floor, and Maita (drawn facing left) walks right.
+const MIRROR: [CAST]u8 = [0, 1, 0, 1, 0, 0]
+
+var cast: [CAST]u8
+
+# ---------------------------------------------------------------- bubbles
+
+const BUBBLES = 22
+const PER_ROW = 11
+
+# Two rows under the ceiling, the second offset by half a gap, bobbing by up
+# to four pixels each at its own phase.
+const BUBBLE_GAP = 20
+const FIRST_ROW_Y = 16
+const SECOND_ROW_Y = 34
+const BOB: [16]u8 = [2, 3, 4, 4, 4, 3, 2, 1, 0, 0, 0, 1, 2, 3, 3, 2]
+
+var bubbles: [BUBBLES]u8
 
 export function main(): u8
-    var cycle: u8
+    var i: u8
+    var tick: u16
+    var phase: u8
+    var x: u16
+    var y: u16
     vic4_init()
-    vic4_text16(SCREEN, COLUMNS, 0)
-    vic4_text_rows(ROWS)
-    vic4_fill_screen(0, COLUMNS * ROWS)
-    vic4_fill_colour(0, 0, 0, COLUMNS * ROWS)
+    actors_sheet(u32(addr(DEMO_IMAGES)), u32(addr(DEMO_PALETTES)), u32(addr(DEMO_CELLS)))
+    actors_software(SCREEN, COLUMNS, ROWS, SLOTS, ACTOR_CHARACTERS, ENTRIES)
+    actors_hardware(SPRITE_TABLE, SPRITE_BUFFERS, 1, SPRITE_X0, SPRITE_Y0)
     vic4_border(0)
     vic4_background(0)
     bb_draw_room(1, 0, u32(addr(DEMO_ROOM_TILES)), u32(addr(DEMO_ROOM_PALETTES)),
                  u32(addr(DEMO_ROOM_MAP)), ROOM_TILES, ROOM_LEFT)
-    bb_sprites_init(SPRITE_TABLE, SLOT_IMAGES, $3f, 1)
-    bb_sprite_assets(u32(addr(DEMO_IMAGES)), u32(addr(DEMO_PALETTES)), u32(addr(DEMO_CELLS)))
-    anim_cycles()
-    for cycle = 0 to SPRITES - 1
-        vic4_sprite_place(SLOTS[cycle],
-                   CELL_X + (u16(ROOM_LEFT + STAND_COLUMN[cycle]) << 3),
-                   CELL_Y + (STAND_ROW[cycle] << 3))
+    for i = 0 to CAST - 1
+        cast[i] = actor_new(KIND[i])
     end
-    vic4_sprites_on($3f)
-    anim_run(addr(SLOTS), addr(MIRROR), HOLD, 255)
+    for i = 0 to BUBBLES - 1
+        bubbles[i] = actor_new(ACTOR_SOFTWARE)
+    end
+    anim_restart()
+    tick = 0
+    repeat
+        vic4_wait_line(QUIET_LINE)
+        anim_tick(HOLD)
+        for i = 0 to CAST - 1
+            actor_draw(cast[i],
+                       ROOM_X + (u16(STAND_COLUMN[i]) << 3),
+                       u16(STAND_ROW[i]) << 3,
+                       anim_frame(i), MIRROR[i])
+        end
+        for i = 0 to BUBBLES - 1
+            phase = u8(tick >> 2) + i * 5
+            if i < PER_ROW
+                x = ROOM_X + 16 + u16(i) * BUBBLE_GAP
+                y = FIRST_ROW_Y
+            else
+                x = ROOM_X + 16 + BUBBLE_GAP / 2 + u16(i - PER_ROW) * BUBBLE_GAP
+                y = SECOND_ROW_Y
+            end
+            actor_draw(bubbles[i], x, y + u16(BOB[phase & 15]),
+                       anim_cycle_frame(C_BUBBLE, u8(tick >> 3) + i), 0)
+        end
+        actors_frame()
+        tick = tick + 1
+    until tick == 0
     return 0
 end

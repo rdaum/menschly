@@ -67,8 +67,8 @@ and [room decoder](https://github.com/kstenerud/patch-a-bobble/blob/master/src/L
 
 ## Animation demo
 
-`run-demo.sh` builds and boots a demo of six characters cycling their
-animations in Xemu:
+`run-demo.sh` builds and boots a demo in Xemu: six characters standing in
+room 1, each cycling its animation, under two rows of 22 bobbing bubbles.
 
 ```sh
 scripts/bubble_bobble/run-demo.sh             # build and run
@@ -79,54 +79,57 @@ The 147 KB sprite pack does not fit the kernel's 24 KB image segment, so
 `demo_assets.py` extracts the 33 cells the demo's six cycles use, in the
 converter's format, and room 1, and writes them as module `BubbleDemoData`
 (`target/bubble-bobble/bubble-demo-data.mensch`) with the frame names
-renumbered as demo cells. The sprite pointer table is at `$45000` and the
-sprites' image buffers at `$46000`, because the VIC-IV reads the table from a
-16-byte boundary and each image from a 64-byte one.
+renumbered as demo cells.
 
-`bubble-anim.mensch` holds the demo's cycles and `anim_run`, which steps
-every cycle in parallel one frame per `hold` screen frames, mirroring the
-cycles asked for.
+Everything on screen is an actor ([actors.mensch](../../lib/actors.mensch)).
+The demo's `KIND` table declares which of the cast are hardware sprites and
+which are drawn in software by the VIC-IV's raster rewrite buffer; Maita and
+the bubbles are software, since up to 22 of them share a text row.
+`bubble-anim.mensch` holds the demo's cycles: `anim_tick` steps them once a
+screen frame and `anim_frame` gives each one's current frame.
 
 ## Calling from Mensch
 
-Compile [bubble-video.mensch](bubble-video.mensch), the generated
-`bubble-frames.mensch`, and [vic4.mensch](../../lib/vic4.mensch) with your
-game. Each hardware sprite shows its own 128-byte buffer in chip RAM, and
-`bb_sprite_show` copies a cell's image there, mirroring it on the way if
-asked, and loads its palette only when that changes. The sprite files
-themselves can be anywhere DMA reaches, inside or outside chip RAM. The
-pointer table, the eight buffers and the active FCM characters belong in
-chip RAM. The six files total 320,356 bytes; keep the sprite files resident
-and stage one room at a time.
-For room N, read 768 terrain bytes at offset `(N-1)*768`, 96 palette bytes
-at `(N-1)*96`, and 832 map bytes at `(N-1)*832`. Pass those three buffers
-as record 1 to `bb_draw_room`. With complete files in addressable memory,
-pass N directly. The sprite image base and FCM tile destination must be 64-byte
-aligned, and so must the eight 128-byte sprite buffers. Reserve 16 aligned
-bytes for the sprite pointer table and 768 bytes at a full-colour tile
-address (character number at least $100).
+Compile [bubble-video.mensch](bubble-video.mensch) (room drawing), the
+generated `bubble-frames.mensch`, [actors.mensch](../../lib/actors.mensch)
+and [vic4.mensch](../../lib/vic4.mensch) with your game. The sprite files
+can be anywhere DMA reaches, inside or outside chip RAM; the actors copy
+each cell they show into chip RAM. The six files total 320,356 bytes; keep
+the sprite files resident and stage one room at a time. For room N, read
+768 terrain bytes at offset `(N-1)*768`, 96 palette bytes at `(N-1)*96`,
+and 832 map bytes at `(N-1)*832`. Pass those three buffers as record 1 to
+`bb_draw_room`. With complete files in addressable memory, pass N directly.
+
+In chip RAM, reserve 768 bytes at a 64-byte aligned full-colour tile address
+(character number at least $100) for the room's terrain, 16 aligned bytes
+for the sprite pointer table, eight 128-byte buffers for the hardware
+sprites, and a 128-byte entry per distinct cell software actors show at once.
 
 ```text
 import BubbleFrames
 import BubbleVideo
+import Actors
 import Vic4
 
 # Inside initialization, with room 1 staged:
 vic4_init()
-vic4_text16(SCREEN, 32, 0)
-vic4_text_rows(26)
-vic4_fill_colour(0, 0, 0, 32 * 26)
-bb_draw_room(1, 0, LEVEL_TILES, LEVEL_PALETTES, ROOM_MAPS, TILE_RAM, 0)
-bb_sprites_init(SPRITE_TABLE, SPRITE_BUFFERS, $01, 1)
-bb_sprite_assets(SPRITE_IMAGES, SPRITE_PALETTES, SPRITE_CELLS)
-bb_sprite_show(0, BUBBLUN_WALK_01, 1)          # mirrored: facing left
-vic4_sprite_place(0, 120, 100)
-vic4_sprites_on($01)
+actors_sheet(SPRITE_IMAGES, SPRITE_PALETTES, SPRITE_CELLS)
+actors_software(SCREEN, 40, 26, 24, ACTOR_CHARACTERS, 32)   # also sets up the screen
+actors_hardware(SPRITE_TABLE, SPRITE_BUFFERS, 1, 24, 46)
+bb_draw_room(1, 0, LEVEL_TILES, LEVEL_PALETTES, ROOM_MAPS, TILE_RAM, 4)
+hero = actor_new(ACTOR_HARDWARE)
+bubble = actor_new(ACTOR_SOFTWARE)
+
+# Every frame, below the text area:
+actor_draw(hero, 120, 100, BUBBLUN_WALK_01, 1)  # mirrored: facing left
+actor_draw(bubble, 60, 20, BUBBLE_BLUE_01, 0)
+actors_frame()
 ```
 
-The example names in capitals other than the generated frame name are
-application-supplied addresses. The room wrapper writes 26 screen rows, so
-reserve that screen memory; `vic4_text_rows(26)` shows them all. Its second
-argument selects normal (0) or super (nonzero) colours, and its last the
-screen column of the room's left edge. Sprites
-use palette bank 1 in this example, leaving bank 0 for the room.
+The example names in capitals other than the generated frame names are
+application-supplied addresses. `actors_software` sets up a 26-row screen
+with 40 background columns and 24 software-actor slots per row; the room
+wrapper draws its 26 rows there, its second argument selecting normal (0)
+or super (nonzero) colours and its last the screen column of the room's
+left edge. Hardware sprites use sprite palette bank 1 here; software actors
+use character palette bank 0's groups 1-15, leaving group 0 for the room.

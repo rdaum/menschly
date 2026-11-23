@@ -1,13 +1,10 @@
 module BubbleAnim
-import Vic4
-import BubbleVideo
 import BubbleDemoData
 
-# Sprite animation for the Bubble Bobble demo.
-#
-# Each sprite slot shows one frame of a named cycle, stepped once every `hold`
-# frames, through BubbleVideo's bb_sprite_show. Frame names come from the
-# generated `BubbleDemoData` module, where every name is a `u16` cell number.
+# Animation cycles for the Bubble Bobble demo: each steps through its frames,
+# one every `hold` screen frames, as anim_tick is called once a frame. Frame
+# names come from the generated `BubbleDemoData` module, where every name is
+# a `u16` cell number.
 
 # ---------------------------------------------------------------- cycles
 #
@@ -60,12 +57,7 @@ function cycle_frame(cycle: u8, index: u8): u16
     return FRAMES[cycle][index]
 end
 
-export procedure anim_cycles()
-    anim_restart()
-    return
-end
-
-# Restart every cycle at its first frame, without touching the hardware.
+# Restart every cycle at its first frame.
 export procedure anim_restart()
     var i: u8
     for i = 0 to CYCLES - 1
@@ -75,52 +67,29 @@ export procedure anim_restart()
     return
 end
 
-# The cycle's current index, for the test pattern's own bookkeeping.
-export function anim_step(cycle: u8): u8
-    return step[cycle]
-end
-
-# ---------------------------------------------------------------- the pattern
-#
-# Runs every cycle in parallel, one slot each, stepping a frame every `hold`
-# screen frames. `slots[cycle]` is the sprite slot that cycle drives, and its
-# frames are mirrored left to right when `mirror[cycle]` is nonzero. Returns
-# after `revolutions` complete turns of the longest cycle.
-export procedure anim_run(slots: near ^u8, mirror: near ^u8, hold: u8, revolutions: u8)
+# Advances every cycle by one screen frame: each steps to its next frame
+# once every `hold` screen frames.
+export procedure anim_tick(hold: u8)
     var cycle: u8
-    var frames: u16
-    var total: u8
-    var done: u8
-    total = 0
     for cycle = 0 to CYCLES - 1
-        if LENGTH[cycle] > total
-            total = LENGTH[cycle]
-        end
-    end
-    # Show the first frame of every cycle straight away.
-    for cycle = 0 to CYCLES - 1
-        bb_sprite_show(slots[cycle], cycle_frame(cycle, 0), mirror[cycle])
-    end
-    frames = 0
-    done = 0
-    while done != revolutions
-        vic4_wait_line(250)
-        for cycle = 0 to CYCLES - 1
-            wait[cycle] = wait[cycle] + 1
-            if wait[cycle] >= hold
-                wait[cycle] = 0
-                step[cycle] = step[cycle] + 1
-                if step[cycle] == LENGTH[cycle]
-                    step[cycle] = 0
-                end
-                bb_sprite_show(slots[cycle], cycle_frame(cycle, step[cycle]), mirror[cycle])
+        wait[cycle] = wait[cycle] + 1
+        if wait[cycle] >= hold
+            wait[cycle] = 0
+            step[cycle] = step[cycle] + 1
+            if step[cycle] == LENGTH[cycle]
+                step[cycle] = 0
             end
-        end
-        frames = frames + 1
-        if frames == u16(total) * u16(hold)
-            frames = 0
-            done = done + 1
         end
     end
     return
+end
+
+# The frame cycle `cycle` is showing now.
+export function anim_frame(cycle: u8): u16
+    return cycle_frame(cycle, step[cycle])
+end
+
+# Frame `index` of cycle `cycle`, wrapping past its last frame.
+export function anim_cycle_frame(cycle: u8, index: u8): u16
+    return cycle_frame(cycle, index % LENGTH[cycle])
 end
