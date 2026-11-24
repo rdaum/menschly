@@ -1113,6 +1113,8 @@ fn link(
         .arg(&cfg)
         .arg("-m")
         .arg(dir.join(format!("{output}.map")))
+        .arg("-Ln")
+        .arg(dir.join(format!("{output}.labels")))
         .arg("-o")
         .arg(&file)
         .args(&objects))?;

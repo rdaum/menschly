@@ -343,7 +343,9 @@ fn assign_storage_with_direct_page_budget(
 /// routine, through a pointer, by trap or from inline assembly) may come
 /// back into any routine that is exported or has its address taken, and
 /// whatever an interrupt handler can reach may run at any time, so keeps
-/// slots of its own.
+/// slots of its own. The program's entry (the module's declared entry, or
+/// else an exported `main`, which the MEGA65 runtime calls) runs once, at
+/// the bottom of the stack: nothing calls back into it.
 fn overlay_private_slots(module: &Module, assignment: &mut StorageAssignment) {
     let names: Vec<&str> = module
         .routines
@@ -387,7 +389,14 @@ fn overlay_private_slots(module: &Module, assignment: &mut StorageAssignment) {
             }
         }
     }
-    let outside: Vec<usize> = (0..count).filter(|&i| entered_from_outside[i]).collect();
+    let entry = module
+        .entry
+        .as_ref()
+        .and_then(|entry| index_of(&entry.routine))
+        .or_else(|| index_of("main").filter(|&i| module.routines[i].export));
+    let outside: Vec<usize> = (0..count)
+        .filter(|&i| entered_from_outside[i] && Some(i) != entry)
+        .collect();
     for i in 0..count {
         if opaque[i] {
             calls[i].extend(outside.iter().copied());
@@ -3363,5 +3372,35 @@ mod tests {
         // `elsewhere` might call back into the exported routine.
         assert_ne!(at("__dp_leaves_param_e"), at("__dp_callback_param_d"));
         assert!(at("__dp_left_param_a").is_some());
+    }
+
+    #[test]
+    fn calls_out_do_not_come_back_into_the_programs_main() {
+        let module = crate::frontend::compile_source(
+            "
+            module Program
+            external procedure elsewhere()
+            procedure first(a: u16)
+                elsewhere()
+                a = a + 1
+                return
+            end
+            procedure second(b: u16)
+                elsewhere()
+                b = b + 1
+                return
+            end
+            export function main(): u8
+                first(1)
+                second(2)
+                return 0
+            end
+            ",
+        )
+        .unwrap();
+        let assignment = assign_storage(&module);
+        let at = |name: &str| assignment.overlay.get(name).copied();
+        assert!(at("__dp_first_param_a").is_some());
+        assert_eq!(at("__dp_first_param_a"), at("__dp_second_param_b"));
     }
 }
