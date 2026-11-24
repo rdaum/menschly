@@ -17,4 +17,4 @@ SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy DISPLAY= WAYLAND_DISPLAY= \
   timeout $(( ${1:-60} * 3 + 60 )) /usr/games/mame bublboblr -rompath "$roms" \
   -video none -sound none -nothrottle -skip_gameinfo -seconds_to_run "${1:-60}" \
   -cfg_directory "$state/cfg" -nvram_directory "$state/nvram" \
-  -snapshot_directory "$snapdir" -autoboot_script "$here/probe.lua" >/dev/null 2>&1 || true
+  -snapshot_directory "$snapdir" -autoboot_script "$here/${PROBE_SCRIPT:-probe.lua}" >/dev/null 2>&1 || true

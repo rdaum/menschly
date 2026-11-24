@@ -86,7 +86,7 @@ export function main(): u8
     var after: u16
     var lines: u16
     vic4_init()
-    actors_sheet(u32(addr(DEMO_IMAGES)), u32(addr(DEMO_PALETTES)), u32(addr(DEMO_CELLS)))
+    actors_sheet(DEMO_IMAGES, u32(addr(DEMO_PALETTES)), u32(addr(DEMO_CELLS)))
     actors_software(SCREEN, COLUMNS, ROWS, SLOTS, ACTOR_CHARACTERS, ENTRIES)
     actors_hardware(SPRITE_TABLE, SPRITE_BUFFERS, 1, 24, 46)
     bb_draw_room(1, 0, u32(addr(DEMO_ROOM_TILES)), u32(addr(DEMO_ROOM_PALETTES)),

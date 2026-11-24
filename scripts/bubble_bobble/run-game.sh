@@ -38,6 +38,9 @@ fi
 # rom_tables.py lists the sprites its tables use; demo_assets.py takes them.
 (cd "$here" && python3 rom_tables.py "$assets" >/dev/null)
 (cd "$here" && python3 demo_assets.py)
+# The sound bank: the arcade's theme and effects, captured from MAME
+# (capture_sound.py 30 0f; sound_effects.py 31 25 11 0d).
+(cd "$here" && python3 sound_bank.py "$assets")
 # The input replay module: replay.py writes one with a script of inputs;
 # otherwise the game reads the joystick.
 replay="${REPLAY_MODULE:-$assets/game-replay.mensch}"
@@ -61,8 +64,12 @@ cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- 
   "$root/lib/actors.mensch" \
   "$assets/bubble-demo-data.mensch" \
   "$assets/bubble-rom-tables.mensch" \
+  "$here/bubble-sound.mensch" \
+  "$assets/bubble-sound-bank.mensch" \
   "$replay"
 
+# The sprite images and the sound go in the ROM image's upper 64 KiB.
+python3 "$here/inject_bank.py" "$rom" "$assets/game-bank.bin"
 echo "rom: $rom"
 
 if [[ -n "$keep_rom" ]]; then cp "$rom" "$keep_rom"; echo "kept: $keep_rom"; fi

@@ -1,0 +1,70 @@
+module SoundPlayer
+
+# Plays a captured piece of the arcade's music on the MEGA65's FM chip: the
+# stream sound_stream.py makes (the arcade's own OPL writes, F-numbers
+# rescaled for this chip) lies at linear STREAM, where play-sound.sh puts
+# it in the ROM image. Each tick's writes go out as the arcade's timer
+# would have them, the ticks spread over the 50 Hz frames.
+
+import Sound
+import Vic4
+
+const STREAM: u32 = $30000
+const END = $ff
+# Ticks are paced in hundredths of a hertz against the frame rate.
+const FRAME_HZ_100 = 5000
+const QUIET_LINE = 250
+
+# For a headless check: ticks played (u16) and passes started.
+fixed($0e00) volatile var played: u16
+fixed($0e02) volatile var passes: u8
+
+var at: u16
+var loop_at: u16
+
+function byte(offset: u16): u8
+    var stream: far ^u8
+    stream = STREAM
+    return stream[offset]
+end
+
+# Plays the next tick's writes, going back to the loop at the end.
+procedure tick()
+    var count: u8
+    count = byte(at)
+    if count == END
+        at = loop_at
+        passes = passes + 1
+        count = byte(at)
+    end
+    at = at + 1
+    while count
+        fm_write(byte(at), byte(at + 1))
+        at = at + 2
+        count = count - 1
+    end
+    played = played + 1
+    return
+end
+
+export function main(): u8
+    var rate: u16
+    var owed: u16
+    vic4_init()
+    sound_init()
+    rate = u16(byte(0)) | (u16(byte(1)) << 8)
+    loop_at = u16(byte(2)) | (u16(byte(3)) << 8)
+    at = 4
+    played = 0
+    passes = 0
+    owed = 0
+    repeat
+        vic4_wait_line(QUIET_LINE)
+        owed = owed + rate
+        while owed >= FRAME_HZ_100
+            owed = owed - FRAME_HZ_100
+            tick()
+        end
+    until 0
+    return 0
+end

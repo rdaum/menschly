@@ -94,7 +94,7 @@ export function main(): u8
     var x: u16
     var y: u16
     vic4_init()
-    actors_sheet(u32(addr(DEMO_IMAGES)), u32(addr(DEMO_PALETTES)), u32(addr(DEMO_CELLS)))
+    actors_sheet(DEMO_IMAGES, u32(addr(DEMO_PALETTES)), u32(addr(DEMO_CELLS)))
     actors_software(SCREEN, COLUMNS, ROWS, SLOTS, ACTOR_CHARACTERS, ENTRIES)
     actors_hardware(SPRITE_TABLE, SPRITE_BUFFERS, 1, SPRITE_X0, SPRITE_Y0)
     vic4_border(0)

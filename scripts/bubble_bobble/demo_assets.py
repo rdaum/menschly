@@ -15,7 +15,10 @@ Run after extract.py and convert.py:
 Writes `target/bubble-bobble/bubble-demo-data.mensch`, module
 `BubbleDemoData`, which exports:
 
-  DEMO_IMAGES: [images * 128]u8      sprite images, 8 bytes per row
+  DEMO_IMAGES: u32                   where the sprite images are (128
+                                     bytes each, 8 per row): demo-images.bin,
+                                     which inject_bank.py puts in the ROM
+                                     image's upper 64 KiB, at IMAGES_AT
   DEMO_PALETTES: [palettes * 48]u8   16 RGB triples each
   DEMO_CELLS: [cells * 2]u16         per cell its image number (bit 15:
                                      mirrored) and palette number
@@ -27,6 +30,7 @@ Writes `target/bubble-bobble/bubble-demo-data.mensch`, module
 from pathlib import Path
 
 from convert import MIRRORED, mirror_image, pack_set
+from inject_bank import BANK as IMAGES_AT
 
 ROOT = Path(__file__).resolve().parents[2]
 D = ROOT / "target/bubble-bobble"
@@ -124,8 +128,11 @@ def main():
     out.append("# asset pack: the cells the animation demo uses, renumbered from zero in\n")
     out.append("# cycle order.\n\n")
     out.append('metadata data_segment = "RODATA"\n\n')
-    out.append(byte_array("DEMO_IMAGES", len(demo_images) * IMAGE, b"".join(demo_images), 8,
-                          f"{len(demo_images)} sprite images, 128 bytes each, 8 bytes per row"))
+    # The images are too big for bank 0: they go in the ROM's upper bank.
+    (D / "demo-images.bin").write_bytes(b"".join(demo_images))
+    out.append(f"# {len(demo_images)} sprite images, 128 bytes each, 8 bytes per row, in the\n")
+    out.append("# ROM image's upper bank (demo-images.bin, put there by inject_bank.py)\n")
+    out.append(f"export const DEMO_IMAGES: u32 = ${IMAGES_AT:x}\n")
     out.append("\n")
     out.append(byte_array("DEMO_PALETTES", len(demo_palettes) * PALETTE, b"".join(demo_palettes), 12,
                           f"{len(demo_palettes)} palettes, 16 RGB triples each"))

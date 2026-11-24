@@ -1,0 +1,302 @@
+module BubbleSound
+
+# The game's sound: the arcade's theme on the FM chip and its effects on
+# the SIDs, from the sound bank sound_bank.py packs into the ROM image
+# (BubbleSoundBank says where).
+#
+# The music is a stream of the arcade's own FM register writes, one tick of
+# them at a time (see sound_stream.py: per tick a count and that many
+# register/value pairs; $FE offset count plays `count` earlier ticks again;
+# $FF loops). Each effect is a SID stream (see sound_effects.py: per tick a
+# mask of what changes, then the voices' frequencies, the volume and the
+# voices' starting control bytes; $80 ends it), played on a SID of its own.
+# Ticks come at the arcade's timer rates, spread over the 50 Hz frames:
+# sound_frame once a frame.
+
+import BubbleSoundBank
+
+const END = $ff
+const EFFECT_END = $80
+const REPEAT = $fe
+# A tick of more writes than this goes on in the next count.
+const MAX_COUNT = 253
+# Ticks are paced in hundredths of a hertz against the frame rate.
+const FRAME_HZ_100 = 5000
+
+# The FM chip (its registers at FM_CHIP + register) and the mixer (a
+# coefficient selected, then its value; each input has four: speaker left
+# and right at +0/+$20, headphones at +$c0/+$e0, two bytes each, high first).
+# The game talks to these itself rather than through lib/sound, whose
+# parameters the direct page has no room for.
+const FM_CHIP: u32 = $fe00000
+const FM_CHANNELS = 9
+const FM_KEY_BLOCK = $b0
+const FM_TEST = $01
+const FM_WAVEFORM_SELECT = $20
+fixed($d6f4) volatile var mixer_select: u8
+fixed($d6f5) volatile var mixer_value: u8
+const MIX_FM = $1c
+const MIX_MASTER = $1e
+const MIX_OUTPUTS: [4]u8 = [$00, $20, $c0, $e0]
+const MIX_SIDS_1_2 = $00
+const MIX_SIDS_3_4 = $02
+const GAIN = $be
+# The four SIDs, $20 apart: per voice (7 apart) frequency (2), pulse width
+# (2), control, attack/decay and sustain/release; then the volume at +$18.
+fixed($d400) volatile var sid: [128]u8
+const SID_VOICES = 3
+const VOICE_STRIDE = 7
+const CONTROL = 4
+const ATTACK_DECAY = 5
+const SUSTAIN_RELEASE = 6
+const PULSE_HIGH = 3
+const VOLUME = $18
+# Full while gated, at once; the streams shape the loudness with the volume.
+const HELD = $f0
+const SQUARE = $08
+const SLOTS = 4
+
+# chip_write writes far_value; mix() sets mix_input to mix_gain.
+var far_value: u8
+var mix_input: u8
+var mix_gain: u8
+var mix_output: u8
+var effect_slot: u8
+var effect_base: u8
+var effect_mask: u8
+var effect_voice: u8
+var voice_at: u8
+var effect_on: [SLOTS]u8
+var effect_at: [SLOTS]u16
+var effect_rate: [SLOTS]u16
+var effect_owed: [SLOTS]u16
+var music_on: u8
+var music_at: u16
+var music_loop: u16
+var music_rate: u16
+var music_owed: u16
+var repeat_left: u16
+var repeat_return: u16
+# Working values kept here rather than as locals: the direct page is full.
+var tick_count: u8
+var tick_more: u8
+var stop_channel: u8
+var word_at: u16
+
+function bank_byte(offset: u16): u8
+    var bank: far ^u8
+    bank = SOUND_BANK
+    return bank[offset]
+end
+
+# Writes far_value to the FM chip's register `register`.
+procedure chip_write(register: u8)
+    var chip: far ^u8
+    chip = FM_CHIP + u32(register)
+    chip^ = far_value
+    return
+end
+
+# Sets mix_input's gain to mix_gain (as the gain's high byte, the low one
+# alike) on every output.
+procedure mix()
+    mix_output = 0
+    while mix_output != 4
+        mixer_select = mix_input + MIX_OUTPUTS[mix_output]
+        mixer_value = mix_gain
+        mixer_select = mix_input + MIX_OUTPUTS[mix_output] + 1
+        mixer_value = mix_gain
+        mix_output = mix_output + 1
+    end
+    return
+end
+
+# The bank's little-endian word at word_at.
+function bank_word(): u16
+    return u16(bank_byte(word_at)) | (u16(bank_byte(word_at + 1)) << 8)
+end
+
+# Sets up the FM chip, the SIDs and the mixer.
+export procedure sound_start()
+    far_value = 0
+    stop_channel = $20
+    while stop_channel != $f6
+        chip_write(stop_channel)
+        stop_channel = stop_channel + 1
+    end
+    far_value = FM_WAVEFORM_SELECT
+    chip_write(FM_TEST)
+    effect_voice = 0
+    while effect_voice != $80
+        sid[effect_voice] = 0
+        effect_voice = effect_voice + 1
+    end
+    mix_gain = GAIN
+    mix_input = MIX_FM
+    mix()
+    mix_input = MIX_SIDS_1_2
+    mix()
+    mix_input = MIX_SIDS_3_4
+    mix()
+    mix_gain = $ff
+    mix_input = MIX_MASTER
+    mix()
+    return
+end
+
+# Starts the theme from the top, at MUSIC_HZ.
+export procedure music_start()
+    music_rate = MUSIC_HZ
+    word_at = 2
+    music_loop = bank_word()
+    music_at = 4
+    music_owed = 0
+    repeat_left = 0
+    music_on = 1
+    return
+end
+
+# Changes the theme's pace without starting it again.
+export procedure music_pace(rate: u16)
+    music_rate = rate
+    return
+end
+
+# Stops the theme, releasing its notes (the key-on bit, with the block and
+# F-number high bits cleared too).
+export procedure music_stop()
+    music_on = 0
+    far_value = 0
+    stop_channel = 0
+    while stop_channel != FM_CHANNELS
+        chip_write(FM_KEY_BLOCK + stop_channel)
+        stop_channel = stop_channel + 1
+    end
+    return
+end
+
+# One tick of the theme's writes.
+procedure music_tick()
+    tick_more = 1
+    while tick_more
+        tick_count = bank_byte(music_at)
+        if tick_count == END
+            music_at = music_loop
+            tick_count = bank_byte(music_at)
+        end
+        if tick_count == REPEAT
+            repeat_return = music_at + 5
+            word_at = music_at + 3
+            repeat_left = bank_word()
+            word_at = music_at + 1
+            music_at = bank_word()
+            tick_count = bank_byte(music_at)
+        end
+        tick_more = 0
+        if tick_count == MAX_COUNT
+            tick_more = 1
+        end
+        music_at = music_at + 1
+        while tick_count
+            far_value = bank_byte(music_at + 1)
+            chip_write(bank_byte(music_at))
+            music_at = music_at + 2
+            tick_count = tick_count - 1
+        end
+    end
+    if repeat_left
+        repeat_left = repeat_left - 1
+        if repeat_left == 0
+            music_at = repeat_return
+        end
+    end
+    return
+end
+
+# Plays the ticks this frame owes the theme and the effects.
+export procedure sound_frame()
+    if music_on
+        music_owed = music_owed + music_rate
+        while music_owed >= FRAME_HZ_100
+            music_owed = music_owed - FRAME_HZ_100
+            music_tick()
+        end
+    end
+    effect_slot = 0
+    while effect_slot != SLOTS
+        if effect_on[effect_slot]
+            effect_owed[effect_slot] = effect_owed[effect_slot] + effect_rate[effect_slot]
+            while effect_owed[effect_slot] >= FRAME_HZ_100
+                effect_owed[effect_slot] = effect_owed[effect_slot] - FRAME_HZ_100
+                effect_tick()
+            end
+        end
+        effect_slot = effect_slot + 1
+    end
+    return
+end
+
+# Plays effect `effect` (EFFECT_BLOW ...) from the start, each on a SID of
+# its own.
+export procedure effect_play(effect: u8)
+    effect_slot = effect & (SLOTS - 1)
+    effect_base = effect_slot << 5
+    sid[effect_base + VOLUME] = 0
+    voice_at = effect_base
+    effect_voice = 0
+    while effect_voice != SID_VOICES
+        sid[voice_at + CONTROL] = 0
+        sid[voice_at + ATTACK_DECAY] = 0
+        sid[voice_at + SUSTAIN_RELEASE] = HELD
+        sid[voice_at + PULSE_HIGH] = SQUARE
+        voice_at = voice_at + VOICE_STRIDE
+        effect_voice = effect_voice + 1
+    end
+    word_at = EFFECT_AT[effect]
+    effect_rate[effect_slot] = bank_word()
+    effect_at[effect_slot] = word_at + 2
+    effect_owed[effect_slot] = FRAME_HZ_100
+    effect_on[effect_slot] = 1
+    return
+end
+
+# One tick of effect_slot's stream.
+procedure effect_tick()
+    effect_base = effect_slot << 5
+    effect_mask = bank_byte(effect_at[effect_slot])
+    effect_at[effect_slot] = effect_at[effect_slot] + 1
+    if effect_mask == EFFECT_END
+        effect_on[effect_slot] = 0
+        sid[effect_base + VOLUME] = 0
+        sid[effect_base + CONTROL] = 0
+        sid[effect_base + VOICE_STRIDE + CONTROL] = 0
+        sid[effect_base + VOICE_STRIDE * 2 + CONTROL] = 0
+        return
+    end
+    voice_at = effect_base
+    effect_voice = 1
+    while effect_voice != 8
+        if effect_mask & effect_voice
+            sid[voice_at] = bank_byte(effect_at[effect_slot])
+            sid[voice_at + 1] = bank_byte(effect_at[effect_slot] + 1)
+            effect_at[effect_slot] = effect_at[effect_slot] + 2
+        end
+        voice_at = voice_at + VOICE_STRIDE
+        effect_voice = effect_voice << 1
+    end
+    if effect_mask & 8
+        sid[effect_base + VOLUME] = bank_byte(effect_at[effect_slot])
+        effect_at[effect_slot] = effect_at[effect_slot] + 1
+    end
+    voice_at = effect_base + CONTROL
+    effect_voice = $10
+    while effect_voice != $80
+        if effect_mask & effect_voice
+            sid[voice_at] = bank_byte(effect_at[effect_slot])
+            effect_at[effect_slot] = effect_at[effect_slot] + 1
+        end
+        voice_at = voice_at + VOICE_STRIDE
+        effect_voice = effect_voice << 1
+    end
+    return
+end

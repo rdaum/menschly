@@ -20,6 +20,8 @@ import BubblePhysics
 import BubbleBubbles
 import BubbleAir
 import BubbleRomTables
+import BubbleSound
+import BubbleSoundBank
 import GameReplay
 
 # Chip RAM, as in the animation demo.
@@ -321,6 +323,7 @@ procedure start_round()
         actor_hide(enemy_actor[i])
     end
     bubbles_reset()
+    music_start()
     chaining = 0
     item_index = ROUND1_ITEM
     if rounds_played
@@ -430,6 +433,9 @@ procedure move_bub(buttons: u8)
     end
     if (pressed & JOY_FIRE) and blowing == 0
         b = bubble_blow(body_x(PLAYER), body_y(PLAYER), facing_left, bubble_life())
+        if b != NO_BUBBLE
+            effect_play(EFFECT_BLOW)
+        end
         blowing = BLOW_FRAMES
     end
     body_step(PLAYER)
@@ -814,6 +820,7 @@ procedure foods()
             if enemy_state[food_i] == FRUIT
                 if bub_collects()
                     enemy_state[food_i] = COLLECTED
+                    effect_play(EFFECT_FRUIT)
                 elsif enemy_life[food_i] == 0
                     enemy_state[food_i] = GONE
                 end
@@ -890,6 +897,7 @@ procedure burst(b: u8, left: u8, fresh: u8)
     enemy = bubble_pop(b)
     if enemy != NO_CAPTIVE
         start_dying(enemy, bubble_x(b), bubble_y(b), left)
+        effect_play(EFFECT_POP)
         enemy_chain[enemy] = chain_kills
         if chain_kills < 10
             chain_kills = chain_kills + 1
@@ -1054,6 +1062,7 @@ procedure check_caught()
     for i = 0 to ENEMIES - 1
         if enemy_state[i] == ACTIVE and near(PLAYER, FIRST_ENEMY + i, CATCH_DISTANCE)
             caught = CAUGHT_FRAMES
+            effect_play(EFFECT_CAUGHT)
         end
     end
     return
@@ -1218,7 +1227,8 @@ export function main(): u8
     var i: u8
     var buttons: u8
     vic4_init()
-    actors_sheet(u32(addr(DEMO_IMAGES)), u32(addr(DEMO_PALETTES)), u32(addr(DEMO_CELLS)))
+    sound_start()
+    actors_sheet(DEMO_IMAGES, u32(addr(DEMO_PALETTES)), u32(addr(DEMO_CELLS)))
     actors_software(SCREEN, COLUMNS, ROWS, SLOTS, ACTOR_CHARACTERS, ENTRIES)
     actors_hardware(SPRITE_TABLE, SPRITE_BUFFERS, 1, SPRITE_X0, SPRITE_Y0)
     vic4_border(0)
@@ -1266,6 +1276,7 @@ export function main(): u8
         draw_bubbles()
         draw_item()
         actors_frame()
+        sound_frame()
         enter_bubbles()
         tick = tick + 1
     until 0
