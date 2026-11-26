@@ -5,7 +5,7 @@ vector irq = sky
 # drawn in code, a sky gradient changed every 8 raster lines by a raster
 # interrupt (it shows through the tiles' transparent pixels), a 16-colour
 # hero moved with the joystick in port 2, and a 16-colour wisp drifting
-# along the middle ledge. Run it with scripts/run-vic4-demo.sh.
+# along the middle ledge. Run it with examples/run-vic4-demo.sh.
 
 import Vic4
 

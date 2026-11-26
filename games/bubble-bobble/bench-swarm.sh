@@ -3,7 +3,7 @@
 # headless in Xemu: the average and worst raster lines actors_frame takes
 # per frame over 128 frames, and the actor rows that found no slot.
 #
-#   scripts/bubble_bobble/bench-swarm.sh 60
+#   games/bubble-bobble/bench-swarm.sh 60
 #
 # Uses the assets run-demo.sh / run-game.sh generate in target/bubble-bobble.
 set -euo pipefail
@@ -15,18 +15,18 @@ bubbles="${1:-60}"
 work="$assets/bench-$bubbles"
 mkdir -p "$work"
 
-(cd "$here" && python3 demo_assets.py >/dev/null)
+(cd "$here/tools" && python3 demo_assets.py >/dev/null)
 printf 'module SwarmSize\nexport const BUBBLES = %d\n' "$bubbles" > "$work/swarm-size.mensch"
 rom="$work/swarm.rom"
 cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- \
   --no-run --rom "$rom" --work-dir "$work/build" \
-  "$here/bubble-swarm.mensch" \
-  "$here/bubble-video.mensch" \
+  "$here/src/bubble-swarm.mensch" \
+  "$here/src/bubble-video.mensch" \
   "$root/lib/vic4.mensch" \
   "$root/lib/actors.mensch" \
   "$assets/bubble-demo-data.mensch" \
   "$work/swarm-size.mensch" >/dev/null
-python3 "$here/inject_bank.py" "$rom" "$assets/demo-images.bin"
+python3 "$here/tools/inject_bank.py" "$rom" "$assets/demo-images.bin"
 
 xemu="${MENSCH_XMEGA65:-$HOME/src/xemu/build/bin/xmega65.native}"
 mkdir -p "$work/sd"

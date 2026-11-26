@@ -807,28 +807,28 @@ fn interrupts_preserve_runtime_registers_and_scratch() {
 }
 
 /// Hellord's MEGA65 kernel modules and their window banks (as in
-/// `scripts/boot-hellord-mega65.sh`).
+/// `hellord/boot-mega65.sh`).
 const HELLORD_MEGA65_MODULES: [(&str, Option<u8>); 10] = [
-    ("hellord-os", None),
-    ("hellord-dos", Some(1)),
-    ("hellord-fat", Some(2)),
-    ("hellord-exec", Some(2)),
-    ("hellord-console", None),
-    ("hellord-files", None),
-    ("mega65-machine", None),
-    ("hellord-bios", None),
-    ("hellord-gemdos", None),
-    ("hellord-traps-mega65", None),
+    ("os", None),
+    ("dos", Some(1)),
+    ("fat", Some(2)),
+    ("exec", Some(2)),
+    ("console", None),
+    ("files", None),
+    ("machines/mega65", None),
+    ("bios", None),
+    ("gemdos", None),
+    ("traps-mega65", None),
 ];
 
 fn hellord_rom(name: &str) -> (PathBuf, Vec<u8>) {
-    let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let hellord = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hellord");
     let sources = HELLORD_MEGA65_MODULES
         .iter()
         .enumerate()
         .map(|(index, (module, window))| mega65::KernelModule {
-            name: format!("{index}-{module}"),
-            source: std::fs::read_to_string(examples.join(format!("{module}.mensch")))
+            name: format!("{index}-{}", module.replace('/', "-")),
+            source: std::fs::read_to_string(hellord.join(format!("{module}.mensch")))
                 .expect("Hellord source should be readable"),
             window: *window,
         })
@@ -906,8 +906,8 @@ fn hellord_runs_typed_commands_and_reboots() {
 
 #[test]
 fn sd_card_block_device_reads_and_writes_the_fat_partition() {
-    let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let machine = std::fs::read_to_string(examples.join("mega65-machine.mensch")).unwrap();
+    let hellord = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hellord");
+    let machine = std::fs::read_to_string(hellord.join("machines/mega65.mensch")).unwrap();
     let caller = "
         module SdTest
         external reentrant function blockdev_status(): u16
@@ -1006,19 +1006,19 @@ fn hellord_blkinfo_reads_the_sd_card_partition() {
 }
 
 fn hellord_library_rom(name: &str, caller: &str) -> (PathBuf, Vec<u8>) {
-    let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let hellord = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hellord");
     let mut sources = vec![mega65::KernelModule {
         name: "0-caller".to_owned(),
         source: caller.to_owned(),
         window: None,
     }];
     for (index, (module, window)) in HELLORD_MEGA65_MODULES.iter().enumerate() {
-        if *module == "hellord-os" {
+        if *module == "os" {
             continue;
         }
         sources.push(mega65::KernelModule {
-            name: format!("{}-{module}", index + 1),
-            source: std::fs::read_to_string(examples.join(format!("{module}.mensch")))
+            name: format!("{}-{}", index + 1, module.replace('/', "-")),
+            source: std::fs::read_to_string(hellord.join(format!("{module}.mensch")))
                 .expect("Hellord source should be readable"),
             window: *window,
         });
@@ -2995,7 +2995,7 @@ fn actors_priority_takes_slots_and_the_loser_retries() {
 fn bubble_physics_walks_jumps_lands_and_wraps() {
     let physics = std::fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("scripts/bubble_bobble/bubble-physics.mensch"),
+            .join("games/bubble-bobble/src/bubble-physics.mensch"),
     )
     .expect("physics module should be readable");
     let caller = "
@@ -3219,7 +3219,7 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
     let read = |name: &str| {
         std::fs::read_to_string(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("scripts/bubble_bobble")
+                .join("games/bubble-bobble/src")
                 .join(name),
         )
         .expect("module should be readable")

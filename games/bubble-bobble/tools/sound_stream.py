@@ -26,7 +26,8 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent.parent
+GAME = HERE.parent
+ROOT = GAME.parent.parent
 SOUND = ROOT / "target" / "bubble-bobble" / "sound"
 ARCADE_RATE = 3_000_000 / 72
 MEGA65_RATE = 49716

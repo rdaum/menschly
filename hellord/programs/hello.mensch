@@ -1,7 +1,7 @@
 module Hello
 
 # A Hellord program: build it with
-#   cargo run --bin mensch-mega65-program -- -o HELLO.PRG examples/programs/hello.mensch
+#   cargo run --bin mensch-mega65-program -- -o HELLO.PRG hellord/programs/hello.mensch
 # and run it from the SD card with `S:` then `HELLO` (or `RUN HELLO.PRG`).
 # Programs reach the kernel only through the GEMDOS/BIOS trap table.
 

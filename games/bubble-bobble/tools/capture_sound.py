@@ -31,7 +31,8 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent.parent
+GAME = HERE.parent
+ROOT = GAME.parent.parent
 OUT = ROOT / "target" / "bubble-bobble" / "sound"
 CLOCK = 3_000_000
 # Ticks of identical key-ons that make a repeat.
@@ -43,7 +44,7 @@ AT = 150
 def capture(cmd):
     log = OUT / f"{cmd:02x}.log"
     env = dict(os.environ, CMD=f"{cmd:02X}", AT=str(AT), FRAMES=str(AT + int(SECONDS * 59)), OUT=str(log))
-    subprocess.run([str(HERE / "mame" / "sound.sh"), str(SECONDS + 4)], env=env, check=True)
+    subprocess.run([str(GAME / "mame" / "sound.sh"), str(SECONDS + 4)], env=env, check=True)
     return log.read_text().split("\n")
 
 

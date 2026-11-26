@@ -197,7 +197,7 @@ reaches the dispatcher depends on the target:
   `trap` pushes the arguments with the reentrant ABI and calls the dispatcher
   through a fixed vector table: `jsr ($FF00 + 2 * family)`. A module fills
   table slots with `vector trap_XX = dispatcher` (families `$00`-`$0f`); see
-  `examples/hellord-traps-mega65.mensch`. The table address is part of the
+  `hellord/traps-mega65.mensch`. The table address is part of the
   MEGA65 kernel ABI, so separately loaded programs can call the kernel
   without linking against it.
 
@@ -709,7 +709,7 @@ block and clears bits 16-31, and `bios_block_set_lba_high(dev, high)`
 ### Hellord filesystems
 
 Drive `A:` is the built-in ROM filesystem. Drive `S:` is the BIOS block
-device mounted as a FAT volume by `hellord-fat.mensch`, which supports FAT16
+device mounted as a FAT volume by `hellord/fat.mensch`, which supports FAT16
 and FAT32 (FAT12 is rejected): root-directory listing across multiple
 sectors and clusters, opening 8.3 names case-insensitively, reading through
 cluster chains, and in-place writes within a file's existing size. File
@@ -719,7 +719,7 @@ not yet supported.
 ### Hellord programs (MEGA65)
 
 On a FAT drive, `RUN NAME` or just `NAME` loads and runs `NAME.PRG` (the
-extension is added when the name has none) with `hellord-exec.mensch`.
+extension is added when the name has none) with `hellord/exec.mensch`.
 Programs are relocatable o65 files ("small" mode, byte-wise relocation)
 built by `mensch-mega65-program` (`mega65::build_program`):
 

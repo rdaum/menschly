@@ -32,7 +32,8 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent.parent
+GAME = HERE.parent
+ROOT = GAME.parent.parent
 SOUND = ROOT / "target" / "bubble-bobble" / "sound"
 ROMS = Path(os.environ.get("BUBBLE_ROMS", ROOT / "target" / "bubble-bobble" / "re" / "mame" / "roms"))
 # The YM2203's clock, and its frequency: fnum * 2^block * YM_CLOCK / YM_DIVISOR.
@@ -68,7 +69,7 @@ def record(cmd):
                     "-video", "none", "-sound", "none", "-nothrottle", "-skip_gameinfo",
                     "-seconds_to_run", str(seconds), "-wavwrite", str(wav),
                     "-cfg_directory", str(state / "cfg"), "-nvram_directory", str(state / "nvram"),
-                    "-autoboot_script", str(HERE / "mame" / "reglog.lua")],
+                    "-autoboot_script", str(GAME / "mame" / "reglog.lua")],
                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with wave.open(str(wav)) as w:
         rate, channels = w.getframerate(), w.getnchannels()

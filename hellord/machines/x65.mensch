@@ -78,7 +78,7 @@ export procedure machine_reboot()
     return
 end
 
-# Program loading (hellord-exec.mensch) is MEGA65-only for now: the x65's
+# Program loading (hellord/exec.mensch) is MEGA65-only for now: the x65's
 # 65816 programs would need their own loader entry and calling convention.
 export stack function exec_program(path: near ^u8): u16
     return $fffd

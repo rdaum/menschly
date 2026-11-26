@@ -9,7 +9,7 @@ module BubbleDemo
 # buffer; the 22 bubbles are software, as far more of them share a line than
 # the eight hardware sprites could show.
 #
-# Run it with scripts/bubble_bobble/run-demo.sh, which regenerates the assets
+# Run it with games/bubble-bobble/run-demo.sh, which regenerates the assets
 # and boots the result in Xemu.
 #
 # The full sprite pack is 147 KB, far more than the kernel's 24 KB image

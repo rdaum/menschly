@@ -21,10 +21,11 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent.parent
+GAME = HERE.parent
+ROOT = GAME.parent.parent
 ASSETS = ROOT / "target" / "bubble-bobble"
 WORK = ASSETS / "replay"
-MAME_DIR = HERE / "mame"
+MAME_DIR = GAME / "mame"
 XEMU = os.environ.get("MENSCH_XMEGA65", str(Path.home() / "src/xemu/build/bin/xmega65.native"))
 
 # Our joystick bits (lib/vic4.mensch) and the arcade's input fields.
@@ -93,7 +94,7 @@ def run_ours(inputs, lives):
                       f"[{', '.join(str(v) for v in lives) or '0'}]\n")
     rom = WORK / "game.rom"
     env = dict(os.environ, REPLAY_MODULE=str(module), GAME_ROM=str(rom))
-    subprocess.run([str(HERE / "run-game.sh"), "--no-run"], env=env, check=True,
+    subprocess.run([str(GAME / "run-game.sh"), "--no-run"], env=env, check=True,
                    stdout=subprocess.DEVNULL)
     mem = WORK / "mem.bin"
     mem.unlink(missing_ok=True)

@@ -10,7 +10,7 @@ module BubbleGame
 # and puts him back at the start.
 #
 # Movement and collision are BubblePhysics', bubbles BubbleBubbles', drawing
-# lib/actors.mensch's. Run it with scripts/bubble_bobble/run-game.sh.
+# lib/actors.mensch's. Run it with games/bubble-bobble/run-game.sh.
 
 import Vic4
 import Actors

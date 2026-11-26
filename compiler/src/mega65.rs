@@ -160,7 +160,7 @@ machine_program_bank:
 	tax
 	rts
 
-; Machine services for the program loader (hellord-exec.mensch).
+; Machine services for the program loader (hellord/exec.mensch).
 ; First byte of free RAM after the kernel.
 machine_program_start:
 	lda #<(__BSS_RUN__ + __BSS_SIZE__)
@@ -634,7 +634,7 @@ __m65_irq:
 	.addr __m65_irq
 
 .segment "CODE"
-; Machine services for the program loader (hellord-exec.mensch). Programs
+; Machine services for the program loader (hellord/exec.mensch). Programs
 ; run in their own bank: $0200-$bfff of linear $40000, with their own base
 ; page (from $02).
 machine_program_start:

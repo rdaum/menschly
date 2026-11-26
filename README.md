@@ -26,27 +26,27 @@ the MEGA65.
 |---|---|
 | `compiler/src/` | The Mensch compiler: frontend, IR, storage assignment, 65816 and 45GS02 backends and optimizers, ca65 emitter, MEGA65 ROM builder and Xemu runner |
 | `compiler/src/bin/` | Command-line tools (below) |
-| `compiler/*.md` | Language documentation (below) |
-| `examples/hellord-*.mensch` | Hellord's modules |
-| `examples/mega65-machine.mensch`, `x65-machine.mensch`, `serial-ring.mensch` | Machine drivers: console and block device per machine |
-| `examples/programs/` | Programs that Hellord loads and runs |
-| `examples/vic4-demo.mensch` | Tiles, a raster sky gradient and 16-colour sprites on the MEGA65 |
-| `lib/` | Mensch libraries (`vic4.mensch`) |
-| `scripts/` | Boot Hellord or run the demo in an emulator |
+| `docs/` | Language documentation (below), and research notes in `docs/research/` |
+| `lib/` | Mensch libraries for the MEGA65: `vic4` (graphics and input), `actors` (sprites and software-drawn objects), `sound` (SIDs, FM, mixer) |
+| `hellord/` | Hellord's modules, and the scripts that boot it on the MEGA65 and the X65-like machine |
+| `hellord/machines/` | Machine drivers (console and block device per machine) and the X65 link config |
+| `hellord/programs/` | Programs that Hellord loads and runs |
+| `games/bubble-bobble/` | The Bubble Bobble port: game sources in `src/`, the asset, sound and arcade-comparison tools in `tools/`, MAME probes in `mame/` (see its README) |
+| `examples/` | Small MEGA65 demos: `vic4-demo` (tiles, a raster sky gradient, 16-colour sprites) and `sound-test` |
 | `loader/` | The o65 relocating loader in 65816 assembly |
 | `x65alike-emul/` | A small X65-like 65816 machine model used by the tests |
 | `tests/` | Emulator-backed integration tests |
 
 ## Documentation
 
-- [`compiler/INTRODUCTION.md`](compiler/INTRODUCTION.md): why Mensch, what it
+- [`docs/INTRODUCTION.md`](docs/INTRODUCTION.md): why Mensch, what it
   does better than C on the 65xx (with examples and generated code), and what
   C still does better.
-- [`compiler/LANGUAGE.md`](compiler/LANGUAGE.md): the language reference.
-- [`compiler/ABI.md`](compiler/ABI.md): how each construct is laid out and
+- [`docs/LANGUAGE.md`](docs/LANGUAGE.md): the language reference.
+- [`docs/ABI.md`](docs/ABI.md): how each construct is laid out and
   called on the 65816 and the MEGA65, including window banks and the
   direct-page overlay.
-- [`compiler/REGISTER_PLANNING.md`](compiler/REGISTER_PLANNING.md): notes on
+- [`docs/REGISTER_PLANNING.md`](docs/REGISTER_PLANNING.md): notes on
   register and direct-page allocation.
 
 ## A taste of Mensch
@@ -118,16 +118,16 @@ On a small benchmark the plain-routine code is 208 bytes against 290 for
 
 ```sh
 # Hellord on the MEGA65 (headless; prints the final screen)
-scripts/boot-hellord-mega65.sh --type-in 'VER\nDIR\nREBOOT\n'
+hellord/boot-mega65.sh --type-in 'VER\nDIR\nREBOOT\n'
 
 # Hellord on the X65-like 65816 machine (interactive in a terminal)
-scripts/boot-hellord-os.sh
+hellord/boot-x65.sh
 
 # The VIC-IV demo in an Xemu window (move the hero with joystick 2)
-scripts/run-vic4-demo.sh
+examples/run-vic4-demo.sh
 
 # A program for Hellord, then run it with `S:` and `HELLO`
-cargo run --bin mensch-mega65-program -- -o HELLO.PRG examples/programs/hello.mensch
+cargo run --bin mensch-mega65-program -- -o HELLO.PRG hellord/programs/hello.mensch
 ```
 
 Hellord's shell commands are `HELP`, `VER`, `DIR`, `STAT`, `PWD`, `CD`,

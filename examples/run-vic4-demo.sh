@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds examples/vic4-demo.mensch with lib/vic4.mensch into a MEGA65 ROM
 # and opens it in Xemu (with a window). Move the sprite with joystick 2.
-#   scripts/run-vic4-demo.sh               build and run
-#   scripts/run-vic4-demo.sh --rom FILE    also keep the ROM (usable as MEGA65.ROM)
+#   examples/run-vic4-demo.sh               build and run
+#   examples/run-vic4-demo.sh --rom FILE    also keep the ROM (usable as MEGA65.ROM)
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

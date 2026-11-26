@@ -17,7 +17,8 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent.parent
+GAME = HERE.parent
+ROOT = GAME.parent.parent
 sys.path.insert(0, str(HERE))
 
 import inject_bank  # noqa: E402

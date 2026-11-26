@@ -6,7 +6,7 @@ program ROM and bank, z80dasm disassemblies at the right origins, and seed
 symbol files of the addresses known so far, for the main CPU (seed.sym) and
 the sound CPU (sound-seed.sym).
 
-  python3 re_prep.py ../../examples/bubs            # -> target/bubble-bobble/re
+  python3 re_prep.py ../assets/bubs            # -> target/bubble-bobble/re
   python3 re_prep.py ROMDIR --output-dir DIR
 
 Needs z80dasm on PATH. Everything written is ROM-derived and stays local.
@@ -17,7 +17,7 @@ import subprocess
 import zlib
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 
 # (file, CRC32, size) of the program ROMs, as MAME's bublboblr lists them.
 FIXED = ("a78-25.51", 0x2D901C9D, 0x8000)    # main CPU $0000-$7FFF

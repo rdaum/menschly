@@ -1,11 +1,11 @@
 # Bubble Bobble assets for MEGA65
 
-From this directory, run the two offline tools with Python 3 and Pillow 9.1
+From `tools/`, run the two offline tools with Python 3 and Pillow 9.1
 or newer. The extractor accepts an unpacked US/Romstar MAME set or a complete
 `bublboblr.zip`. The converter reads the generated atlas and name index.
 
 ```sh
-python3 extract.py ../../examples/bubs
+python3 extract.py ../assets/bubs
 python3 convert.py
 ```
 
@@ -25,7 +25,7 @@ The extractor preserves the tile origin for native 16×16 frames. Short poses
 keep their vertical padding and full-height poses can have feet on row 15.
 Larger assemblies include the full extent of every 8×8 tile before
 nearest-neighbour reduction. Small symbols spanning a larger tile canvas are
-centred at their native resolution. In [frames.tsv](frames.tsv), adjacent
+centred at their native resolution. In [frames.tsv](tools/frames.tsv), adjacent
 rows with the same name assemble one frame. A tile code of `@NAME` reuses an
 earlier assembly. Other rows give the tile code in hex, dimensions in tiles,
 pixel offsets, tile order, flips, palette bank and optional `pen=entry`
@@ -71,8 +71,8 @@ and [room decoder](https://github.com/kstenerud/patch-a-bobble/blob/master/src/L
 room 1, each cycling its animation, under two rows of 22 bobbing bubbles.
 
 ```sh
-scripts/bubble_bobble/run-demo.sh             # build and run
-scripts/bubble_bobble/run-demo.sh --no-run    # build the ROM only
+games/bubble-bobble/run-demo.sh             # build and run
+games/bubble-bobble/run-demo.sh --no-run    # build the ROM only
 ```
 
 The 147 KB sprite pack does not fit the kernel's 24 KB image segment, so
@@ -90,7 +90,7 @@ screen frame and `anim_frame` gives each one's current frame.
 
 ## Calling from Mensch
 
-Compile [bubble-video.mensch](bubble-video.mensch) (room drawing), the
+Compile [bubble-video.mensch](src/bubble-video.mensch) (room drawing), the
 generated `bubble-frames.mensch`, [actors.mensch](../../lib/actors.mensch)
 and [vic4.mensch](../../lib/vic4.mensch) with your game. The sprite files
 can be anywhere DMA reaches, inside or outside chip RAM; the actors copy

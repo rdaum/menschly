@@ -7,17 +7,17 @@ if ! command -v ca65 >/dev/null 2>&1 && [ -x /tmp/cc65-root/usr/bin/ca65 ]; then
   export PATH="/tmp/cc65-root/usr/bin:$PATH"
 fi
 
-src="$repo_root/examples/hellord-os.mensch"
-dos_src="$repo_root/examples/hellord-dos.mensch"
-fat_src="$repo_root/examples/hellord-fat.mensch"
-console_src="$repo_root/examples/hellord-console.mensch"
-files_src="$repo_root/examples/hellord-files.mensch"
-serial_src="$repo_root/examples/serial-ring.mensch"
-bios_src="$repo_root/examples/hellord-bios.mensch"
-machine_src="$repo_root/examples/x65-machine.mensch"
-gemdos_src="$repo_root/examples/hellord-gemdos.mensch"
-traps_src="$repo_root/examples/hellord-traps.mensch"
-cfg="$repo_root/examples/hellord-os-x65.cfg"
+src="$repo_root/hellord/os.mensch"
+dos_src="$repo_root/hellord/dos.mensch"
+fat_src="$repo_root/hellord/fat.mensch"
+console_src="$repo_root/hellord/console.mensch"
+files_src="$repo_root/hellord/files.mensch"
+serial_src="$repo_root/hellord/machines/serial-ring.mensch"
+bios_src="$repo_root/hellord/bios.mensch"
+machine_src="$repo_root/hellord/machines/x65.mensch"
+gemdos_src="$repo_root/hellord/gemdos.mensch"
+traps_src="$repo_root/hellord/traps.mensch"
+cfg="$repo_root/hellord/machines/x65.cfg"
 max_steps=10000000
 if [ -t 0 ]; then
   max_steps=0

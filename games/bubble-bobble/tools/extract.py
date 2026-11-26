@@ -230,7 +230,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("rom", type=Path, help="MAME ZIP or directory of unpacked ROM chips")
     parser.add_argument("--output-dir", type=Path,
-                        default=HERE.parents[1] / "target/bubble-bobble", help="output directory")
+                        default=HERE.parents[2] / "target/bubble-bobble", help="output directory")
     args = parser.parse_args()
     try:
         generate(args.rom, args.output_dir)
