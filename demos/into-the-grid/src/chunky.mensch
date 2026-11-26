@@ -24,10 +24,15 @@ export const BUFFER_BYTES: u16 = 64000
 
 const BUFFER_A: u32 = $40000
 const BUFFER_B: u32 = $50000
-const MAP_A: u32 = $10000
-const MAP_B: u32 = $10800
+# The screen maps sit high in bank 1, leaving its start to the parts
+# (bank 1 ends at $1F800, where the first 2 KiB of colour RAM shows).
+export const MAP_A: u32 = $1e000
+export const MAP_B: u32 = $1e800
 # The raster line the swap waits for: past the screen's last line.
 const FLIP_LINE = 251
+
+# Where each column of characters starts in a buffer (column * 1600).
+const COLUMN_OFFSET: [COLUMNS]u16 = [0, 1600, 3200, 4800, 6400, 8000, 9600, 11200, 12800, 14400, 16000, 17600, 19200, 20800, 22400, 24000, 25600, 27200, 28800, 30400, 32000, 33600, 35200, 36800, 38400, 40000, 41600, 43200, 44800, 46400, 48000, 49600, 51200, 52800, 54400, 56000, 57600, 59200, 60800, 62400]
 
 # The buffer being drawn, and which one it is (0 A, 1 B).
 export var drawing: u32
@@ -96,7 +101,7 @@ end
 
 # The address of pixel (x, y) in the buffer being drawn.
 export function chunky_at(x: u16, y: u16): u32
-    return drawing + u32((x >> 3) * COLUMN_BYTES) + u32(y << 3) + u32(x & 7)
+    return drawing + u32(COLUMN_OFFSET[u8(x >> 3)] + (y << 3) + (x & 7))
 end
 
 # Draws `count` pixels of a column from `source` (0 is transparent) at

@@ -3,8 +3,10 @@
     python3 data.py [out dir]
 
 Writes, in the out dir (default target/into-the-grid):
-- grid-data.mensch, module GridData: the palette (DEMO_PALETTE, 256 RGB
-  triples), a sine table, and where the runner's frames lie;
+- grid-data.mensch, module GridData: the palettes (DEMO_PALETTE, 256 RGB
+  triples, and the rotozoomer's ROTO_PALETTE), a sine table, the
+  rotozoomer's texture, the glass slab's tables, and where the runner's
+  frames lie;
 - grid-bank.bin: the blob for the ROM image's upper bank (inject_bank.py
   puts it at linear $30000): the runner's frames (figure.py).
 
@@ -30,6 +32,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import figure  # noqa: E402
 import inject_bank  # noqa: E402
+import texture  # noqa: E402
 
 DOTS, DOT_STEPS = 64, 16
 FLOOR, FLOOR_STEPS = 80, 16
@@ -182,6 +185,11 @@ def main():
         f"export const GLASS = {GLASS}",
         array("DEMO_PALETTE", "u8", [v for c in palette for v in c], 24),
         array("SINE", "i8", sine),
+        "# The rotozoomer's texture (texture.py): 128x128, row by row, and its",
+        "# palette.",
+        f"export const TEXTURE_SIZE = {texture.SIZE}",
+        array("ROTO_PALETTE", "u8", [v for c in texture.palette() for v in c], 24),
+        array("TEXTURE", "u8", [int(v) for v in texture.texture().flatten()], 32),
         array("SHEEN_STRIP", "u8", sheen),
         array("SIDE_STRIP", "u8", side_strip),
         "# The glass slab, per screen column from PANE_FIRST: the rows its front",

@@ -1,0 +1,410 @@
+module RotoScene
+
+# Into the Grid's rotozoomer: a plane of chrome tiles (GridData's TEXTURE,
+# 128x128, tiling) spinning and zooming, then breaking into a mosaic of
+# 8x8 tiles that explodes: each tile flies off as a particle, thrown out
+# from the middle, falling, fading.
+#
+# The plane is drawn at 160x100, each texel a 2x2 block of Chunky's screen.
+# Down a screen column the texture coordinates step by (du_y, dv_y), across
+# by (du_x, dv_x): the rotation and zoom; a column's blocks are 16 bytes
+# apart in the buffer (two rows of 8). A column is drawn by a loop in
+# assembly (plane_column), from a copy of the texture in bank 1 laid out
+# 256 texels wide (the 128-wide texture twice side by side), so a texel's
+# address is just page v of bank 1, byte u.
+#
+# Its frames (roto_frame's count): SPIN of the plane, MOSAIC of it locked
+# into 8x8 tiles, then EXPLODE of the particles.
+
+import Vic4
+import Chunky
+import GridData
+
+const SPIN: u16 = 400
+const MOSAIC: u16 = 25
+const EXPLODE: u16 = 160
+export const ROTO_LENGTH: u16 = SPIN + MOSAIC + EXPLODE
+
+# The plane, in blocks.
+const BLOCKS_ACROSS = 160
+# (plane_column's loop has it as a literal.)
+const BLOCKS_DOWN = 100
+const TEXTURE_MASK: u16 = $3f80
+# The wide texture: the first 128 pages of bank 1, so a row's page is just
+# v (it shares memory with PaneScene's floor, which that part redraws when
+# it starts).
+const WIDE_TEXTURE: u32 = $10000
+
+# The particles: one per other 8x8 tile of the mosaic (a checkerboard),
+# positions and speeds in sixteenths of a pixel.
+const PARTICLES = 500
+const TILES_ACROSS = 40
+const GRAVITY = 3
+const SHADES = 16
+# A spare palette entry kept black, for the space the particles fly in
+# (not 255: a full-colour pixel of $FF takes colour RAM's colour instead).
+const BLACK = 254
+# Shards are SHARD pixels across until SHRINK frames old, then 2.
+const SHARD = 4
+const SHRINK = 40
+
+var t: u16
+var angle: u8
+var zoom: i16
+var cosine: i16
+var sine: i16
+var du_x: i16
+var dv_x: i16
+var du_y: i16
+var dv_y: i16
+var u_column: u16
+var v_column: u16
+# (u then v: plane_column reads them as one 32-bit value.)
+var u: u16
+var v: u16
+var u_b: u16
+var v_b: u16
+var texel_a: u8
+var rows_left: u8
+var block_x: u16
+var block_y: u8
+var block: u8
+var at: u32
+var cell: far ^u16
+var cell8: far ^u8
+var texel: u16
+var span: u8
+var quad: u32
+var quad_cell: far ^u32
+var launched: u8
+var speed: i16
+var line_i: u8
+
+var px: [PARTICLES]i16
+var py: [PARTICLES]i16
+var vx: [PARTICLES]i16
+var vy: [PARTICLES]i16
+var colour: [PARTICLES]u8
+var p: u16
+var qx: i16
+var qy: i16
+var seed: u16
+var shade: u8
+
+export procedure roto_start()
+    var r: u16
+    vic4_palette_load(0, 256, addr(ROTO_PALETTE))
+    vic4_palette_set(BLACK, 0, 0, 0)
+    vic4_border(BLACK)
+    vic4_background(BLACK)
+    seed = $ace1
+    launched = 0
+    # The texture, twice across, a 256-byte page a row.
+    r = 0
+    while r != TEXTURE_SIZE
+        dma_copy(u32(addr(TEXTURE)) + u32(r << 7), WIDE_TEXTURE + u32(r << 8), TEXTURE_SIZE)
+        dma_copy(u32(addr(TEXTURE)) + u32(r << 7), WIDE_TEXTURE + u32(r << 8) + TEXTURE_SIZE, TEXTURE_SIZE)
+        r = r + 1
+    end
+    return
+end
+
+function random(): u16
+    seed = seed xor (seed << 7)
+    seed = seed xor (seed >> 9)
+    seed = seed xor (seed << 8)
+    return seed
+end
+
+# The plane's motion at frame t: the angle, zoom and where its middle is.
+procedure motion()
+    angle = u8(t + (t >> 2))
+    # Zoom (texels per block, 8.8): from close in to far out and back.
+    zoom = 300 + (i16(SINE[u8(t + t)]) * 2)
+    cosine = i16(SINE[angle + 64])
+    sine = i16(SINE[angle])
+    du_x = (cosine * (zoom >> 2)) >> 5
+    dv_x = (sine * (zoom >> 2)) >> 5
+    du_y = 0 - dv_x
+    dv_y = du_x
+    # The middle drifts across the plane; start from the top left block.
+    u_column = (t << 6) - u16(du_x * (BLOCKS_ACROSS / 2)) - u16(du_y * (BLOCKS_DOWN / 2))
+    v_column = (t * 23) - u16(dv_x * (BLOCKS_ACROSS / 2)) - u16(dv_y * (BLOCKS_DOWN / 2))
+    return
+end
+
+function texel_at(): u16
+    return u16(TEXTURE[((v >> 1) & TEXTURE_MASK) | ((u >> 8) & $7f)])
+end
+
+# Two columns of the plane side by side, at `at` (4 pixels across, so 4
+# bytes of a character's row): the left from (u, v) down, the right from
+# (u_b, v_b), 100 texels each, each texel a 2x2 block. In assembly, using
+# the runtime's scratch:
+# - u and v (packed, u first; u_b and v_b likewise) step together by one
+#   32-bit add of their steps in __m65_tmp+4 (u's carry into v's fraction
+#   is too small to see), leaving u's high byte in X and v's in Z: the
+#   texel's address in the wide texture is page v (7 bits) of bank 1,
+#   byte u, through __m65_arg;
+# - the two texels go out as one 32-bit store per pixel row (left, left,
+#   right, right) through __m65_farp and, 8 bytes on, __m65_acc (a buffer
+#   stays inside its 64 KiB bank, so only their low 16 bits move).
+# Leaves Z 0, as compiled code expects.
+procedure plane_pair()
+    asm "lda u"
+    asm "sta __m65_tmp"
+    asm "lda u+1"
+    asm "sta __m65_tmp+1"
+    asm "lda v"
+    asm "sta __m65_tmp+2"
+    asm "lda v+1"
+    asm "sta __m65_tmp+3"
+    asm "lda du_y"
+    asm "sta __m65_tmp+4"
+    asm "lda du_y+1"
+    asm "sta __m65_tmp+5"
+    asm "lda dv_y"
+    asm "sta __m65_tmp+6"
+    asm "lda dv_y+1"
+    asm "sta __m65_tmp+7"
+    asm "lda at"
+    asm "sta __m65_farp"
+    asm "sta __m65_acc"
+    asm "lda at+1"
+    asm "sta __m65_farp+1"
+    asm "sta __m65_acc+1"
+    asm "lda at+2"
+    asm "sta __m65_farp+2"
+    asm "sta __m65_acc+2"
+    asm "lda at+3"
+    asm "sta __m65_farp+3"
+    asm "sta __m65_acc+3"
+    asm "clc"
+    asm "lda __m65_acc"
+    asm "adc #8"
+    asm "sta __m65_acc"
+    asm "bcc roto_acc_ok"
+    asm "inc __m65_acc+1"
+    asm "roto_acc_ok:"
+    asm "lda #$00"
+    asm "sta __m65_arg"
+    asm "sta __m65_arg+3"
+    asm "lda #$01"
+    asm "sta __m65_arg+2"
+    asm "lda #100"
+    asm "sta rows_left"
+    asm "roto_texel:"
+    asm "clc"
+    asm "ldq __m65_tmp"
+    asm "adcq __m65_tmp+4"
+    asm "stq __m65_tmp"
+    asm "tza"
+    asm "and #$7f"
+    asm "sta __m65_arg+1"
+    asm "txa"
+    asm "taz"
+    asm "lda [__m65_arg],z"
+    asm "sta texel_a"
+    asm "clc"
+    asm "ldq u_b"
+    asm "adcq __m65_tmp+4"
+    asm "stq u_b"
+    asm "tza"
+    asm "and #$7f"
+    asm "sta __m65_arg+1"
+    asm "txa"
+    asm "taz"
+    asm "lda [__m65_arg],z"
+    asm "tay"
+    asm "taz"
+    asm "lda texel_a"
+    asm "tax"
+    asm "stq [__m65_farp]"
+    asm "stq [__m65_acc]"
+    asm "clc"
+    asm "lda __m65_farp"
+    asm "adc #16"
+    asm "sta __m65_farp"
+    asm "bcc roto_farp_ok"
+    asm "inc __m65_farp+1"
+    asm "roto_farp_ok:"
+    asm "clc"
+    asm "lda __m65_acc"
+    asm "adc #16"
+    asm "sta __m65_acc"
+    asm "bcc roto_acc_next"
+    asm "inc __m65_acc+1"
+    asm "roto_acc_next:"
+    asm "dec rows_left"
+    asm "bne roto_texel"
+    asm "ldz #0"
+    return
+end
+
+# The plane at full detail: 2x2 blocks, two columns at a time.
+procedure draw_plane()
+    block_x = 0
+    while block_x != BLOCKS_ACROSS
+        at = drawing + u32(((block_x << 1) >> 3) * COLUMN_BYTES) + u32((block_x << 1) & 7)
+        u = u_column
+        v = v_column
+        u_b = u_column + u16(du_x)
+        v_b = v_column + u16(dv_x)
+        plane_pair()
+        u_column = u_column + u16(du_x << 1)
+        v_column = v_column + u16(dv_x << 1)
+        block_x = block_x + 2
+    end
+    return
+end
+
+# The plane in 8x8 tiles, each the texel at its top left: a tile is a whole
+# character, 64 bytes in a row, so one DMA fill. (`block` 4 also works, 4
+# 32-bit writes a block, but too slowly for every frame.)
+procedure draw_mosaic()
+    span = block >> 1
+    du_x = du_x * i16(span)
+    dv_x = dv_x * i16(span)
+    du_y = du_y * i16(span)
+    dv_y = dv_y * i16(span)
+    block_x = 0
+    while block_x < WIDTH
+        u = u_column
+        v = v_column
+        at = drawing + u32((block_x >> 3) * COLUMN_BYTES) + u32(block_x & 7)
+        block_y = 0
+        while block_y < HEIGHT
+            texel = texel_at()
+            if block == 8
+                dma_fill(at, u8(texel), 64)
+                at = at + 64
+            else
+                quad = u32(texel) * $01010101
+                line_i = 0
+                while line_i != 4
+                    quad_cell = at
+                    quad_cell^ = quad
+                    at = at + 8
+                    line_i = line_i + 1
+                end
+            end
+            u = u + u16(du_y)
+            v = v + u16(dv_y)
+            block_y = block_y + block
+        end
+        u_column = u_column + u16(du_x)
+        v_column = v_column + u16(dv_x)
+        block_x = block_x + u16(block)
+    end
+    return
+end
+
+# The mosaic's 8x8 tiles become particles, thrown out from the middle of
+# the screen with a little scatter and a kick upwards.
+procedure launch()
+    motion()
+    du_x = du_x * 4
+    dv_x = dv_x * 4
+    du_y = du_y * 4
+    dv_y = dv_y * 4
+    p = 0
+    block_x = 0
+    while block_x < WIDTH
+        u = u_column
+        v = v_column
+        block_y = 0
+        while block_y < HEIGHT
+            if ((block_x + u16(block_y)) & 8) == 0
+                px[p] = (i16(block_x) + 4) << 4
+                py[p] = (i16(block_y) + 4) << 4
+                # Out from the middle, faster the further out, each shard at
+                # its own speed (half to one and a half times); up a little.
+                speed = i16(random() & 15) + 8
+                vx[p] = (((i16(block_x) - 156) >> 2) * speed) >> 3
+                vy[p] = ((((i16(block_y) - 96) >> 2) * speed) >> 3) + i16(random() & 15) - 30
+                colour[p] = u8(texel_at())
+                p = p + 1
+            end
+            u = u + u16(du_y)
+            v = v + u16(dv_y)
+            block_y = block_y + 8
+        end
+        u_column = u_column + u16(du_x)
+        v_column = v_column + u16(dv_x)
+        block_x = block_x + 8
+    end
+    return
+end
+
+# Draws a shard at (qx, qy) in colour `texel` (`quad` is it four times):
+# 4x4 snapped to 4 pixels across, so each row is 4 bytes of a character
+# row (one 32-bit write); or 2x2 snapped to 2 (one 16-bit write a row).
+procedure shard(size: u8)
+    if size == 4
+        quad_cell = chunky_at(u16(qx) & $fffc, u16(qy))
+        quad_cell^ = quad
+        quad_cell = quad_cell + 8
+        quad_cell^ = quad
+        quad_cell = quad_cell + 8
+        quad_cell^ = quad
+        quad_cell = quad_cell + 8
+        quad_cell^ = quad
+        return
+    end
+    cell = chunky_at(u16(qx) & $fffe, u16(qy))
+    cell^ = u16(quad)
+    cell = cell + 8
+    cell^ = u16(quad)
+    return
+end
+
+# Each particle moves, falls and dims; drawn as a shard (shrinking with
+# age) while on the screen and not yet dark.
+procedure draw_particles(age: u16)
+    block = SHARD
+    if age >= SHRINK
+        block = 2
+    end
+    p = 0
+    while p != PARTICLES
+        vy[p] = vy[p] + GRAVITY
+        px[p] = px[p] + vx[p]
+        py[p] = py[p] + vy[p]
+        qx = px[p] >> 4
+        qy = py[p] >> 4
+        shade = colour[p] & (SHADES - 1)
+        if u8(age >> 4) < shade
+            shade = shade - u8(age >> 4)
+            if qx >= 0 and qx <= WIDTH - i16(block) and qy >= 0 and qy <= HEIGHT - i16(block)
+                texel = u16((colour[p] & $f0) | shade)
+                quad = u32(texel) * $01010101
+                shard(block)
+            end
+        end
+        p = p + 1
+    end
+    return
+end
+
+# Draws the part's frame `frame` (from 0) into the buffer being drawn.
+export procedure roto_frame(frame: u16)
+    if frame < SPIN
+        t = frame
+        motion()
+        draw_plane()
+    elsif frame < SPIN + MOSAIC
+        t = SPIN
+        motion()
+        block = 8
+        draw_mosaic()
+    else
+        if launched == 0
+            t = SPIN
+            launch()
+            launched = 1
+        end
+        chunky_clear(BLACK)
+        draw_particles(frame - SPIN - MOSAIC)
+    end
+    return
+end
