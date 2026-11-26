@@ -43,8 +43,8 @@ use std::collections::HashSet;
 use std::fmt;
 
 use crate::ir::{
-    Abi, Address, ArgRegister, BinaryOp, Const, IrInst, Label, Module, Routine, RoutineKind, Type,
-    Value, Width,
+    Abi, Address, ArgRegister, BinaryOp, Const, GlobalPlacement, IrInst, Label, Module, Routine,
+    RoutineKind, Type, Value, Width,
 };
 use crate::optimize_45gs02::optimize_routine_with;
 use crate::storage::{
@@ -161,8 +161,16 @@ fn lower_with_assignment(
         })
         .map(|routine| routine.name.clone())
         .collect();
+    // Memory the optimiser may access 32 bits at a time: this module's
+    // ordinary variables (not at a fixed address, not volatile).
+    let plain_memory: HashSet<String> = assigned
+        .globals
+        .iter()
+        .filter(|global| matches!(global.placement, GlobalPlacement::Static) && !global.volatile)
+        .map(|global| global.name.clone())
+        .collect();
     for routine in &assigned.routines {
-        out.routines.push(lower_routine(routine, &flag_routines)?);
+        out.routines.push(lower_routine(routine, &flag_routines, &plain_memory)?);
     }
     for helper in RUNTIME_ROUTINES {
         let called = out.routines.iter().any(|routine| {
@@ -283,6 +291,7 @@ pub fn place_in_window(module: &mut AsmModule, bank: u8) -> Result<(), String> {
 fn lower_routine(
     routine: &Routine,
     flag_routines: &HashSet<String>,
+    plain_memory: &HashSet<String>,
 ) -> Result<AsmRoutine, LowerError> {
     let mut lowerer = RoutineLowerer::new(routine);
     if lowerer.frame.is_some_and(|frame| frame > 0xff) {
@@ -333,6 +342,11 @@ fn lower_routine(
         z_zero_on_entry,
         flag_routines,
         routine.result_in_carry,
+        Some(match &routine.kind {
+            RoutineKind::Function { result } if !routine.result_in_carry => result.size_bytes(),
+            _ => 0,
+        }),
+        plain_memory,
     );
     Ok(out)
 }
@@ -620,18 +634,6 @@ impl<'a> RoutineLowerer<'a> {
                     return self.inc(*width, dst);
                 }
                 self.implied(Op::Clc);
-                // Four bytes of memory and four more: one 32-bit add.
-                if width.size_bytes() == 4 {
-                    if let (Some(left), Some(right), Some(to)) =
-                        (self.quad_operand(lhs), self.quad_operand(rhs), self.quad_operand(dst))
-                    {
-                        self.emit(Op::Ldq, left);
-                        self.emit(Op::Adcq, right);
-                        self.emit(Op::Stq, to);
-                        self.after_quad();
-                        return Ok(());
-                    }
-                }
                 self.byte_op(*width, Op::Adc, dst, lhs, rhs)?;
             }
             IrInst::Sub {
@@ -912,43 +914,7 @@ impl<'a> RoutineLowerer<'a> {
         Ok(())
     }
 
-    /// The operand of a 4-byte value's first byte, when its four bytes are
-    /// plain memory in a row (a base-page or absolute symbol): what the
-    /// 32-bit Q forms take.
-    fn quad_operand(&self, value: &Value) -> Option<Operand> {
-        if matches!(value, Value::Const(_)) {
-            return None;
-        }
-        let (Ok(ByteSource::Operand(first)), Ok(ByteSource::Operand(last))) =
-            (self.value_byte(value, 0), self.value_byte(value, 3))
-        else {
-            return None;
-        };
-        match (&first, &last) {
-            (Operand::Base(a), Operand::Base(b)) | (Operand::Absolute(a), Operand::Absolute(b))
-                if *b == offset(a, 3) =>
-            {
-                Some(first)
-            }
-            _ => None,
-        }
-    }
-
-    /// Ends a run of 32-bit Q instructions: they leave Z holding a byte of
-    /// the value, and compiled code keeps Z zero.
-    fn after_quad(&mut self) {
-        self.emit(Op::Ldz, Operand::imm_byte(0));
-    }
-
     fn copy_value(&mut self, width: Width, dst: &Value, src: &Value) -> Result<(), LowerError> {
-        if width.size_bytes() == 4 {
-            if let (Some(from), Some(to)) = (self.quad_operand(src), self.quad_operand(dst)) {
-                self.emit(Op::Ldq, from);
-                self.emit(Op::Stq, to);
-                self.after_quad();
-                return Ok(());
-            }
-        }
         for i in 0..width.size_bytes() {
             let source = self.value_byte(src, i)?;
             let target = self.value_byte(dst, i);

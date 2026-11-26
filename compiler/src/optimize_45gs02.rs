@@ -67,7 +67,33 @@ const RUNTIME: [(&str, u32, u32); 6] = [
 /// Optimizes one routine. `z_zero_on_entry` is false for interrupt handlers,
 /// which may interrupt a `(bp),z` sequence with Z non-zero.
 pub fn optimize_routine(insts: Vec<Inst>, z_zero_on_entry: bool) -> Vec<Inst> {
-    optimize_routine_with(insts, z_zero_on_entry, &HashSet::new(), false)
+    optimize_routine_with(insts, z_zero_on_entry, &HashSet::new(), false, None, &HashSet::new())
+}
+
+/// What a routine's return hands back, for liveness at RTS: the carry (a
+/// carry result), and how many bytes of result (`None`: not known, so all
+/// the result registers count as read).
+#[derive(Clone, Copy)]
+struct Returns {
+    carry: bool,
+    bytes: Option<u16>,
+}
+
+impl Returns {
+    /// The registers and flags a return reads. Results are in A/X/Y, a
+    /// 32-bit result's top byte in ACC+3; N/Z describe A for 1- and 2-byte
+    /// results.
+    fn uses(self) -> Locs {
+        let result = match self.bytes {
+            None => A | X | Y | ACC3 | NZ,
+            Some(0) => 0,
+            Some(1) => A | NZ,
+            Some(2) => A | X | NZ,
+            Some(3) => A | X | Y,
+            Some(_) => A | X | Y | ACC3,
+        };
+        result | if self.carry { C } else { 0 }
+    }
 }
 
 /// Like [`optimize_routine`]; `flag_routines` are routines known to return
@@ -78,7 +104,13 @@ pub fn optimize_routine_with(
     z_zero_on_entry: bool,
     flag_routines: &HashSet<String>,
     returns_carry: bool,
+    result_bytes: Option<u16>,
+    plain_memory: &HashSet<String>,
 ) -> Vec<Inst> {
+    let returns = Returns {
+        carry: returns_carry,
+        bytes: result_bytes,
+    };
     if insts.iter().any(|inst| matches!(inst, Inst::Raw(_))) {
         return insts;
     }
@@ -86,14 +118,17 @@ pub fn optimize_routine_with(
     loop {
         let before = insts.len();
         let mut changed = clean_jumps(&mut insts);
-        changed |= eliminate_dead_code(&mut insts, returns_carry);
+        changed |= eliminate_dead_code(&mut insts, returns);
         changed |= eliminate_dead_temporaries(&mut insts);
-        changed |= eliminate_redundant(&mut insts, z_zero_on_entry, flag_routines, returns_carry);
-        changed |= carry_increments(&mut insts, returns_carry);
+        changed |= eliminate_redundant(&mut insts, z_zero_on_entry, flag_routines, returns);
+        changed |= carry_increments(&mut insts, returns);
         if !changed && insts.len() == before {
             break;
         }
     }
+    // Last, once known bytes have folded away: what is left of 4-byte
+    // copies and adds of memory goes 32 bits at a time.
+    quad_runs(&mut insts, returns, z_zero_on_entry, plain_memory);
     relax_branches(&mut insts);
     insts
 }
@@ -333,15 +368,15 @@ fn label_positions(insts: &[Inst]) -> HashMap<String, usize> {
 // ---- liveness ---------------------------------------------------------------
 
 /// Locations live immediately after each instruction.
-/// `returns_carry`: the routine returns a result in the carry flag.
-fn live_after(insts: &[Inst], returns_carry: bool) -> Vec<Locs> {
+/// `returns`: what the routine's returns hand back.
+fn live_after(insts: &[Inst], returns: Returns) -> Vec<Locs> {
     let labels = label_positions(insts);
     let mut effects: Vec<Effect> = insts.iter().map(effect).collect();
-    if returns_carry {
-        for (inst, effect) in insts.iter().zip(&mut effects) {
-            if matches!(inst, Inst::Op(Op::Rts | Op::Rtn, _)) {
-                effect.uses |= C;
-            }
+    // A return reads the result registers and the frame; Z = 0 and the
+    // frame pointer are kept for the caller.
+    for (inst, effect) in insts.iter().zip(&mut effects) {
+        if matches!(inst, Inst::Op(Op::Rts | Op::Rtn, _)) {
+            effect.uses = Z | FP | returns.uses();
         }
     }
     let n = insts.len();
@@ -371,6 +406,140 @@ fn live_after(insts: &[Inst], returns_carry: bool) -> Vec<Locs> {
             return live_out;
         }
     }
+}
+
+// ---- 32-bit runs -----------------------------------------------------------
+
+/// Byte `k` of a 4-byte value whose first byte is `operand`, when it is
+/// plain memory: the compiler's own, or one of `plain_memory` (a module's
+/// ordinary variables; never a fixed address, which may be hardware that
+/// must see the accesses the source asks for).
+fn quad_byte(operand: &Operand, k: u32, plain_memory: &HashSet<String>) -> Option<Operand> {
+    let (Operand::Base(symbol) | Operand::Absolute(symbol)) = operand else {
+        return None;
+    };
+    let (name, offset) = split_offset(symbol);
+    if !is_compiler_symbol(name) && !plain_memory.contains(name) {
+        return None;
+    }
+    let at = offset? + k;
+    let byte = if at == 0 {
+        name.to_owned()
+    } else {
+        format!("{name}+{at}")
+    };
+    Some(match operand {
+        Operand::Base(_) => Operand::Base(byte),
+        _ => Operand::Absolute(byte),
+    })
+}
+
+/// Whether the four bytes from `a` and from `b` (same symbol) overlap.
+fn quads_overlap(a: &Operand, b: &Operand) -> bool {
+    let (Operand::Base(x) | Operand::Absolute(x), Operand::Base(y) | Operand::Absolute(y)) = (a, b)
+    else {
+        return true;
+    };
+    let ((xn, xo), (yn, yo)) = (split_offset(x), split_offset(y));
+    xn == yn && xo.zip(yo).is_none_or(|(xo, yo)| xo.abs_diff(yo) < 4)
+}
+
+/// Rewrites 4-byte copies (`lda s / sta d` four times) as `ldq / stq` and
+/// 4-byte adds (`clc` then `lda a / adc b / sta d` four times) as `clc /
+/// ldq / adcq / stq`, each followed by `ldz #0`: when the bytes are plain
+/// memory in a row, Z is zero before (so restoring it changes nothing),
+/// and A, X, Y and N/Z are dead after (the Q forms leave other values).
+fn quad_runs(
+    insts: &mut Vec<Inst>,
+    returns: Returns,
+    z_zero_on_entry: bool,
+    plain_memory: &HashSet<String>,
+) {
+    let live = live_after(insts, returns);
+    let referenced: HashSet<String> = insts
+        .iter()
+        .filter_map(branch_target)
+        .map(str::to_owned)
+        .collect();
+    let mut out = Vec::with_capacity(insts.len());
+    let mut z_zero = z_zero_on_entry;
+    let mut z_established = z_zero_on_entry;
+    let mut i = 0;
+    let operand_of = |inst: &Inst, want: Op| match inst {
+        Inst::Op(op, operand) if *op == want => Some(operand.clone()),
+        _ => None,
+    };
+    while i < insts.len() {
+        let dead = |at: usize| live[at] & (A | X | Y | NZ) == 0;
+        // A copy.
+        if z_zero && i + 8 <= insts.len() && dead(i + 7) {
+            let first = (operand_of(&insts[i], Op::Lda), operand_of(&insts[i + 1], Op::Sta));
+            if let (Some(source), Some(target)) = first {
+                let run = (0..4).all(|k| {
+                    let k32 = k as u32;
+                    quad_byte(&source, k32, plain_memory).is_some_and(|byte| {
+                        operand_of(&insts[i + 2 * k], Op::Lda) == Some(byte)
+                    }) && quad_byte(&target, k32, plain_memory).is_some_and(|byte| {
+                        operand_of(&insts[i + 2 * k + 1], Op::Sta) == Some(byte)
+                    })
+                });
+                if run && !quads_overlap(&source, &target) {
+                    out.push(Inst::op(Op::Ldq, source));
+                    out.push(Inst::op(Op::Stq, target));
+                    out.push(Inst::op(Op::Ldz, Operand::imm_byte(0)));
+                    i += 8;
+                    continue;
+                }
+            }
+        }
+        // An add.
+        if z_zero
+            && i + 13 <= insts.len()
+            && matches!(insts[i], Inst::Op(Op::Clc, _))
+            && dead(i + 12)
+        {
+            let first = (
+                operand_of(&insts[i + 1], Op::Lda),
+                operand_of(&insts[i + 2], Op::Adc),
+                operand_of(&insts[i + 3], Op::Sta),
+            );
+            if let (Some(left), Some(right), Some(target)) = first {
+                let run = (0..4).all(|k| {
+                    let (k32, at) = (k as u32, i + 1 + 3 * k);
+                    quad_byte(&left, k32, plain_memory)
+                        .is_some_and(|byte| operand_of(&insts[at], Op::Lda) == Some(byte))
+                        && quad_byte(&right, k32, plain_memory)
+                            .is_some_and(|byte| operand_of(&insts[at + 1], Op::Adc) == Some(byte))
+                        && quad_byte(&target, k32, plain_memory)
+                            .is_some_and(|byte| operand_of(&insts[at + 2], Op::Sta) == Some(byte))
+                });
+                if run {
+                    out.push(Inst::implied(Op::Clc));
+                    out.push(Inst::op(Op::Ldq, left));
+                    out.push(Inst::op(Op::Adcq, right));
+                    out.push(Inst::op(Op::Stq, target));
+                    out.push(Inst::op(Op::Ldz, Operand::imm_byte(0)));
+                    i += 13;
+                    continue;
+                }
+            }
+        }
+        // Z: zero at branch targets once established (the codegen
+        // invariant), after LDZ #0; anything else that sets it, unknown.
+        match &insts[i] {
+            Inst::Label(label) if referenced.contains(label) => z_zero = z_established,
+            Inst::Op(Op::Ldz, operand) => {
+                z_zero = operand.is_zero_immediate();
+                z_established |= z_zero;
+            }
+            Inst::Op(Op::Inz | Op::Dez | Op::Plz | Op::Ldq | Op::Adcq, _) => z_zero = false,
+            Inst::Op(Op::Jsr, _) => z_zero = true,
+            _ => {}
+        }
+        out.push(insts[i].clone());
+        i += 1;
+    }
+    *insts = out;
 }
 
 // ---- dead stores to temporaries -----------------------------------------
@@ -496,8 +665,8 @@ fn eliminate_dead_temporaries(insts: &mut Vec<Inst>) -> bool {
     insts.len() != before
 }
 
-fn eliminate_dead_code(insts: &mut Vec<Inst>, returns_carry: bool) -> bool {
-    let live = live_after(insts, returns_carry);
+fn eliminate_dead_code(insts: &mut Vec<Inst>, returns: Returns) -> bool {
+    let live = live_after(insts, returns);
     let before = insts.len();
     let mut i = 0;
     insts.retain(|inst| {
@@ -530,6 +699,9 @@ struct Known {
     /// store of a register that held the immediate. Kept after the
     /// register moves on, until the memory is written again.
     values: Vec<(String, String)>,
+    /// The four bytes A, X, Y and Z together hold (after LDQ or STQ): the
+    /// key of their first byte.
+    quad: Option<String>,
 }
 
 const REG_A: usize = 0;
@@ -560,6 +732,7 @@ impl Known {
     }
 
     fn set(&mut self, reg: usize, key: Option<String>) {
+        self.quad = None;
         match key {
             Some(key) => self.regs[reg] = vec![key],
             None => self.forget(reg),
@@ -568,6 +741,7 @@ impl Known {
 
     /// The register now holds a new, unknown value.
     fn forget(&mut self, reg: usize) {
+        self.quad = None;
         self.next_value += 1;
         self.regs[reg] = vec![format!("v:{}", self.next_value)];
     }
@@ -657,6 +831,17 @@ impl Known {
 
     /// Forgets whatever memory a write to `operand` (of `bytes` bytes) may change.
     fn clobber(&mut self, operand: &Operand, bytes: u32) {
+        // A write anywhere near the bytes the Q registers mirror ends that.
+        if let (Some(quad), Operand::Base(symbol) | Operand::Absolute(symbol)) =
+            (self.quad.as_ref(), operand)
+        {
+            let quad_name = split_offset(quad.split_once(':').map_or(quad.as_str(), |(_, s)| s)).0;
+            if split_offset(symbol).0 == quad_name {
+                self.quad = None;
+            }
+        } else if !matches!(operand, Operand::Base(_) | Operand::Absolute(_)) {
+            self.quad = None;
+        }
         match operand {
             Operand::Base(symbol) | Operand::Absolute(symbol) if is_compiler_symbol(symbol) => {
                 let prefix = if matches!(operand, Operand::Base(_)) {
@@ -701,6 +886,7 @@ impl Known {
     /// Forgets every memory value except the runtime registers, which no
     /// pointer can address.
     fn clobber_all_memory(&mut self) {
+        self.quad = None;
         self.retain_keys(|key| {
             key.starts_with('#')
                 || key.starts_with("v:")
@@ -713,9 +899,9 @@ fn eliminate_redundant(
     insts: &mut Vec<Inst>,
     z_zero_on_entry: bool,
     flag_routines: &HashSet<String>,
-    returns_carry: bool,
+    returns: Returns,
 ) -> bool {
-    let live = live_after(insts, returns_carry);
+    let live = live_after(insts, returns);
     let referenced: HashSet<String> = insts
         .iter()
         .filter_map(branch_target)
@@ -782,6 +968,7 @@ fn eliminate_redundant(
                         };
                         rewrite.push((i, Inst::implied(transfer)));
                         known.regs[reg] = known.regs[from].clone();
+                        known.quad = None;
                         known.nz_from_a = true;
                         continue;
                     }
@@ -864,6 +1051,7 @@ fn eliminate_redundant(
                     continue;
                 }
                 known.regs[to] = known.regs[from].clone();
+                known.quad = None;
                 known.nz_from_a = true;
             }
             Op::Cmp if operand.is_zero_immediate() && known.nz_from_a && carry_dead => {
@@ -1014,15 +1202,26 @@ fn eliminate_redundant(
             Op::Sec => known.carry = Some(true),
             Op::Pha | Op::Phx | Op::Phy | Op::Phz => {}
             Op::Ldq | Op::Adcq => {
+                let key = known.key(operand);
+                // The registers already hold these four bytes.
+                if op == Op::Ldq && flags_dead && key.is_some() && known.quad == key {
+                    delete[i] = true;
+                    continue;
+                }
                 for reg in [REG_A, REG_X, REG_Y, REG_Z] {
                     known.forget(reg);
                 }
                 known.nz_from_a = false;
                 if op == Op::Adcq {
                     known.carry = None;
+                } else {
+                    known.quad = key;
                 }
             }
-            Op::Stq => known.clobber(operand, 4),
+            Op::Stq => {
+                known.clobber(operand, 4);
+                known.quad = known.key(operand);
+            }
             Op::Bne | Op::Beq | Op::Bcc | Op::Bcs | Op::Lbne | Op::Lbeq | Op::Lbcc | Op::Lbcs => {}
             Op::Bra | Op::Lbra | Op::Rts | Op::Rtn | Op::Rti => {
                 known = Known::default();
@@ -1047,8 +1246,8 @@ static NEXT_CARRY_LABEL: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 /// and `lda m / sbc #0 / sta m` is `bcs + / dec m`, when A and the flags are
 /// not needed afterwards. Only for compiler-owned memory: an I/O register
 /// would see a different access pattern.
-fn carry_increments(insts: &mut Vec<Inst>, returns_carry: bool) -> bool {
-    let live = live_after(insts, returns_carry);
+fn carry_increments(insts: &mut Vec<Inst>, returns: Returns) -> bool {
+    let live = live_after(insts, returns);
     let mut i = 0;
     let mut changed = false;
     while i + 2 < insts.len() {
@@ -1369,6 +1568,39 @@ mod tests {
     }
 
     #[test]
+    fn reloads_of_what_the_quad_registers_hold_go() {
+        let total = Operand::Absolute("__static_f_total".to_owned());
+        let insts = vec![
+            Inst::implied(Op::Clc),
+            op(Op::Ldq, Operand::Absolute("__static_f_first".to_owned())),
+            op(Op::Adcq, Operand::Absolute("__static_f_second".to_owned())),
+            op(Op::Stq, total.clone()),
+            op(Op::Ldz, imm("$00")),
+            op(Op::Ldq, total.clone()),
+            op(Op::Stq, Operand::Absolute("out".to_owned())),
+            op(Op::Ldz, imm("$00")),
+            Inst::implied(Op::Rts),
+        ];
+        let out = optimize_routine(insts, true);
+        // The LDZ between them is dead (the reload sets Z again), so the
+        // registers still hold `total` and the reload goes.
+        assert!(!out.contains(&op(Op::Ldq, total)), "{out:?}");
+        // A store between them would keep it: Z changes.
+        let insts = vec![
+            op(Op::Ldq, Operand::Absolute("__static_f_first".to_owned())),
+            op(Op::Stq, Operand::Absolute("__static_f_total".to_owned())),
+            op(Op::Ldz, imm("$00")),
+            op(Op::Stz, Operand::Absolute("other".to_owned())),
+            op(Op::Ldq, Operand::Absolute("__static_f_total".to_owned())),
+            op(Op::Stq, Operand::Absolute("out".to_owned())),
+            op(Op::Ldz, imm("$00")),
+            Inst::implied(Op::Rts),
+        ];
+        let out = optimize_routine(insts, true);
+        assert!(out.contains(&op(Op::Ldq, Operand::Absolute("__static_f_total".to_owned()))), "{out:?}");
+    }
+
+    #[test]
     fn carry_chains_in_place_ripple() {
         let byte = |k: u32| {
             if k == 0 {
@@ -1545,7 +1777,7 @@ mod tests {
             Inst::implied(Op::Rts),
         ];
         let flag_routines = HashSet::from(["f".to_owned()]);
-        let out = optimize_routine_with(insts, true, &flag_routines, false);
+        let out = optimize_routine_with(insts, true, &flag_routines, false, None, &HashSet::new());
         let compares = out
             .iter()
             .filter(|inst| matches!(inst, Inst::Op(Op::Cmp, _)))
