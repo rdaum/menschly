@@ -620,6 +620,18 @@ impl<'a> RoutineLowerer<'a> {
                     return self.inc(*width, dst);
                 }
                 self.implied(Op::Clc);
+                // Four bytes of memory and four more: one 32-bit add.
+                if width.size_bytes() == 4 {
+                    if let (Some(left), Some(right), Some(to)) =
+                        (self.quad_operand(lhs), self.quad_operand(rhs), self.quad_operand(dst))
+                    {
+                        self.emit(Op::Ldq, left);
+                        self.emit(Op::Adcq, right);
+                        self.emit(Op::Stq, to);
+                        self.after_quad();
+                        return Ok(());
+                    }
+                }
                 self.byte_op(*width, Op::Adc, dst, lhs, rhs)?;
             }
             IrInst::Sub {
@@ -900,7 +912,43 @@ impl<'a> RoutineLowerer<'a> {
         Ok(())
     }
 
+    /// The operand of a 4-byte value's first byte, when its four bytes are
+    /// plain memory in a row (a base-page or absolute symbol): what the
+    /// 32-bit Q forms take.
+    fn quad_operand(&self, value: &Value) -> Option<Operand> {
+        if matches!(value, Value::Const(_)) {
+            return None;
+        }
+        let (Ok(ByteSource::Operand(first)), Ok(ByteSource::Operand(last))) =
+            (self.value_byte(value, 0), self.value_byte(value, 3))
+        else {
+            return None;
+        };
+        match (&first, &last) {
+            (Operand::Base(a), Operand::Base(b)) | (Operand::Absolute(a), Operand::Absolute(b))
+                if *b == offset(a, 3) =>
+            {
+                Some(first)
+            }
+            _ => None,
+        }
+    }
+
+    /// Ends a run of 32-bit Q instructions: they leave Z holding a byte of
+    /// the value, and compiled code keeps Z zero.
+    fn after_quad(&mut self) {
+        self.emit(Op::Ldz, Operand::imm_byte(0));
+    }
+
     fn copy_value(&mut self, width: Width, dst: &Value, src: &Value) -> Result<(), LowerError> {
+        if width.size_bytes() == 4 {
+            if let (Some(from), Some(to)) = (self.quad_operand(src), self.quad_operand(dst)) {
+                self.emit(Op::Ldq, from);
+                self.emit(Op::Stq, to);
+                self.after_quad();
+                return Ok(());
+            }
+        }
         for i in 0..width.size_bytes() {
             let source = self.value_byte(src, i)?;
             let target = self.value_byte(dst, i);
@@ -1631,6 +1679,32 @@ mod tests {
             !write.contains("__m65_farp") && !write.contains("adc"),
             "{write}"
         );
+    }
+
+    #[test]
+    fn four_byte_copies_and_adds_use_the_quad_forms() {
+        let source = "
+            module Quads
+            var first: u32
+            var second: u32
+            var total: u32
+            export procedure add_and_copy()
+                total = first + second
+                second = total
+                return
+            end
+        ";
+        let asm = compile_source(source, Target::Mega65, DEFAULT_DIRECT_PAGE_BUDGET)
+            .unwrap()
+            .asm;
+        let body = routine(&asm, "add_and_copy");
+        assert!(
+            body.contains("clc\n\tldq a:first\n\tadcq a:second\n\tstq a:total"),
+            "{body}"
+        );
+        assert!(body.contains("stq a:second"), "{body}");
+        // Z holds a byte of the value afterwards: it is zeroed again.
+        assert!(body.contains("ldz #$00"), "{body}");
     }
 
     #[test]

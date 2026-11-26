@@ -74,6 +74,12 @@ pub enum Op {
     Inw,
     /// 16-bit decrement of a base-page word.
     Dew,
+    /// 32-bit load of A, X, Y and Z (low byte first) from four bytes.
+    Ldq,
+    /// 32-bit store of A, X, Y and Z to four bytes.
+    Stq,
+    /// 32-bit add with carry of four bytes to A, X, Y and Z.
+    Adcq,
     Pha,
     Phx,
     Phy,
@@ -139,6 +145,9 @@ impl Op {
             Self::Dec => "dec",
             Self::Inw => "inw",
             Self::Dew => "dew",
+            Self::Ldq => "ldq",
+            Self::Stq => "stq",
+            Self::Adcq => "adcq",
             Self::Pha => "pha",
             Self::Phx => "phx",
             Self::Phy => "phy",
@@ -198,7 +207,13 @@ impl Inst {
                 _ => None,
             };
         };
-        Some(match operand {
+        // The 32-bit forms are the 8-bit ones behind a NEG NEG prefix.
+        let prefix = if matches!(op, Op::Ldq | Op::Stq | Op::Adcq) {
+            2
+        } else {
+            0
+        };
+        Some(prefix + match operand {
             Operand::Implied => 1,
             Operand::Immediate(_) | Operand::Base(_) => 2,
             Operand::IndirectZ(_) | Operand::IndirectY(_) => 2,

@@ -183,6 +183,14 @@ struct Effect {
     removable: bool,
 }
 
+/// The runtime-register bytes a 32-bit access at `operand` touches.
+fn quad_locs(operand: &Operand) -> Locs {
+    match operand {
+        Operand::Base(symbol) => runtime_bytes(symbol, 4),
+        _ => 0,
+    }
+}
+
 fn effect(inst: &Inst) -> Effect {
     let none = Effect {
         uses: 0,
@@ -243,6 +251,24 @@ fn effect(inst: &Inst) -> Effect {
             let target = runtime_bytes(symbol, 2);
             let whole = target.count_ones() == 2;
             (target, target | NZ, whole)
+        }
+        // The 32-bit forms: A, X, Y and Z hold the low to high bytes.
+        Op::Ldq | Op::Adcq => {
+            let bytes = quad_locs(operand);
+            let carry = if op == Op::Adcq { A | X | Y | Z | C } else { 0 };
+            (
+                address_uses(operand) | bytes | carry,
+                A | X | Y | Z | NZ | if op == Op::Adcq { C } else { 0 },
+                pure_read(operand),
+            )
+        }
+        Op::Stq => {
+            let target = quad_locs(operand);
+            (
+                A | X | Y | Z | address_uses(operand),
+                target,
+                target.count_ones() == 4,
+            )
         }
         Op::Pha | Op::Phx | Op::Phy | Op::Phz => (register_bit(op), 0, false),
         Op::Pla | Op::Plx | Op::Ply | Op::Plz => (0, register_bit(op) | NZ, false),
@@ -375,13 +401,21 @@ fn temporary_effect(inst: &Inst) -> (Option<Vec<String>>, Option<String>) {
     if *op == Op::Jsr {
         return (None, None);
     }
+    if *op == Op::Stq {
+        // A 32-bit store's four bytes are left live (never deleted here).
+        return (Some(Vec::new()), None);
+    }
     let stores = matches!(op, Op::Sta | Op::Stx | Op::Sty | Op::Stz);
     match operand {
         Operand::Base(symbol) | Operand::Absolute(symbol) => {
             if stores {
                 (Some(Vec::new()), temporary_byte(symbol, 0))
             } else {
-                let bytes = if matches!(op, Op::Inw | Op::Dew) { 2 } else { 1 };
+                let bytes = match op {
+                    Op::Inw | Op::Dew => 2,
+                    Op::Ldq | Op::Adcq => 4,
+                    _ => 1,
+                };
                 (Some((0..bytes).filter_map(|i| temporary_byte(symbol, i)).collect()), None)
             }
         }
@@ -979,6 +1013,16 @@ fn eliminate_redundant(
             Op::Clc => known.carry = Some(false),
             Op::Sec => known.carry = Some(true),
             Op::Pha | Op::Phx | Op::Phy | Op::Phz => {}
+            Op::Ldq | Op::Adcq => {
+                for reg in [REG_A, REG_X, REG_Y, REG_Z] {
+                    known.forget(reg);
+                }
+                known.nz_from_a = false;
+                if op == Op::Adcq {
+                    known.carry = None;
+                }
+            }
+            Op::Stq => known.clobber(operand, 4),
             Op::Bne | Op::Beq | Op::Bcc | Op::Bcs | Op::Lbne | Op::Lbeq | Op::Lbcc | Op::Lbcs => {}
             Op::Bra | Op::Lbra | Op::Rts | Op::Rtn | Op::Rti => {
                 known = Known::default();
