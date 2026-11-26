@@ -698,29 +698,12 @@ fn assign_locals(
 ) {
     let mut stack_offset = 1;
 
-    // Pointers first: into the temp registers when they fit, else into a
-    // direct-page slot while the budget lasts (else they fall through to
-    // static storage below, like any other local).
+    // Pointers first, into direct-page slots while the budget lasts (the
+    // temp registers stay with other values, which they serve as well);
+    // past the budget they take their chances below like any other local.
     let mut placed = BTreeSet::new();
     for local in routine.locals.iter().filter(|local| wants_direct_page(routine, local)) {
-        let size = local.ty.size_bytes();
-        if let Some(registers) = registers.as_deref_mut() {
-            if let Some((first_use, last_use, false)) = local_lifetime(routine, &local.name) {
-                if let Some(symbol) = registers.place(first_use, last_use, size) {
-                    out.bindings.insert(
-                        BindingKey::Local(local.name.clone()),
-                        Location::Direct {
-                            symbol,
-                            offset: 0,
-                            size,
-                        },
-                    );
-                    placed.insert(local.name.clone());
-                    continue;
-                }
-            }
-        }
-        if allocator.can_alloc(size) {
+        if allocator.can_alloc(local.ty.size_bytes()) {
             allocate_direct_local(routine, local, allocator, out);
             placed.insert(local.name.clone());
         }
