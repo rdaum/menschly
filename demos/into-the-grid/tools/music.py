@@ -23,7 +23,11 @@ Times become 50 Hz frames. The stream (offsets from its start):
 - u16 where to loop back to;
 - per frame with events: $80 voice note instrument (a note starts), $81
   voice (it stops), ..., then a byte 1-127, the frames to wait for the
-  next; $FF ends it (the player loops).
+  next (a "group": events and a wait);
+- or $82, u16 offset, u16 count: play `count` groups from that offset
+  (written out earlier, never another $82), then go on after this;
+- $FF ends it: the player goes back to the loop point (a song can loop
+  past an intro).
 """
 
 import json
@@ -39,8 +43,10 @@ FM_CLOCK = 49716
 SID_CLOCK = 1_000_000
 FM_VOICES = 9
 SID_VOICES = 12
-NOTE_ON, NOTE_OFF, END = 0x80, 0x81, 0xFF
+NOTE_ON, NOTE_OFF, REPEAT, END = 0x80, 0x81, 0x82, 0xFF
 MAX_WAIT = 127
+# Groups a repeat must cover to be worth its 5 bytes.
+REPEAT_MIN = 3
 
 # FM registers: modulator $20 $40 $60 $80 $E0, carrier the same, $C0.
 DEFAULT = {
@@ -49,6 +55,8 @@ DEFAULT = {
         "fm_stab": {"fm": [0x01, 0x16, 0xF2, 0x35, 0x00, 0x01, 0x04, 0xF5, 0x66, 0x00, 0x0A]},
         "fm_lead": {"fm": [0x22, 0x20, 0xE1, 0x16, 0x01, 0x21, 0x02, 0xD2, 0x25, 0x00, 0x08]},
         "fm_kick": {"fm": [0x00, 0x0B, 0xF8, 0xF8, 0x00, 0x00, 0x00, 0xF7, 0xF7, 0x00, 0x0E]},
+        "fm_arp": {"fm": [0x02, 0x1C, 0xF6, 0x58, 0x00, 0x01, 0x06, 0xF5, 0x58, 0x00, 0x06]},
+        "sid_arp": {"sid": [0x40, 0x04, 0x00, 0x600]},
         "sid_bass": {"sid": [0x20, 0x08, 0x00, 0x800]},
         "sid_stab": {"sid": [0x40, 0x05, 0x00, 0x300]},
         "sid_lead": {"sid": [0x20, 0x26, 0x96, 0x800]},
@@ -63,6 +71,9 @@ DEFAULT = {
         {"name": "stabs", "channels": [1], "layers": [
             {"voices": [1, 2, 3], "instrument": "fm_stab"},
             {"voices": [10, 11, 12], "instrument": "sid_stab"}]},
+        {"name": "arp", "channels": [3], "layers": [
+            {"voices": [6, 7], "instrument": "fm_arp"},
+            {"voices": [14, 18], "instrument": "sid_arp"}]},
         {"name": "lead", "channels": [2], "layers": [
             {"voices": [4], "instrument": "fm_lead"},
             {"voices": [13], "instrument": "sid_lead"}]},
@@ -150,26 +161,64 @@ def schedule(notes, arrangement):
     return kept
 
 
-def stream(events, length):
-    body = bytearray()
+def groups(events, length, loop):
+    """The stream's groups, each a frame's events and then one wait byte,
+    with one starting at frame `loop`; and that group's index."""
+    out = []
+    loop_group = None
     frame = 0
     i = 0
-    while i < len(events):
-        at = events[i][0]
-        while at - frame > 0:
-            step = min(MAX_WAIT, at - frame)
-            body.append(step)
-            frame += step
-        while i < len(events) and events[i][0] == at:
+    pending = b""
+    stops = sorted({e[0] for e in events} | {loop, length})
+    for stop in stops:
+        if stop > length:
+            break
+        while i < len(events) and events[i][0] == frame:
             _, kind, voice, note, instrument = events[i]
-            body += bytes([NOTE_ON, voice, note, instrument]) if kind else bytes([NOTE_OFF, voice])
+            pending += bytes([NOTE_ON, voice, note, instrument]) if kind else bytes([NOTE_OFF, voice])
             i += 1
-    while length - frame > 0:
-        step = min(MAX_WAIT, length - frame)
-        body.append(step)
-        frame += step
+        while stop - frame > 0:
+            step = min(MAX_WAIT, stop - frame)
+            if frame == loop:
+                loop_group = len(out)
+            out.append(pending + bytes([step]))
+            pending = b""
+            frame += step
+    if loop_group is None:
+        loop_group = 0
+    return out, loop_group
+
+
+def stream(events, length, loop=0):
+    """The stream: earlier runs of groups played again where they repeat
+    (never across the loop point)."""
+    parts, loop_group = groups(events, length, loop)
+    body = bytearray()
+    literal = {}
+    loop_at = 0
+    g = 0
+    while g < len(parts):
+        if g == loop_group:
+            loop_at = len(body)
+        best = (0, 0)
+        for start in literal:
+            run = 0
+            while (g + run < len(parts) and start + run in literal and start + run < g
+                   and parts[start + run] == parts[g + run]
+                   and literal[start + run] == literal[start] + sum(len(parts[k]) for k in range(start, start + run))
+                   and not (g < loop_group <= g + run)):
+                run += 1
+            if run > best[0]:
+                best = (run, start)
+        if best[0] >= REPEAT_MIN and 5 < sum(len(parts[k]) for k in range(g, g + best[0])):
+            body += bytes([REPEAT]) + (2 + literal[best[1]]).to_bytes(2, "little") + best[0].to_bytes(2, "little")
+            g += best[0]
+        else:
+            literal[g] = len(body)
+            body += parts[g]
+            g += 1
     body.append(END)
-    return (2).to_bytes(2, "little") + bytes(body)
+    return (2 + loop_at).to_bytes(2, "little") + bytes(body)
 
 
 def instrument_table(arrangement):
@@ -183,13 +232,16 @@ def instrument_table(arrangement):
     return table
 
 
-def build(midi_path, arrangement=DEFAULT):
-    """The stream, and Mensch source describing it (module GridMusicData;
-    MUSIC_AT is filled in by the caller)."""
+def build(midi_path, arrangement=DEFAULT, loop_seconds=0.0, length_seconds=None):
+    """The stream (looping back to `loop_seconds`; as long as
+    `length_seconds`, or to the last note), and Mensch source describing
+    it (MUSIC_AT is filled in by the caller)."""
     notes, _ = midi.read(midi_path)
     events = schedule(notes, arrangement)
     length = max(e[0] for e in events) + 1
-    data = stream(events, length)
+    if length_seconds:
+        length = round(length_seconds * FRAME_HZ)
+    data = stream(events, length, round(loop_seconds * FRAME_HZ))
     fm = [fm_note(n) for n in range(128)]
     sid = [sid_note(n) for n in range(128)]
 

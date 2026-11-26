@@ -42,7 +42,10 @@ fixed($0f04) volatile var frames_drawn: u16
 # raster past its line), and the music gets a tick for each frame.
 fixed($0f06) volatile var frames_shown: u16
 fixed($d7fa) volatile var frame_counter: u8
-const TICK_LINE = 0
+# Mid-screen: the parts do their long DMA (clearing, laying backgrounds)
+# just after the swap at line 251, and an emulator can step past a raster
+# line while a DMA runs.
+const TICK_LINE = 150
 var last_frame: u8
 var elapsed: u8
 

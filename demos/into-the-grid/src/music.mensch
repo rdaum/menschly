@@ -10,12 +10,14 @@ module GridMusic
 #
 # The stream (from MUSIC_AT): a u16 offset to loop back to, then per frame
 # with events: $80 voice note instrument, $81 voice, ..., and a byte 1-127,
-# the frames to wait; $FF loops.
+# the frames to wait (a group); $82 offset count plays `count` earlier
+# groups again; $FF goes back to the loop point.
 
 import GridData
 
 const NOTE_ON = $80
 const NOTE_OFF = $81
+const REPEAT = $82
 const END = $ff
 const FM_VOICES = 9
 const VOICES = 21
@@ -46,6 +48,8 @@ const MIX_FM = $1c
 const MIX_MASTER = $1e
 
 var at: u16
+var repeat_left: u16
+var repeat_return: u16
 var loop_at: u16
 var wait: u8
 var playing: u8
@@ -116,7 +120,8 @@ export procedure music_start()
         i = i + 1
     end
     loop_at = u16(stream_byte(0)) | (u16(stream_byte(1)) << 8)
-    at = loop_at
+    at = 2
+    repeat_left = 0
     wait = 0
     playing = 1
     return
@@ -225,8 +230,18 @@ export procedure music_tick()
             voice = stream_byte(at)
             at = at + 1
             note_off()
+        elsif command == REPEAT
+            repeat_return = at + 4
+            repeat_left = u16(stream_byte(at + 2)) | (u16(stream_byte(at + 3)) << 8)
+            at = u16(stream_byte(at)) | (u16(stream_byte(at + 1)) << 8)
         else
             wait = command - 1
+            if repeat_left
+                repeat_left = repeat_left - 1
+                if repeat_left == 0
+                    at = repeat_return
+                end
+            end
             return
         end
     end
