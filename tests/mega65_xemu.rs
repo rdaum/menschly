@@ -3357,3 +3357,111 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
         "an empty bubble pops with no captive"
     );
 }
+
+/// A benchmark of compiled code: a rotozoomer-style column loop in plain
+/// Mensch (a texel read through a far pointer, two 16-bit writes through
+/// another, 16- and 32-bit steps), 10,000 iterations timed in raster lines
+/// (64 µs each) by the machine's frame counter and raster. Prints the time;
+/// fails if it grows past LIMIT, so a slower code generator is noticed.
+#[test]
+fn texel_loop_benchmark() {
+    const LIMIT: u32 = 1170;
+    let caller = "
+        module LoopBench
+        fixed($d7fa) volatile var frame_counter: u8
+        fixed($d012) volatile var raster_low: u8
+        fixed($d011) volatile var raster_high: u8
+        fixed($0e00) volatile var out: [2]u16
+
+        var start_at: u32
+        var u0: u16
+        var v0: u16
+        var du: u16
+        var dv: u16
+        var frames: u8
+        var line: u16
+
+        procedure column()
+            var at: u32
+            var u: u16
+            var v: u16
+            var cell: far ^u16
+            var texel: u16
+            var texture: far ^u8
+            var block_y: u8
+            at = start_at
+            u = u0
+            v = v0
+            block_y = 0
+            while block_y != 100
+                texture = $10000 + u32(((v >> 8) & $7f) << 8) + u32(u >> 8)
+                texel = u16(texture^)
+                texel = texel | (texel << 8)
+                cell = at
+                cell^ = texel
+                cell = at + 8
+                cell^ = texel
+                at = at + 16
+                u = u + du
+                v = v + dv
+                block_y = block_y + 1
+            end
+            return
+        end
+
+        # The frame counter and raster line, read until they agree.
+        procedure now()
+            repeat
+                frames = frame_counter
+                line = u16(raster_low)
+                if raster_high & $80
+                    line = line + 256
+                end
+            until frames == frame_counter
+            return
+        end
+
+        export function main(): u8
+            var first_frames: u8
+            var first_line: u16
+            var c: u8
+            du = 300
+            dv = 120
+            now()
+            first_frames = frames
+            first_line = line
+            c = 0
+            while c != 100
+                start_at = $40000 + u32(u16(c >> 3) * 1600) + u32((c << 1) & 7)
+                u0 = u16(c) * 77
+                v0 = u16(c) * 31
+                column()
+                c = c + 1
+            end
+            now()
+            out[0] = u16(frames - first_frames) * 312 + line - first_line
+            return 0
+        end
+        ";
+    let sources = [mega65::KernelModule {
+        name: "0-bench".to_owned(),
+        source: caller.to_owned(),
+        window: None,
+    }];
+    let modules = mega65::compile_kernel_modules(&sources).expect("benchmark should compile");
+    let refs = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect::<Vec<_>>();
+    let dir = temp_dir("texel-loop-benchmark");
+    let rom = mega65::build_rom(&dir, &refs).expect("benchmark should link");
+    let Some(xemu) = mega65::find_xemu() else {
+        eprintln!("skipping texel-loop-benchmark: Xemu not found (set MENSCH_XMEGA65)");
+        return;
+    };
+    let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
+    assert_eq!(run.exit_code, 0);
+    let lines = u32::from(u16::from_le_bytes([run.memory[0x0e00], run.memory[0x0e01]]));
+    eprintln!("texel loop: 10,000 iterations in {lines} raster lines");
+    assert!(lines > 0 && lines <= LIMIT, "texel loop took {lines} raster lines (limit {LIMIT})");
+}
