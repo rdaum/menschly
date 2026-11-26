@@ -153,93 +153,95 @@ end
 #   stays inside its 64 KiB bank, so only their low 16 bits move).
 # Leaves Z 0, as compiled code expects.
 procedure plane_pair()
-    asm "lda u"
-    asm "sta __m65_tmp"
-    asm "lda u+1"
-    asm "sta __m65_tmp+1"
-    asm "lda v"
-    asm "sta __m65_tmp+2"
-    asm "lda v+1"
-    asm "sta __m65_tmp+3"
-    asm "lda du_y"
-    asm "sta __m65_tmp+4"
-    asm "lda du_y+1"
-    asm "sta __m65_tmp+5"
-    asm "lda dv_y"
-    asm "sta __m65_tmp+6"
-    asm "lda dv_y+1"
-    asm "sta __m65_tmp+7"
-    asm "lda at"
-    asm "sta __m65_farp"
-    asm "sta __m65_acc"
-    asm "lda at+1"
-    asm "sta __m65_farp+1"
-    asm "sta __m65_acc+1"
-    asm "lda at+2"
-    asm "sta __m65_farp+2"
-    asm "sta __m65_acc+2"
-    asm "lda at+3"
-    asm "sta __m65_farp+3"
-    asm "sta __m65_acc+3"
-    asm "clc"
-    asm "lda __m65_acc"
-    asm "adc #8"
-    asm "sta __m65_acc"
-    asm "bcc roto_acc_ok"
-    asm "inc __m65_acc+1"
-    asm "roto_acc_ok:"
-    asm "lda #$00"
-    asm "sta __m65_arg"
-    asm "sta __m65_arg+3"
-    asm "lda #$01"
-    asm "sta __m65_arg+2"
-    asm "lda #100"
-    asm "sta rows_left"
-    asm "roto_texel:"
-    asm "clc"
-    asm "ldq __m65_tmp"
-    asm "adcq __m65_tmp+4"
-    asm "stq __m65_tmp"
-    asm "tza"
-    asm "and #$7f"
-    asm "sta __m65_arg+1"
-    asm "txa"
-    asm "taz"
-    asm "lda [__m65_arg],z"
-    asm "sta texel_a"
-    asm "clc"
-    asm "ldq u_b"
-    asm "adcq __m65_tmp+4"
-    asm "stq u_b"
-    asm "tza"
-    asm "and #$7f"
-    asm "sta __m65_arg+1"
-    asm "txa"
-    asm "taz"
-    asm "lda [__m65_arg],z"
-    asm "tay"
-    asm "taz"
-    asm "lda texel_a"
-    asm "tax"
-    asm "stq [__m65_farp]"
-    asm "stq [__m65_acc]"
-    asm "clc"
-    asm "lda __m65_farp"
-    asm "adc #16"
-    asm "sta __m65_farp"
-    asm "bcc roto_farp_ok"
-    asm "inc __m65_farp+1"
-    asm "roto_farp_ok:"
-    asm "clc"
-    asm "lda __m65_acc"
-    asm "adc #16"
-    asm "sta __m65_acc"
-    asm "bcc roto_acc_next"
-    asm "inc __m65_acc+1"
-    asm "roto_acc_next:"
-    asm "dec rows_left"
-    asm "bne roto_texel"
-    asm "ldz #0"
+    asm
+        lda u
+        sta __m65_tmp
+        lda u+1
+        sta __m65_tmp+1
+        lda v
+        sta __m65_tmp+2
+        lda v+1
+        sta __m65_tmp+3
+        lda du_y
+        sta __m65_tmp+4
+        lda du_y+1
+        sta __m65_tmp+5
+        lda dv_y
+        sta __m65_tmp+6
+        lda dv_y+1
+        sta __m65_tmp+7
+        lda at
+        sta __m65_farp
+        sta __m65_acc
+        lda at+1
+        sta __m65_farp+1
+        sta __m65_acc+1
+        lda at+2
+        sta __m65_farp+2
+        sta __m65_acc+2
+        lda at+3
+        sta __m65_farp+3
+        sta __m65_acc+3
+        clc
+        lda __m65_acc
+        adc #8
+        sta __m65_acc
+        bcc acc_ok
+        inc __m65_acc+1
+    acc_ok:
+        lda #$00
+        sta __m65_arg
+        sta __m65_arg+3
+        lda #$01
+        sta __m65_arg+2
+        lda #100
+        sta rows_left
+    texel:
+        clc
+        ldq __m65_tmp
+        adcq __m65_tmp+4
+        stq __m65_tmp
+        tza
+        and #$7f
+        sta __m65_arg+1
+        txa
+        taz
+        lda [__m65_arg],z
+        sta texel_a
+        clc
+        ldq u_b
+        adcq __m65_tmp+4
+        stq u_b
+        tza
+        and #$7f
+        sta __m65_arg+1
+        txa
+        taz
+        lda [__m65_arg],z
+        tay
+        taz
+        lda texel_a
+        tax
+        stq [__m65_farp]
+        stq [__m65_acc]
+        clc
+        lda __m65_farp
+        adc #16
+        sta __m65_farp
+        bcc farp_ok
+        inc __m65_farp+1
+    farp_ok:
+        clc
+        lda __m65_acc
+        adc #16
+        sta __m65_acc
+        bcc acc_next
+        inc __m65_acc+1
+    acc_next:
+        dec rows_left
+        bne texel
+        ldz #0
+    end
     return
 end
 
