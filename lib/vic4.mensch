@@ -303,9 +303,9 @@ end
 procedure dma_run(command: u8, source: u32, dest: u32, count: u16, skip: u8)
     job.format = DMA_F018B
     job.source_mb_option = DMA_SOURCE_MB
-    job.source_mb = u8(source >> 20)
+    job.source_mb = u8(u16(source >> 16) >> 4)
     job.dest_mb_option = DMA_DEST_MB
-    job.dest_mb = u8(dest >> 20)
+    job.dest_mb = u8(u16(dest >> 16) >> 4)
     job.skip_option = DMA_DEST_SKIP
     job.skip = skip
     job.end_of_options = 0
@@ -343,9 +343,9 @@ end
 export procedure dma_blit(source: u32, dest: u32, count: u16, step: u8)
     blit.format = DMA_F018B
     blit.source_mb_option = DMA_SOURCE_MB
-    blit.source_mb = u8(source >> 20)
+    blit.source_mb = u8(u16(source >> 16) >> 4)
     blit.dest_mb_option = DMA_DEST_MB
-    blit.dest_mb = u8(dest >> 20)
+    blit.dest_mb = u8(u16(dest >> 16) >> 4)
     blit.skip_option = DMA_DEST_SKIP
     blit.skip = step
     blit.transparent_option = DMA_TRANSPARENT_VALUE

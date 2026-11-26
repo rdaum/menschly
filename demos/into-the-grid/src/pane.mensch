@@ -31,11 +31,20 @@ const TINTED: u32 = $8000000
 const RUNNER_Y = 70
 const RUNNER_SPAN = 448
 
-# The glass is a slab standing on the floor, turned away to the right
-# (GridData's PANE_* tables give, per column, the rows its front face and
-# its near end cover). The runner's path goes through its plane at column
-# PANE_CROSS: left of there the glass is in front of him, right of there he
-# has gone through.
+# The glass is a slab standing on the floor (GridData's PANE_*: its centre,
+# half-length, height and thickness in eighths of the floor's units, and
+# its angle at rest), projected each frame with the floor's camera so it can
+# rise, turn and fall. The runner's path goes through it at column
+# PANE_CROSS at rest: left of there the glass is in front of him, right of
+# there he has gone through.
+#
+# The scene's frames: the glass rises out of the floor over RISE frames,
+# the runner crosses (until SPIN), the glass spins faster and faster, and
+# from COLLAPSE sinks into a line on the floor, gone at GONE.
+const RISE = 40
+const SPIN = 440
+const COLLAPSE = 520
+const GONE = 556
 const PANE_EDGE = 127
 const SIDE_EDGE = 111
 
@@ -62,31 +71,163 @@ var fy: u16
 var fz: i16
 var wide: i16
 var tint_at: u32
+var column_at: u32
+var push: i16
+var fade: i16
+var thin: i16
+var wave: u8
+var wobble: u16
+var hash: u16
+# A runner pixel's brightness as a dot (0-15), by its palette entry.
+const LEVEL: [64]u8 = [0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]
 var phase: u8
 var band: u8
 
-# The rows column x of the glass covers in front of the runner (from
-# glass_top to glass_bottom; none when glass_bottom is 0).
+# The glass this frame: its angle and height, its length and thickness as
+# vectors (eighths), its ends A and B, and the last projected edge.
+var angle: u8
+var tall8: i16
+var along_x: i16
+var along_z: i16
+var across_x: i16
+var across_z: i16
+var end_ax: i16
+var end_az: i16
+var end_bx: i16
+var end_bz: i16
+var edge_x: i16
+var edge_top: i16
+var edge_bottom: i16
+# A face being drawn: its two upright edges (x, top, bottom), its strip.
+var xa: i16
+var ta: i16
+var ba: i16
+var xb: i16
+var tb: i16
+var bb: i16
+var face_strip: u32
+var top32: i32
+var bottom32: i32
+var top_step: i32
+var bottom_step: i32
+var sheen32: i32
+var sheen_step: i32
+var face_x: i16
+var face_end: i16
+var face_top: i16
+var face_bottom: i16
+var swap: i16
+# The rows the glass covers in each column this frame (bottom 0: none),
+# for the runner's tint; and the columns written, to clear next frame.
+var span_top: [WIDTH]u8
+var span_bottom: [WIDTH]u8
+var glass_lo: i16
+var glass_hi: i16
 var glass_top: i16
 var glass_bottom: i16
-var pane_i: u8
 
 procedure glass_rows(x: i16)
-    glass_top = 0
-    glass_bottom = 0
-    if x < PANE_FIRST or x >= PANE_FIRST + PANE_COLUMNS
+    glass_top = i16(span_top[u16(x)])
+    glass_bottom = i16(span_bottom[u16(x)])
+    return
+end
+
+# Projects floor point (px8, pz8) (eighths) with the glass's height: its
+# column, and the rows of the glass's top and foot there.
+procedure project(px8: i16, pz8: i16)
+    edge_x = 160 + (px8 << 5) / pz8
+    edge_bottom = HORIZON + (EYE8 << 5) / pz8
+    edge_top = HORIZON + ((EYE8 - tall8) << 5) / pz8
+    return
+end
+
+function clamp_row(row: i16): i16
+    if row < 0
+        return 0
+    end
+    if row > HEIGHT
+        return HEIGHT
+    end
+    return row
+end
+
+# Draws the face between upright edges (xa, ta, ba) and (xb, tb, bb) from
+# `face_strip` (its bands across the face), a bright line along its top and
+# foot, noting the rows it covers.
+procedure draw_face(edge: u8)
+    if xa > xb
+        swap = xa
+        xa = xb
+        xb = swap
+        swap = ta
+        ta = tb
+        tb = swap
+        swap = ba
+        ba = bb
+        bb = swap
+    end
+    if xb - xa < 1
         return
     end
-    pane_i = u8(x - PANE_FIRST)
-    glass_top = i16(FRONT_TOP[pane_i])
-    glass_bottom = i16(FRONT_BOTTOM[pane_i])
-    if SIDE_BOTTOM[pane_i]
-        if glass_bottom == 0 or i16(SIDE_TOP[pane_i]) < glass_top
-            glass_top = i16(SIDE_TOP[pane_i])
+    top32 = i32(ta) << 16
+    bottom32 = i32(ba) << 16
+    top_step = (i32(tb - ta) << 16) / i32(xb - xa)
+    bottom_step = (i32(bb - ba) << 16) / i32(xb - xa)
+    sheen32 = 0
+    sheen_step = (i32(255) << 8) / i32(xb - xa)
+    face_x = xa
+    if face_x < 0
+        top32 = top32 - top_step * i32(face_x)
+        bottom32 = bottom32 - bottom_step * i32(face_x)
+        sheen32 = sheen32 - sheen_step * i32(face_x)
+        face_x = 0
+    end
+    face_end = xb
+    if face_end > WIDTH
+        face_end = WIDTH
+    end
+    while face_x < face_end
+        face_top = clamp_row(i16(top32 >> 16))
+        face_bottom = clamp_row(i16(bottom32 >> 16))
+        count = face_bottom - face_top
+        if count > 0
+            chunky_column(face_strip + u32((u16(sheen32 >> 8) + (t << 1)) & 255),
+                          u16(face_x), u16(face_top), u16(count))
+            dot = chunky_at(u16(face_x), u16(face_top))
+            dot^ = edge
+            dot = dot + u32((count - 1) << 3)
+            dot^ = edge
+            if span_bottom[u16(face_x)] == 0 or u8(face_top) < span_top[u16(face_x)]
+                span_top[u16(face_x)] = u8(face_top)
+            end
+            if u8(face_bottom) > span_bottom[u16(face_x)]
+                span_bottom[u16(face_x)] = u8(face_bottom)
+            end
+            if face_x < glass_lo
+                glass_lo = face_x
+            end
+            if face_x > glass_hi
+                glass_hi = face_x
+            end
+        elsif face_bottom < HEIGHT
+            # Fallen flat: just its line on the floor.
+            dot = chunky_at(u16(face_x), u16(face_bottom))
+            dot^ = edge
         end
-        if i16(SIDE_BOTTOM[pane_i]) > glass_bottom
-            glass_bottom = i16(SIDE_BOTTOM[pane_i])
-        end
+        top32 = top32 + top_step
+        bottom32 = bottom32 + bottom_step
+        sheen32 = sheen32 + sheen_step
+        face_x = face_x + 1
+    end
+    return
+end
+
+# An upright edge at column x from row top to bottom, bright, by DMA.
+procedure draw_upright(x: i16, top: i16, bottom: i16)
+    top = clamp_row(top)
+    bottom = clamp_row(bottom)
+    if x >= 0 and x < WIDTH and bottom > top
+        dma_fill_step(chunky_at(u16(x), u16(top)), PANE_EDGE, u16(bottom - top), 8)
     end
     return
 end
@@ -187,50 +328,79 @@ procedure cycle_floor()
     return
 end
 
-# The glass: its front face from the sheen strip, the bands receding with
-# the face's depth and sliding up; its near end from the end strip; bright
-# lines along its edges.
+# The glass at frame t: rising, standing, spinning or falling; its front
+# face, then whichever end faces the viewer (its thickness), then its
+# upright edges.
 procedure draw_pane()
-    pane_i = 0
-    while pane_i != PANE_COLUMNS
-        column = PANE_FIRST + i16(pane_i)
-        if FRONT_BOTTOM[pane_i]
-            first = i16(FRONT_TOP[pane_i])
-            count = i16(FRONT_BOTTOM[pane_i]) - first
-            chunky_column(u32(addr(SHEEN_STRIP)) + u32((u16(FRONT_U[pane_i]) + (t << 1)) & 255),
-                          u16(column), u16(first), u16(count))
-            plot(column, first, PANE_EDGE)
-            plot(column, first + count - 1, PANE_EDGE)
-        end
-        if SIDE_BOTTOM[pane_i]
-            first = i16(SIDE_TOP[pane_i])
-            count = i16(SIDE_BOTTOM[pane_i]) - first
-            chunky_column(u32(addr(SIDE_STRIP)) + u32(t & 127), u16(column), u16(first), u16(count))
-            plot(column, first, SIDE_EDGE)
-            plot(column, first + count - 1, SIDE_EDGE)
-        end
-        pane_i = pane_i + 1
+    # Last frame's spans, cleared.
+    while glass_lo <= glass_hi
+        span_bottom[u16(glass_lo)] = 0
+        glass_lo = glass_lo + 1
     end
-    # The upright edges: where the front face starts and ends.
-    pane_i = 0
-    while pane_i != PANE_COLUMNS
-        if FRONT_BOTTOM[pane_i]
-            if pane_i == 0 or FRONT_BOTTOM[pane_i - 1] == 0 or pane_i == PANE_COLUMNS - 1
-                column = PANE_FIRST + i16(pane_i)
-                ry = i16(FRONT_TOP[pane_i])
-                while ry != i16(FRONT_BOTTOM[pane_i])
-                    plot(column, ry, PANE_EDGE)
-                    ry = ry + 1
-                end
-            end
-        end
-        pane_i = pane_i + 1
+    glass_lo = WIDTH
+    glass_hi = -1
+    angle = PANE_REST
+    if t >= SPIN
+        angle = angle + u8(((t - SPIN) * (t - SPIN)) >> 4)
     end
+    tall8 = PANE_TALL8
+    if t < RISE
+        tall8 = i16((u32(PANE_TALL8) * u32(t)) / RISE)
+    elsif t >= GONE
+        return
+    elsif t >= COLLAPSE
+        tall8 = i16((u32(PANE_TALL8) * u32(GONE - t)) / (GONE - COLLAPSE))
+    end
+    along_x = (PANE_HALF8 * i16(SINE[angle + 64])) >> 7
+    along_z = (PANE_HALF8 * i16(SINE[angle])) >> 7
+    across_x = 0 - ((PANE_THICK8 * i16(SINE[angle])) >> 7)
+    across_z = (PANE_THICK8 * i16(SINE[angle + 64])) >> 7
+    end_ax = PANE_CX8 - along_x
+    end_az = PANE_CZ8 - along_z
+    end_bx = PANE_CX8 + along_x
+    end_bz = PANE_CZ8 + along_z
+    # The front face, A to B.
+    project(end_ax, end_az)
+    xa = edge_x
+    ta = edge_top
+    ba = edge_bottom
+    project(end_bx, end_bz)
+    xb = edge_x
+    tb = edge_top
+    bb = edge_bottom
+    face_strip = u32(addr(SHEEN_STRIP))
+    draw_face(PANE_EDGE)
+    # An end faces the viewer (at the origin) when it points back at him.
+    if i32(along_x) * i32(end_ax) + i32(along_z) * i32(end_az) > 0
+        project(end_ax, end_az)
+    else
+        project(end_bx, end_bz)
+    end
+    xa = edge_x
+    ta = edge_top
+    ba = edge_bottom
+    if i32(along_x) * i32(end_ax) + i32(along_z) * i32(end_az) > 0
+        project(end_ax + across_x, end_az + across_z)
+    else
+        project(end_bx + across_x, end_bz + across_z)
+    end
+    xb = edge_x
+    tb = edge_top
+    bb = edge_bottom
+    face_strip = u32(addr(SIDE_STRIP))
+    draw_face(SIDE_EDGE)
+    # The upright edges.
+    project(end_ax, end_az)
+    draw_upright(edge_x, edge_top, edge_bottom)
+    project(end_bx, end_bz)
+    draw_upright(edge_x, edge_top, edge_bottom)
     return
 end
 
 # Column `column` of the runner at screen x `sx`, short of the glass's
-# plane: solid, but tinted where the glass is in front of him.
+# plane: solid, but tinted where the glass is in front of him. Its frame
+# column starts at column_at (in the ROM bank; the tinted copy is the same
+# distance into TINTED).
 procedure draw_runner_column()
     glass_rows(sx)
     y_end = RUNNER_Y + RUNNER_HEIGHT
@@ -241,7 +411,7 @@ procedure draw_runner_column()
         count = RUNNER_HEIGHT
     end
     if count > 0
-        chunky_column(frame_at + u32(u16(column) * RUNNER_HEIGHT), u16(sx), u16(first), u16(count))
+        chunky_column(column_at, u16(sx), u16(first), u16(count))
         first = first + count
     end
     if glass_bottom == 0 or first >= y_end
@@ -254,47 +424,61 @@ procedure draw_runner_column()
     end
     count = count - first
     if count > 0
-        chunky_column(TINTED + (frame_at - RUNNER_AT) + u32(u16(column) * RUNNER_HEIGHT + u16(first - RUNNER_Y)),
-                      u16(sx), u16(first), u16(count))
+        chunky_column(column_at + (TINTED - RUNNER_AT) + u32(first - RUNNER_Y), u16(sx), u16(first), u16(count))
         first = first + count
     end
     # Below it.
     if first < y_end
-        chunky_column(frame_at + u32(u16(column) * RUNNER_HEIGHT + u16(first - RUNNER_Y)),
-                      u16(sx), u16(first), u16(y_end - first))
+        chunky_column(column_at + u32(first - RUNNER_Y), u16(sx), u16(first), u16(y_end - first))
     end
     return
 end
 
 # Past the glass's plane: every other pixel of every other row as a dot,
 # pushed right (more the further past), waving, fading and thinning out.
+# What depends only on the column is worked out once: how far past the
+# plane it is, its push, its rise and fall, and how many dots it drops.
 procedure draw_runner_dots()
     past = sx - PANE_CROSS
+    push = sx + ((past * past) >> 5)
+    dy = (i16(SINE[u8(u16(sx) * 2 + t * 3)]) * past) >> 9
+    fade = past >> 3
+    thin = past >> 2
+    wave = u8(t << 2) + u8(RUNNER_Y * 3)
+    # The wave's amplitude grows with the distance: WOBBLE's row for it.
+    wobble = u16(past >> 4)
+    if wobble > 7
+        wobble = 7
+    end
+    wobble = wobble << 8
+    hash = u16(sx) * 7 + u16(RUNNER_Y) * 13 + t
+    source = column_at
     ry = RUNNER_Y
     y_end = RUNNER_Y + RUNNER_HEIGHT
     while ry < y_end
-        source = frame_at + u32(u16(column) * RUNNER_HEIGHT + u16(ry - RUNNER_Y))
         pixel = source^
         if pixel
-            if pixel < 33
-                level = i16((pixel - 1) >> 1)
-            elsif pixel < 49
-                level = i16((pixel - 33) >> 1) + 2
-            else
-                level = 15
-            end
-            level = level - (past >> 3)
-            if level > 0 and i16((u16(sx) * 7 + u16(ry) * 13 + t) & 31) >= (past >> 2)
-                dx = ((past * past) >> 5) + ((i16(SINE[u8(u16(ry) * 3 + (t << 2))]) * past) >> 8)
-                dy = (i16(SINE[u8(u16(sx) * 2 + t * 3)]) * past) >> 9
-                px = sx + dx
+            level = i16(LEVEL[pixel & 63]) - fade
+            if level > 0 and i16(hash & 31) >= thin
+                px = push + i16(WOBBLE[wobble + u16(wave)])
                 py = ry + dy
-                plot(px, py, DOTS + u8(level))
-                if level > 1
-                    plot(px - 1, py, DOTS + u8(level >> 1))
+                if px >= 1 and px < WIDTH and py >= 0 and py < HEIGHT
+                    dot = chunky_at(u16(px), u16(py))
+                    dot^ = DOTS + u8(level)
+                    if level > 1
+                        if (px & 7) == 0
+                            dot = dot - 1593
+                        else
+                            dot = dot - 1
+                        end
+                        dot^ = DOTS + u8(level >> 1)
+                    end
                 end
             end
         end
+        source = source + 2
+        wave = wave + 6
+        hash = hash + 26
         ry = ry + 2
     end
     return
@@ -303,6 +487,7 @@ end
 procedure draw_runner()
     frame_at = RUNNER_AT + u32(((t >> 2) & (RUNNER_FRAMES - 1)) * RUNNER_FRAME_BYTES)
     runner_x = i16(t % RUNNER_SPAN) - RUNNER_WIDTH
+    column_at = frame_at
     column = 0
     while column != RUNNER_WIDTH
         sx = runner_x + column
@@ -313,6 +498,7 @@ procedure draw_runner()
                 draw_runner_dots()
             end
         end
+        column_at = column_at + RUNNER_HEIGHT
         column = column + 1
     end
     return
@@ -325,6 +511,8 @@ export procedure pane_start()
     vic4_background(0)
     build_floor()
     build_tinted()
+    glass_lo = 0
+    glass_hi = WIDTH - 1
     return
 end
 
@@ -334,7 +522,9 @@ export procedure pane_frame(frame: u16)
     chunky_clear(0)
     draw_floor()
     draw_pane()
-    draw_runner()
+    if t < SPIN
+        draw_runner()
+    end
     return
 end
 

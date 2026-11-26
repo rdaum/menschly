@@ -45,10 +45,14 @@ SIDE, SIDE_STEPS = 104, 8
 # across X shows at x = 160 + FOCAL * X / z, y = HORIZON + FOCAL * (EYE - Y) / z
 # (Y up from the floor). FOCAL * EYE is the demo's DEPTH (1024).
 HORIZON, FOCAL, EYE = 120, 32, 32
-# The glass slab: standing on the floor from (X, z) NEAR to FAR, TALL high,
-# THICK through; the runner runs across at depth RUNNER_Z.
-PANE_NEAR = (-20.0, 13.0)
-PANE_FAR = (30.0, 38.0)
+# The glass slab: standing on the floor, centred at (X, z) PANE_CENTRE,
+# PANE_HALF long each way, turned PANE_REST (in 256ths of a turn) from
+# facing the viewer, TALL high, THICK through; the runner runs across at
+# depth RUNNER_Z. The demo projects it each frame (it turns and falls), in
+# eighths of these units.
+PANE_CENTRE = (4.0, 28.0)
+PANE_HALF = 22.0
+PANE_REST = 19
 PANE_TALL = 72.0
 PANE_THICK = 5.0
 RUNNER_Z = 20.5
@@ -83,58 +87,12 @@ def project(x, y, z):
     return 160 + FOCAL * x / z, HORIZON + FOCAL * (EYE - y) / z
 
 
-def pane():
-    """The glass slab projected: per screen column, the rows its front face
-    and its near end (the slab's thickness) cover, and where along the front
-    face the column is (0-255, for the sheen); and the column where the
-    runner's path goes through its plane."""
-    (nx, nz), (fx, fz) = PANE_NEAR, PANE_FAR
-    # The front face's normal, towards the viewer's side: the end face is
-    # the near edge pushed back through the glass by THICK.
-    ax, az = fx - nx, fz - nz
-    length = math.hypot(ax, az)
-    bx, bz = -az / length * PANE_THICK, ax / length * PANE_THICK
-
-    def edge(x, z):
-        return project(x, 0, z), project(x, PANE_TALL, z)
-
-    near_bottom, near_top = edge(nx, nz)
-    far_bottom, far_top = edge(fx, fz)
-    back_bottom, back_top = edge(nx + bx, nz + bz)
-    columns = {}
-    for x in range(320):
-        cx = x + 0.5
-        spans = []
-        for (b0, t0), (b1, t1) in (((near_bottom, near_top), (far_bottom, far_top)),
-                                   ((back_bottom, back_top), (near_bottom, near_top))):
-            lo, hi = sorted((b0[0], b1[0]))
-            if lo <= cx < hi and hi - lo > 0:
-                f = (cx - b0[0]) / (b1[0] - b0[0])
-                top = t0[1] + (t1[1] - t0[1]) * f
-                bottom = b0[1] + (b1[1] - b0[1]) * f
-                spans.append((max(0, round(top)), min(200, round(bottom)), f))
-            else:
-                spans.append(None)
-        if any(spans):
-            columns[x] = spans
-    first, last = min(columns), max(columns)
-    front_top, front_bottom, front_u, side_top, side_bottom = [], [], [], [], []
-    for x in range(first, last + 1):
-        front, side = columns.get(x, (None, None))
-        front_top.append(front[0] if front else 0)
-        front_bottom.append(front[1] if front else 0)
-        # Along the face in depth, not on screen: the sheen recedes.
-        if front:
-            z = 1 / ((1 - front[2]) / nz + front[2] / fz)
-            front_u.append(round((z - nz) / (fz - nz) * 255))
-        else:
-            front_u.append(0)
-        side_top.append(side[0] if side else 0)
-        side_bottom.append(side[1] if side else 0)
-    # Where the runner's path (depth RUNNER_Z) meets the glass's plane.
-    f = (RUNNER_Z - nz) / (fz - nz)
-    cross = round(project(nx + ax * f, 0, RUNNER_Z)[0])
-    return first, front_top, front_bottom, front_u, side_top, side_bottom, cross
+def pane_cross(sine):
+    """The column where the runner's path (depth RUNNER_Z) meets the glass
+    at rest, with the demo's own sine table."""
+    cos, sin = sine[(PANE_REST + 64) & 255] / 127, sine[PANE_REST] / 127
+    along = (RUNNER_Z - PANE_CENTRE[1]) / sin
+    return round(project(PANE_CENTRE[0] + along * cos, 0, RUNNER_Z)[0])
 
 
 def array(name, kind, values, per_line=16):
@@ -162,9 +120,9 @@ def main():
         b = 0.5 + 0.5 * math.sin(2 * math.pi * i / 32 + 1.3)
         level = min(SHEEN_STEPS - 1, round((0.65 * a ** 3 + 0.35 * b ** 6) * (SHEEN_STEPS - 1)))
         sheen.append(SHEEN + level)
-    first, front_top, front_bottom, front_u, side_top, side_bottom, cross = pane()
-    # The slab's end face down a column: light at its outer edge.
-    side_strip = [SIDE + min(SIDE_STEPS - 1, 2 + (i * 5 // 7) % SIDE_STEPS // 2) for i in range(256)]
+    cross = pane_cross(sine)
+    # The slab's end face down a column: light bands, faint.
+    side_strip = [SIDE + min(SIDE_STEPS - 1, 2 + (i * 5 // 7) % SIDE_STEPS // 2) for i in range(SHEEN_STRIP)]
     text = "\n".join([
         "module GridData",
         "",
@@ -185,6 +143,12 @@ def main():
         f"export const GLASS = {GLASS}",
         array("DEMO_PALETTE", "u8", [v for c in palette for v in c], 24),
         array("SINE", "i8", sine),
+        "# The sine at eight amplitudes, (k + 1) * 8 at most for row k: the dots'",
+        "# wave, picked by how far past the glass they are, without a multiply.",
+        "export const WOBBLE: [2048]i8 = [",
+        *["    " + ", ".join(str(round(s * (k + 1) * 8 / 127)) for s in sine[i:i + 16]) + ","
+          for k in range(8) for i in range(0, 256, 16)],
+        "]",
         "# The rotozoomer's texture (texture.py): 128x128, row by row, and its",
         "# palette.",
         f"export const TEXTURE_SIZE = {texture.SIZE}",
@@ -192,19 +156,17 @@ def main():
         array("TEXTURE", "u8", [int(v) for v in texture.texture().flatten()], 32),
         array("SHEEN_STRIP", "u8", sheen),
         array("SIDE_STRIP", "u8", side_strip),
-        "# The glass slab, per screen column from PANE_FIRST: the rows its front",
-        "# face covers (top, then bottom, exclusive; both 0 where it does not),",
-        "# how far along the face in depth the column is (0-255), the rows its",
-        "# near end covers; and the column where the runner goes through it.",
-        f"export const PANE_FIRST = {first}",
-        f"export const PANE_COLUMNS = {len(front_top)}",
+        "# The glass slab, in eighths of the floor's units (see data.py), and the",
+        "# column where the runner goes through it at rest.",
+        f"export const PANE_CX8 = {round(PANE_CENTRE[0] * 8)}",
+        f"export const PANE_CZ8 = {round(PANE_CENTRE[1] * 8)}",
+        f"export const PANE_HALF8 = {round(PANE_HALF * 8)}",
+        f"export const PANE_TALL8 = {round(PANE_TALL * 8)}",
+        f"export const PANE_THICK8 = {round(PANE_THICK * 8)}",
+        f"export const EYE8 = {EYE * 8}",
+        f"export const PANE_REST = {PANE_REST}",
         f"export const PANE_CROSS = {cross}",
         f"export const SIDE = {SIDE}",
-        array("FRONT_TOP", "u8", front_top),
-        array("FRONT_BOTTOM", "u8", front_bottom),
-        array("FRONT_U", "u8", front_u),
-        array("SIDE_TOP", "u8", side_top),
-        array("SIDE_BOTTOM", "u8", side_bottom),
         "",
     ])
     (out_dir / "grid-data.mensch").write_text(text)
