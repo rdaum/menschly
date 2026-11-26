@@ -587,12 +587,16 @@ fn quad_runs(
 
 // ---- dead stores to temporaries -----------------------------------------
 
-/// Whether `symbol` (with any offset) is one of the compiler's temporaries:
-/// the scratch slots and expression temporaries, whose values matter only
-/// within the routine that writes them (unlike locals and parameters).
+/// Whether `symbol` (with any offset) is storage whose value matters only
+/// within the routine that writes it: the scratch slots and expression
+/// temporaries, and locals (static or in the direct page), which start
+/// undefined and whose address Mensch never takes. (Not parameters: a
+/// caller writes its callee's.)
 fn is_temporary(symbol: &str) -> bool {
     let (name, _) = split_offset(symbol);
-    name.starts_with("__dp_") && (name.contains("_scratch") || name.contains("_temp_"))
+    name.starts_with("__static_")
+        || (name.starts_with("__dp_")
+            && (name.contains("_scratch") || name.contains("_temp_") || name.contains("_local_")))
 }
 
 /// The key of one byte of a temporary: "name+offset".
@@ -1694,11 +1698,12 @@ mod tests {
 
     #[test]
     fn carry_chains_in_place_ripple() {
+        // A parameter: a local nothing reads afterwards would just go.
         let byte = |k: u32| {
             if k == 0 {
-                Operand::Absolute("__static_f_at".to_owned())
+                Operand::Absolute("__dp_f_param_at".to_owned())
             } else {
-                Operand::Absolute(format!("__static_f_at+{k}"))
+                Operand::Absolute(format!("__dp_f_param_at+{k}"))
             }
         };
         let mut insts = vec![
@@ -1745,6 +1750,21 @@ mod tests {
         };
         assert_eq!(stores("__dp_scratch_0"), 0, "{out:?}");
         assert_eq!(stores("__dp_f_temp_t"), 0, "{out:?}");
+    }
+
+    #[test]
+    fn overwritten_stores_to_locals_go() {
+        let texel = Operand::Absolute("__static_f_texel".to_owned());
+        let insts = vec![
+            op(Op::Lda, Operand::Absolute("user".to_owned())),
+            op(Op::Stz, texel.clone()),
+            op(Op::Sta, texel.clone()),
+            op(Op::Lda, texel.clone()),
+            op(Op::Sta, Operand::Absolute("out".to_owned())),
+            Inst::implied(Op::Rts),
+        ];
+        let out = optimize_routine(insts, true);
+        assert!(!out.contains(&op(Op::Stz, texel)), "{out:?}");
     }
 
     #[test]
