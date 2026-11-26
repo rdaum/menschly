@@ -122,6 +122,28 @@ A `for` loop runs zero times when the start is already past the end, and
 stops after the pass where the variable equals the end, so it works up to a
 type's largest value. The end is evaluated on every pass.
 
+### Inline assembly
+
+```text
+asm "nop"                       # one line
+
+asm                             # a block, up to `end` at the same indentation
+    ldx count
+again:
+    dex
+    bne again
+end
+```
+
+The text goes into the output as it is (ca65 syntax), so nothing inside is
+read as Mensch: `#$00`, `[ptr],z` and `;` comments are fine. A block's lines
+are re-indented (labels at the margin) and wrapped in `.scope` ...
+`.endscope`, so its labels are its own and two blocks can both use `loop:`;
+it still reaches the module's variables by name. Inline assembly must leave
+Z zero (compiled code keeps it so) and may use the runtime's scratch
+(`__m65_tmp`, `__m65_arg`, `__m65_farp`, `__m65_acc`) freely within itself.
+A routine containing inline assembly is not optimised.
+
 ## Routines
 
 ```text

@@ -336,6 +336,8 @@ enum TokenKind {
     Ident(String),
     Number(u32),
     String(String),
+    /// The lines of an `asm` block, up to its `end` (see `read_asm_block`).
+    AsmBlock(String),
     LParen,
     RParen,
     LBracket,
@@ -471,7 +473,15 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                         break;
                     }
                 }
+                let block = ident == "asm" && at_line_end(source, offset + ident.len());
                 out.push(token(TokenKind::Ident(ident), offset));
+                if block {
+                    let (text, end) = read_asm_block(source, offset)?;
+                    out.push(token(TokenKind::AsmBlock(text), offset));
+                    while chars.peek().is_some_and(|&(at, _)| at < end) {
+                        chars.next();
+                    }
+                }
             }
             other => {
                 return Err(FrontendError::Lex(format!(
@@ -487,6 +497,50 @@ fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
 
 fn token(kind: TokenKind, offset: usize) -> Token {
     Token { kind, offset }
+}
+
+/// Whether nothing but spaces or a comment follows `at` on its line.
+fn at_line_end(source: &str, at: usize) -> bool {
+    let rest = &source[at..];
+    let line = rest.split('\n').next().unwrap_or("");
+    let line = line.split('#').next().unwrap_or("");
+    line.trim().is_empty()
+}
+
+/// An `asm` block: the lines after the `asm` at `offset`, up to a line of
+/// just `end` indented as far as the `asm` is. Returns the assembly (each
+/// line trimmed, labels at the margin and the rest indented, wrapped in a
+/// `.scope` so its labels are its own) and the offset just past the `end`.
+fn read_asm_block(source: &str, offset: usize) -> Result<(String, usize), FrontendError> {
+    let line_start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
+    let indent = &source[line_start..offset];
+    let mut at = source[offset..]
+        .find('\n')
+        .map_or(source.len(), |found| offset + found + 1);
+    let mut lines = vec![".scope".to_owned()];
+    while at < source.len() {
+        let end = source[at..].find('\n').map_or(source.len(), |found| at + found);
+        let line = source[at..end].trim_end_matches('\r');
+        let next = (end + 1).min(source.len());
+        if line.trim() == "end" && line.starts_with(indent) && line[indent.len()..].trim_start() == "end"
+            && line.len() - line.trim_start().len() == indent.len()
+        {
+            lines.push("\t.endscope".to_owned());
+            return Ok((lines.join("\n"), next));
+        }
+        let text = line.trim();
+        if !text.is_empty() {
+            if text.ends_with(':') || text.starts_with(';') {
+                lines.push(text.to_owned());
+            } else {
+                lines.push(format!("\t{text}"));
+            }
+        }
+        at = next;
+    }
+    Err(FrontendError::Lex(format!(
+        "asm block at {offset} has no end"
+    )))
 }
 
 fn read_string(
@@ -1568,8 +1622,13 @@ impl<'m> Parser<'m> {
             return Ok(Stmt::Return(value));
         }
         if self.take_keyword("asm") {
+            if let Some(TokenKind::AsmBlock(text)) = self.tokens.get(self.pos).map(|token| &token.kind) {
+                let text = text.clone();
+                self.pos += 1;
+                return Ok(Stmt::InlineAsm(text));
+            }
             let Some(line) = self.take_string() else {
-                return Err(self.parse_error("expected inline assembly string"));
+                return Err(self.parse_error("expected inline assembly: a string, or a block of lines ending in `end`"));
             };
             return Ok(Stmt::InlineAsm(line));
         }
@@ -5251,6 +5310,63 @@ fn is_power_of_two(value: i64) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inline_asm(source: &str) -> Vec<String> {
+        compile_source(source)
+            .unwrap()
+            .routines
+            .iter()
+            .flat_map(|routine| routine.body.iter())
+            .filter_map(|inst| match inst {
+                IrInst::InlineAsm(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn asm_blocks_take_lines_to_their_end() {
+        let asm = inline_asm(
+            "
+            module Blocks
+            var count: u8
+            procedure spin()
+                asm   # counts down
+                    ldx #$03
+                again:
+                    dex
+                    bne again
+                        end
+                end
+                asm \"nop\"
+                return
+            end
+            ",
+        );
+        assert_eq!(
+            asm,
+            vec![
+                ".scope\n\tldx #$03\nagain:\n\tdex\n\tbne again\n\tend\n\t.endscope".to_owned(),
+                "nop".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn asm_blocks_need_an_end() {
+        let error = compile_source(
+            "
+            module Unended
+            procedure f()
+                asm
+                    nop
+                return
+            end
+            ",
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("has no end"), "{error:?}");
+    }
 
     #[test]
     fn parses_module_with_procedure_function_variables_and_control_flow() {
