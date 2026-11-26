@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use crate::ir::{
-    param_symbol, Abi, Address, Const, IrInst, Label, Local, Module, Param, Routine, Storage, Value,
+    param_symbol, Abi, Address, Const, IrInst, Label, Local, Module, Param, PointerKind, Routine,
+    Storage, Type, Value,
 };
 
 pub const DEFAULT_DIRECT_PAGE_BUDGET: u16 = 0x80;
@@ -674,6 +675,21 @@ fn assign_stack_params(routine: &Routine, out: &mut RoutineStorage) {
     }
 }
 
+/// Whether a local is a pointer the CPU can only follow from the direct
+/// page (`(zp),z` or `[zp],z`): kept anywhere else, every use first copies
+/// it there.
+fn wants_direct_page(routine: &Routine, local: &Local) -> bool {
+    matches!(local.storage, Storage::Default)
+        && !matches!(routine.abi, Abi::Reentrant)
+        && matches!(
+            local.ty,
+            Type::Pointer {
+                kind: PointerKind::Far | PointerKind::Near,
+                ..
+            }
+        )
+}
+
 fn assign_locals(
     routine: &Routine,
     allocator: &mut DirectAllocator,
@@ -682,7 +698,35 @@ fn assign_locals(
 ) {
     let mut stack_offset = 1;
 
-    for local in &routine.locals {
+    // Pointers first: into the temp registers when they fit, else into a
+    // direct-page slot while the budget lasts (else they fall through to
+    // static storage below, like any other local).
+    let mut placed = BTreeSet::new();
+    for local in routine.locals.iter().filter(|local| wants_direct_page(routine, local)) {
+        let size = local.ty.size_bytes();
+        if let Some(registers) = registers.as_deref_mut() {
+            if let Some((first_use, last_use, false)) = local_lifetime(routine, &local.name) {
+                if let Some(symbol) = registers.place(first_use, last_use, size) {
+                    out.bindings.insert(
+                        BindingKey::Local(local.name.clone()),
+                        Location::Direct {
+                            symbol,
+                            offset: 0,
+                            size,
+                        },
+                    );
+                    placed.insert(local.name.clone());
+                    continue;
+                }
+            }
+        }
+        if allocator.can_alloc(size) {
+            allocate_direct_local(routine, local, allocator, out);
+            placed.insert(local.name.clone());
+        }
+    }
+
+    for local in routine.locals.iter().filter(|local| !placed.contains(&local.name)) {
         // A scalar local that never lives across a call can use the temp
         // registers instead of the frame or static storage. (Locals start
         // undefined, except in reentrant routines, where they start at zero.)
@@ -3372,6 +3416,39 @@ mod tests {
         // `elsewhere` might call back into the exported routine.
         assert_ne!(at("__dp_leaves_param_e"), at("__dp_callback_param_d"));
         assert!(at("__dp_left_param_a").is_some());
+    }
+
+    #[test]
+    fn pointer_locals_live_in_the_direct_page() {
+        let module = crate::frontend::compile_source(
+            "
+            module Pointers
+            procedure walk()
+                var far_cell: far ^u8
+                var near_cell: near ^u8
+                var count: u16
+                far_cell = $40000
+                near_cell = $2000
+                count = 0
+                while count != 10
+                    far_cell^ = near_cell^
+                    count = count + 1
+                end
+                return
+            end
+            ",
+        )
+        .unwrap();
+        let assignment = assign_storage(&module);
+        let walk = assignment
+            .routines
+            .iter()
+            .find(|layout| layout.name == "walk")
+            .unwrap();
+        let place = |name: &str| walk.bindings.get(&BindingKey::Local(name.to_owned())).cloned();
+        assert!(matches!(place("far_cell"), Some(Location::Direct { .. })));
+        assert!(matches!(place("near_cell"), Some(Location::Direct { .. })));
+        assert!(matches!(place("count"), Some(Location::Static { .. })));
     }
 
     #[test]
