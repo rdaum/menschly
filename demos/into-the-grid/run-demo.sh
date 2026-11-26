@@ -29,6 +29,7 @@ cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- 
   "$here/src/chunky.mensch" \
   "$here/src/pane.mensch" \
   "$here/src/roto.mensch" \
+  "$here/src/music.mensch" \
   "$root/lib/vic4.mensch" \
   "$out/grid-data.mensch"
 # The runner's frames go in the ROM image's upper 64 KiB.

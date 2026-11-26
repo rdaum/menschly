@@ -1,0 +1,234 @@
+module GridMusic
+
+# The demo's music player: an event stream (tools/music.py) for the FM
+# chip's 9 channels (voices 0-8) and the four SIDs' 12 voices (9-20), with
+# its instruments and note tables in GridData.
+#
+# music_tick runs once a frame from the raster interrupt, so the music
+# keeps time however fast the pictures are drawn. Only it (and music_start,
+# before interrupts are on) touches this module, so its storage is its own.
+#
+# The stream (from MUSIC_AT): a u16 offset to loop back to, then per frame
+# with events: $80 voice note instrument, $81 voice, ..., and a byte 1-127,
+# the frames to wait; $FF loops.
+
+import GridData
+
+const NOTE_ON = $80
+const NOTE_OFF = $81
+const END = $ff
+const FM_VOICES = 9
+const VOICES = 21
+const NO_INSTRUMENT = $ff
+
+# The FM chip, a register a byte at FM_CHIP + register; its operators'
+# register offsets by channel (the carrier is 3 on from the modulator).
+const FM_CHIP: u32 = $fe00000
+const FM_TEST = $01
+const FM_WAVEFORM_SELECT = $20
+const FM_KEY_ON = $20
+const OPERATOR: [FM_VOICES]u8 = [$00, $01, $02, $08, $09, $0a, $10, $11, $12]
+
+# The SIDs, $20 apart; a voice's registers 7 apart: frequency (2), pulse
+# width (2), control, attack/decay, sustain/release; the volume at +$18.
+fixed($d400) volatile var sid: [128]u8
+const SID_GATE = $01
+const SID_VOLUME = $18
+
+# The mixer: a coefficient selected, then its value; an input's four
+# outputs (speaker left and right, headphones left and right).
+fixed($d6f4) volatile var mixer_select: u8
+fixed($d6f5) volatile var mixer_value: u8
+const MIX_OUTPUTS: [4]u8 = [$00, $20, $c0, $e0]
+const MIX_SIDS_1_2 = $00
+const MIX_SIDS_3_4 = $02
+const MIX_FM = $1c
+const MIX_MASTER = $1e
+
+var at: u16
+var loop_at: u16
+var wait: u8
+var playing: u8
+var command: u8
+var voice: u8
+var note: u8
+var instrument: u8
+var spec: u16
+var base: u8
+var value: u8
+var i: u8
+var voice_instrument: [VOICES]u8
+var voice_note: [VOICES]u8
+var voice_wave: [VOICES]u8
+
+function stream_byte(offset: u16): u8
+    var bank: far ^u8
+    bank = MUSIC_AT
+    return bank[offset]
+end
+
+procedure fm(register: u8)
+    var chip: far ^u8
+    chip = FM_CHIP + u32(register)
+    chip^ = value
+    return
+end
+
+procedure mix(input: u8, gain: u8)
+    i = 0
+    while i != 4
+        mixer_select = input + MIX_OUTPUTS[i]
+        mixer_value = gain
+        mixer_select = input + MIX_OUTPUTS[i] + 1
+        mixer_value = gain
+        i = i + 1
+    end
+    return
+end
+
+# Silences the chips, sets the mixer, and starts the music from the top.
+export procedure music_start()
+    playing = 0
+    value = 0
+    i = $20
+    while i != $f6
+        fm(i)
+        i = i + 1
+    end
+    value = FM_WAVEFORM_SELECT
+    fm(FM_TEST)
+    i = 0
+    while i != 128
+        sid[i] = 0
+        i = i + 1
+    end
+    sid[SID_VOLUME] = 15
+    sid[$20 + SID_VOLUME] = 15
+    sid[$40 + SID_VOLUME] = 15
+    sid[$60 + SID_VOLUME] = 15
+    mix(MIX_FM, $c0)
+    mix(MIX_SIDS_1_2, $a0)
+    mix(MIX_SIDS_3_4, $a0)
+    mix(MIX_MASTER, $ff)
+    i = 0
+    while i != VOICES
+        voice_instrument[i] = NO_INSTRUMENT
+        i = i + 1
+    end
+    loop_at = u16(stream_byte(0)) | (u16(stream_byte(1)) << 8)
+    at = loop_at
+    wait = 0
+    playing = 1
+    return
+end
+
+# Programs FM channel `voice` as instrument `instrument`.
+procedure fm_instrument()
+    spec = u16(instrument) * 12 + 1
+    base = OPERATOR[voice]
+    value = INSTRUMENT[spec]
+    fm($20 + base)
+    value = INSTRUMENT[spec + 1]
+    fm($40 + base)
+    value = INSTRUMENT[spec + 2]
+    fm($60 + base)
+    value = INSTRUMENT[spec + 3]
+    fm($80 + base)
+    value = INSTRUMENT[spec + 4]
+    fm($e0 + base)
+    value = INSTRUMENT[spec + 5]
+    fm($23 + base)
+    value = INSTRUMENT[spec + 6]
+    fm($43 + base)
+    value = INSTRUMENT[spec + 7]
+    fm($63 + base)
+    value = INSTRUMENT[spec + 8]
+    fm($83 + base)
+    value = INSTRUMENT[spec + 9]
+    fm($e3 + base)
+    value = INSTRUMENT[spec + 10]
+    fm($c0 + voice)
+    return
+end
+
+# The registers of SID voice `voice` (9 on): its SID's and its own offset.
+procedure sid_base()
+    base = voice - FM_VOICES
+    base = ((base / 3) << 5) + (base % 3) * 7
+    return
+end
+
+procedure note_on()
+    if voice < FM_VOICES
+        if voice_instrument[voice] != instrument
+            fm_instrument()
+            voice_instrument[voice] = instrument
+        end
+        value = 0
+        fm($b0 + voice)
+        value = FM_LOW[note]
+        fm($a0 + voice)
+        value = FM_HIGH[note] | FM_KEY_ON
+        fm($b0 + voice)
+    else
+        sid_base()
+        spec = u16(instrument) * 12 + 1
+        if voice_instrument[voice] != instrument
+            sid[base + 5] = INSTRUMENT[spec + 1]
+            sid[base + 6] = INSTRUMENT[spec + 2]
+            sid[base + 2] = INSTRUMENT[spec + 3]
+            sid[base + 3] = INSTRUMENT[spec + 4]
+            voice_instrument[voice] = instrument
+        end
+        voice_wave[voice] = INSTRUMENT[spec]
+        sid[base + 4] = voice_wave[voice]
+        sid[base] = SID_LOW[note]
+        sid[base + 1] = SID_HIGH[note]
+        sid[base + 4] = voice_wave[voice] | SID_GATE
+    end
+    voice_note[voice] = note
+    return
+end
+
+procedure note_off()
+    if voice < FM_VOICES
+        value = FM_HIGH[voice_note[voice]]
+        fm($b0 + voice)
+    else
+        sid_base()
+        sid[base + 4] = voice_wave[voice]
+    end
+    return
+end
+
+# Once a frame: this frame's events, if the wait is over.
+export procedure music_tick()
+    if playing == 0
+        return
+    end
+    if wait
+        wait = wait - 1
+        return
+    end
+    while 1
+        command = stream_byte(at)
+        at = at + 1
+        if command == END
+            at = loop_at
+        elsif command == NOTE_ON
+            voice = stream_byte(at)
+            note = stream_byte(at + 1)
+            instrument = stream_byte(at + 2)
+            at = at + 3
+            note_on()
+        elsif command == NOTE_OFF
+            voice = stream_byte(at)
+            at = at + 1
+            note_off()
+        else
+            wait = command - 1
+            return
+        end
+    end
+    return
+end

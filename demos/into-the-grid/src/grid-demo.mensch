@@ -10,7 +10,8 @@ vector irq = tick
 #
 # Each part draws a frame into Chunky's buffer being drawn (its own frame
 # count from 0), the buffers swap, and the part gets its vertical-blank
-# moment for palette changes. START_FRAME (GridData) starts the whole demo
+# moment for palette changes. The music (GridMusic) plays from the raster
+# interrupt, once a frame, whatever the parts' frame rates. START_FRAME (GridData) starts the whole demo
 # further on, for looking at a moment of it.
 
 import Vic4
@@ -18,6 +19,7 @@ import Chunky
 import GridData
 import PaneScene
 import RotoScene
+import GridMusic
 
 const PANE_FRAMES: u16 = 560
 const ROTO_FRAMES: u16 = ROTO_LENGTH
@@ -41,6 +43,7 @@ var demo_frame: u16
 # Once a frame.
 interrupt procedure tick()
     frames_shown = frames_shown + 1
+    music_tick()
     vic4_raster_irq(TICK_LINE)
     return
 end
@@ -90,6 +93,7 @@ export function main(): u8
     worst_line = 0
     frames_drawn = 0
     frames_shown = 0
+    music_start()
     vic4_raster_irq(TICK_LINE)
     asm "cli"
     demo_frame = START_FRAME

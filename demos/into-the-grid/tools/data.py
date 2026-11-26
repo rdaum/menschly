@@ -8,7 +8,12 @@ Writes, in the out dir (default target/into-the-grid):
   rotozoomer's texture, the glass slab's tables, and where the runner's
   frames lie;
 - grid-bank.bin: the blob for the ROM image's upper bank (inject_bank.py
-  puts it at linear $30000): the runner's frames (figure.py).
+  puts it at linear $30000): the runner's frames (figure.py), then the
+  music's stream (music.py, at MUSIC_AT).
+
+The music is the demo's own tune (tune.py) arranged by music.DEFAULT, or
+the MIDI file MUSIC_MIDI names in the environment (arranged by the JSON
+file MUSIC_ARRANGEMENT names, if set).
 
 The palette:
 -   0- 63  the runner's chrome (figure.py);
@@ -30,7 +35,11 @@ ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "tools"))
 
+import json  # noqa: E402
+
 import figure  # noqa: E402
+import music  # noqa: E402
+import tune  # noqa: E402
 import inject_bank  # noqa: E402
 import texture  # noqa: E402
 
@@ -107,8 +116,18 @@ def main():
     out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "target" / "into-the-grid"
     out_dir.mkdir(parents=True, exist_ok=True)
     frames = b"".join(figure.frame(i / figure.FRAMES).T.tobytes() for i in range(figure.FRAMES))
-    blob = frames
-    assert len(blob) <= inject_bank.SPACE
+    blob = bytearray(frames)
+    midi_path = os.environ.get("MUSIC_MIDI")
+    if not midi_path:
+        midi_path = out_dir / "tune.mid"
+        tune.write(midi_path, tune.tune(), tune.BPM)
+    arrangement = music.DEFAULT
+    if os.environ.get("MUSIC_ARRANGEMENT"):
+        arrangement = json.loads(Path(os.environ["MUSIC_ARRANGEMENT"]).read_text())
+    song, song_text, song_frames = music.build(midi_path, arrangement)
+    music_at = inject_bank.BANK + len(blob)
+    blob += song
+    assert len(blob) <= inject_bank.SPACE, f"the bank is {len(blob)} bytes, over {inject_bank.SPACE}"
     (out_dir / "grid-bank.bin").write_bytes(blob)
     palette = demo_palette()
     sine = [round(127 * math.sin(2 * math.pi * i / 256)) for i in range(256)]
@@ -142,12 +161,14 @@ def main():
         f"export const SHEEN = {SHEEN}",
         f"export const GLASS = {GLASS}",
         array("DEMO_PALETTE", "u8", [v for c in palette for v in c], 24),
+        f"export const MUSIC_AT: u32 = ${music_at:x}",
+        song_text,
         array("SINE", "i8", sine),
-        "# The sine at eight amplitudes, (k + 1) * 8 at most for row k: the dots'",
+        "# The sine at four amplitudes, (k + 1) * 16 at most for row k: the dots'",
         "# wave, picked by how far past the glass they are, without a multiply.",
-        "export const WOBBLE: [2048]i8 = [",
-        *["    " + ", ".join(str(round(s * (k + 1) * 8 / 127)) for s in sine[i:i + 16]) + ","
-          for k in range(8) for i in range(0, 256, 16)],
+        "export const WOBBLE: [1024]i8 = [",
+        *["    " + ", ".join(str(round(s * (k + 1) * 16 / 127)) for s in sine[i:i + 16]) + ","
+          for k in range(4) for i in range(0, 256, 16)],
         "]",
         "# The rotozoomer's texture (texture.py): 128x128, row by row, and its",
         "# palette.",
@@ -170,7 +191,8 @@ def main():
         "",
     ])
     (out_dir / "grid-data.mensch").write_text(text)
-    print(f"grid data: palette, sine, {len(blob)} bytes for the ROM bank -> {out_dir}")
+    print(f"grid data: {len(blob)} bytes for the ROM bank, music {song_frames / music.FRAME_HZ:.1f} s "
+          f"from {Path(midi_path).name} -> {out_dir}")
 
 
 if __name__ == "__main__":

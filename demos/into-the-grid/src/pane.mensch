@@ -446,9 +446,9 @@ procedure draw_runner_dots()
     thin = past >> 2
     wave = u8(t << 2) + u8(RUNNER_Y * 3)
     # The wave's amplitude grows with the distance: WOBBLE's row for it.
-    wobble = u16(past >> 4)
-    if wobble > 7
-        wobble = 7
+    wobble = u16(past >> 5)
+    if wobble > 3
+        wobble = 3
     end
     wobble = wobble << 8
     hash = u16(sx) * 7 + u16(RUNNER_Y) * 13 + t
