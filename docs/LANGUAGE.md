@@ -71,6 +71,22 @@ with every element or field given in order. Elements are constants, string
 literals and `addr(global)` (for pointers), or routine names (for routine
 pointers).
 
+```text
+fixed($d020) volatile var border: u8          # a hardware register
+volatile var rx_head: u16                     # shared with an interrupt
+```
+
+The compiler assumes an ordinary variable changes only where the code
+writes it: within a run of code it may keep a variable's value in a
+register rather than read it again, or skip a store that is overwritten
+before anything reads it. A call, inline assembly, a write through a
+pointer or a store to a `fixed` address ends that. A variable an interrupt
+handler shares with the rest of the program must be `volatile`, and so
+must anything at a `fixed` address that something other than this code
+changes: every read and write of a `volatile` variable happens as written.
+(Anything at a `fixed` address is also never read or written 32 bits at a
+time, since it may be hardware.)
+
 ## Elements, fields and pointers
 
 Element and field accesses compose, and can be read or assigned:

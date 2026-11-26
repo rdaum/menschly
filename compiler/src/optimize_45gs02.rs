@@ -123,8 +123,9 @@ pub fn optimize_routine_with(
         let mut changed = clean_jumps(&mut insts);
         changed |= eliminate_dead_code(&mut insts, returns);
         changed |= eliminate_dead_temporaries(&mut insts);
-        changed |= eliminate_redundant(&mut insts, z_zero_on_entry, flag_routines, returns);
-        changed |= carry_increments(&mut insts, returns);
+        changed |=
+            eliminate_redundant(&mut insts, z_zero_on_entry, flag_routines, returns, plain_memory);
+        changed |= carry_increments(&mut insts, returns, plain_memory);
         if !changed && insts.len() == before {
             break;
         }
@@ -750,6 +751,10 @@ struct Known {
     /// The four bytes A, X, Y and Z together hold (after LDQ or STQ): the
     /// key of their first byte.
     quad: Option<String>,
+    /// The module's ordinary variables (not fixed, not volatile): tracked
+    /// like the compiler's own storage, on the understanding that they
+    /// change only where the code writes them (see `clobber`).
+    plain: std::rc::Rc<HashSet<String>>,
 }
 
 const REG_A: usize = 0;
@@ -866,12 +871,35 @@ impl Known {
             .map(|offset| format!("fp:{offset}"))
     }
 
+    /// Whether `symbol` is one of the module's ordinary variables.
+    fn is_plain(&self, symbol: &str) -> bool {
+        self.plain.contains(split_offset(symbol).0)
+    }
+
+    /// Forgets what the module's ordinary variables hold.
+    fn forget_plain(&mut self) {
+        let plain = self.plain.clone();
+        let is_plain = |key: &str| {
+            key.strip_prefix("a:")
+                .or_else(|| key.strip_prefix("z:"))
+                .is_some_and(|symbol| plain.contains(split_offset(symbol).0))
+        };
+        self.retain_keys(|key| !is_plain(key));
+        if self.quad.as_deref().is_some_and(is_plain) {
+            self.quad = None;
+        }
+    }
+
     /// A key for the value an operand reads, if it is a known kind.
     fn key(&self, operand: &Operand) -> Option<String> {
         match operand {
             Operand::Immediate(text) => Some(format!("#{text}")),
-            Operand::Base(symbol) if is_compiler_symbol(symbol) => Some(format!("z:{symbol}")),
-            Operand::Absolute(symbol) if is_compiler_symbol(symbol) => Some(format!("a:{symbol}")),
+            Operand::Base(symbol) if is_compiler_symbol(symbol) || self.is_plain(symbol) => {
+                Some(format!("z:{symbol}"))
+            }
+            Operand::Absolute(symbol) if is_compiler_symbol(symbol) || self.is_plain(symbol) => {
+                Some(format!("a:{symbol}"))
+            }
             Operand::IndirectY(pointer) if pointer == FP_SYMBOL => self.frame_key(),
             _ => None,
         }
@@ -891,7 +919,9 @@ impl Known {
             self.quad = None;
         }
         match operand {
-            Operand::Base(symbol) | Operand::Absolute(symbol) if is_compiler_symbol(symbol) => {
+            Operand::Base(symbol) | Operand::Absolute(symbol)
+                if is_compiler_symbol(symbol) || self.is_plain(symbol) =>
+            {
                 let prefix = if matches!(operand, Operand::Base(_)) {
                     "z:"
                 } else {
@@ -915,8 +945,12 @@ impl Known {
                     self.retain_keys(|held| !held.starts_with("fp:"));
                 }
             }
-            // A different, user-named symbol cannot alias compiler storage.
-            Operand::Base(symbol) | Operand::Absolute(symbol) if !symbol.starts_with('$') => {}
+            // Another user-named symbol (fixed, volatile, or another
+            // module's) cannot alias compiler storage; but it may be
+            // hardware, such as the DMA controller, that writes memory.
+            Operand::Base(symbol) | Operand::Absolute(symbol) if !symbol.starts_with('$') => {
+                self.forget_plain();
+            }
             Operand::IndirectY(pointer) if pointer == FP_SYMBOL => match self.frame_key() {
                 Some(key) => self.retain_keys(|held| held != key),
                 None => self.retain_keys(|held| !held.starts_with("fp:")),
@@ -925,7 +959,9 @@ impl Known {
             // storage (locals, parameters, temporaries), so only the stack
             // frame may be reached.
             Operand::IndirectY(_) | Operand::IndirectZ(_) | Operand::FlatZ(_) => {
-                self.retain_keys(|held| !held.starts_with("fp:"))
+                self.retain_keys(|held| !held.starts_with("fp:"));
+                // A pointer can reach any of the module's variables.
+                self.forget_plain();
             }
             _ => self.clobber_all_memory(),
         }
@@ -948,7 +984,9 @@ fn eliminate_redundant(
     z_zero_on_entry: bool,
     flag_routines: &HashSet<String>,
     returns: Returns,
+    plain_memory: &HashSet<String>,
 ) -> bool {
+    let plain = std::rc::Rc::new(plain_memory.clone());
     let live = live_after(insts, returns);
     let referenced: HashSet<String> = insts
         .iter()
@@ -960,6 +998,7 @@ fn eliminate_redundant(
     } else {
         Known::default()
     };
+    known.plain = plain.clone();
     let mut delete = vec![false; insts.len()];
     let mut rewrite = Vec::new();
     // Z is zero at every branch target (the codegen invariant), once an
@@ -976,6 +1015,7 @@ fn eliminate_redundant(
                         Known::default()
                     };
                     known.next_value = next_value;
+                    known.plain = plain.clone();
                 }
                 continue;
             }
@@ -984,6 +1024,7 @@ fn eliminate_redundant(
                 let next_value = known.next_value;
                 known = Known::entry();
                 known.next_value = next_value;
+                known.plain = plain.clone();
                 for reg in [REG_A, REG_X, REG_Y] {
                     known.forget(reg);
                 }
@@ -1249,6 +1290,7 @@ fn eliminate_redundant(
                 let next_value = known.next_value;
                 known = Known::entry();
                 known.next_value = next_value;
+                known.plain = plain.clone();
                 for reg in [REG_A, REG_X, REG_Y] {
                     known.forget(reg);
                 }
@@ -1282,6 +1324,7 @@ fn eliminate_redundant(
             Op::Bne | Op::Beq | Op::Bcc | Op::Bcs | Op::Lbne | Op::Lbeq | Op::Lbcc | Op::Lbcs => {}
             Op::Bra | Op::Lbra | Op::Rts | Op::Rtn | Op::Rti => {
                 known = Known::default();
+                known.plain = plain.clone();
             }
         }
     }
@@ -1303,7 +1346,11 @@ static NEXT_CARRY_LABEL: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 /// and `lda m / sbc #0 / sta m` is `bcs + / dec m`, when A and the flags are
 /// not needed afterwards. Only for compiler-owned memory: an I/O register
 /// would see a different access pattern.
-fn carry_increments(insts: &mut Vec<Inst>, returns: Returns) -> bool {
+fn carry_increments(
+    insts: &mut Vec<Inst>,
+    returns: Returns,
+    plain_memory: &HashSet<String>,
+) -> bool {
     let live = live_after(insts, returns);
     let mut i = 0;
     let mut changed = false;
@@ -1321,7 +1368,8 @@ fn carry_increments(insts: &mut Vec<Inst>, returns: Returns) -> bool {
                     Inst::Op(Op::Sta, store),
                 ) if zero == "$00"
                     && load == store
-                    && matches!(load, Operand::Base(symbol) | Operand::Absolute(symbol) if is_compiler_symbol(symbol)) =>
+                    && matches!(load, Operand::Base(symbol) | Operand::Absolute(symbol)
+                        if is_compiler_symbol(symbol) || plain_memory.contains(split_offset(symbol).0)) =>
                 {
                     Some(load.clone())
                 }
@@ -1623,6 +1671,42 @@ mod tests {
 
     fn label(name: &str) -> Operand {
         Operand::Label(name.to_owned())
+    }
+
+    #[test]
+    fn ordinary_variables_change_only_where_written() {
+        let plain: HashSet<String> = ["count".to_owned()].into_iter().collect();
+        let count = Operand::Absolute("count".to_owned());
+        let port = Operand::Absolute("port".to_owned());
+        let run = |between: Vec<Inst>, variable: &Operand| {
+            let mut insts = vec![
+                op(Op::Lda, Operand::Absolute("user".to_owned())),
+                op(Op::Sta, variable.clone()),
+            ];
+            insts.extend(between);
+            insts.push(op(Op::Lda, variable.clone()));
+            insts.push(op(Op::Sta, Operand::Absolute("out".to_owned())));
+            insts.push(Inst::implied(Op::Rts));
+            optimize_routine_with(insts, true, &HashSet::new(), false, Some(0), &plain)
+        };
+        let reloads = |out: &[Inst], variable: &Operand| {
+            out.iter()
+                .filter(|inst| **inst == op(Op::Lda, variable.clone()))
+                .count()
+        };
+        // Stored then read with nothing between: A still holds it.
+        assert_eq!(reloads(&run(vec![], &count), &count), 0);
+        // Not one of the ordinary variables (fixed, volatile, elsewhere).
+        assert_eq!(reloads(&run(vec![], &port), &port), 1);
+        // A write through a pointer may reach it.
+        let pointer = vec![
+            op(Op::Ldx, imm("$00")),
+            op(Op::Stx, Operand::FlatZ("__m65_farp".to_owned())),
+        ];
+        assert_eq!(reloads(&run(pointer, &count), &count), 1);
+        // A store to hardware (DMA, say) may change memory.
+        let hardware = vec![op(Op::Stx, port.clone())];
+        assert_eq!(reloads(&run(hardware, &count), &count), 1);
     }
 
     #[test]
