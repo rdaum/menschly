@@ -116,6 +116,9 @@ var item_index: u8
 var item_timer: u16
 var item_y: i16
 var round_frames: u16
+# Frames to the hurry-up (BubbleSoundBank's HURRY_*): from the round's start,
+# and from HURRY_RESTART when Bub comes back.
+var hurry_clock: u16
 var rounds_played: u16
 var chain_from: u8
 var chain_left: u8
@@ -323,7 +326,10 @@ procedure start_round()
         actor_hide(enemy_actor[i])
     end
     bubbles_reset()
-    music_start()
+    if rounds_played == 0 or music_hurried
+        music_start()
+    end
+    hurry_clock = 0
     chaining = 0
     item_index = ROUND1_ITEM
     if rounds_played
@@ -389,6 +395,11 @@ procedure move_bub(buttons: u8)
         if caught == 0
             body_place(PLAYER, START_X, START_Y)
             safe = SAFE_FRAMES
+            # Coming back calms the hurry-up: the theme at its own pace again.
+            if music_hurried or hurry_clock >= HURRY_STOP
+                music_start()
+            end
+            hurry_clock = HURRY_RESTART
         elsif not supported(body_x(PLAYER), body_y(PLAYER) + 16)
             # Caught in the air, he sinks to the ground at 1 px a frame.
             body_place(PLAYER, body_x(PLAYER), body_y(PLAYER) + 1)
@@ -423,6 +434,7 @@ procedure move_bub(buttons: u8)
     # Taking off, Bub makes no step sideways that frame.
     if pressed & JOY_UP
         if body_jump(PLAYER)
+            effect_play(EFFECT_JUMP)
             walk_step = 0
             dx = 0
             steers = STEER_CYCLE - 1
@@ -835,9 +847,23 @@ procedure foods()
     return
 end
 
+# The hurry-up's sound: the music stops, the jingle, then the theme fast.
+procedure hurry()
+    hurry_clock = hurry_clock + 1
+    if hurry_clock == HURRY_STOP
+        music_stop()
+    elsif hurry_clock == HURRY_JINGLE
+        effect_play(EFFECT_HURRY)
+    elsif hurry_clock == HURRY_THEME
+        music_hurry()
+    end
+    return
+end
+
 # The round's item: waiting, shown, its score floating up, or done.
 procedure round_item()
     round_frames = round_frames + 1
+    hurry()
     if item_state == ITEM_DONE
         return
     end
@@ -948,6 +974,7 @@ procedure bub_meets(b: u8)
                 burst(b, facing_left, 1)
             elsif above < LAND_BOUNCE and (buttons_now & JOY_UP)
                 body_launch(PLAYER)
+                effect_play(EFFECT_BOUNCE)
             end
             return
         end

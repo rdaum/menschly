@@ -1,6 +1,6 @@
 """Turn the arcade's sound effects into SID streams for the MEGA65.
 
-    python3 sound_effects.py 31 25 11 0d
+    python3 sound_effects.py 31 25 11 0d 2c 20 18
 
 The arcade plays its effects on the YM2203's FM channels (capture_sound.py
 logs their register writes per timer A tick). Each FM channel becomes a SID
@@ -9,7 +9,9 @@ carrier's multiplier), its gate on from the channel's first key-on. The
 YM2203's envelopes run inside the chip, so the loudness comes instead from
 MAME's recording of the effect sent alone (mame/reglog.lua): the level of
 each tick of it sets the SID's master volume. The waveform is a guess from
-the FM algorithm (WAVES; all carriers sum near a sine: triangle).
+the FM algorithm (WAVES; all carriers sum near a sine: triangle). A command
+that goes on into a piece of music (the hurry-up jingle into the fast theme)
+is kept up to where the music's loop starts.
 
 Writes target/bubble-bobble/sound/<cmd>.sid, little-endian:
 - u16 the tick rate in hundredths of a hertz;
@@ -91,6 +93,8 @@ def voices(cmd):
             if ev["reg"] == 0x28 and ev["value"] & 0xF0 and (ev["value"] & 3) < VOICES:
                 keyed[ev["value"] & 3] = True
     ticks.append(snapshot(regs, keyed))
+    if header["repeat"]:
+        ticks = ticks[:header["repeat"]["from_tick"]]
     return ticks, header["timer_a_hz"]
 
 
@@ -122,6 +126,7 @@ def encode(ticks, rate_hz, volumes):
     """The SID stream; the effect starts at its first key-on."""
     first = next(i for i, tick in enumerate(ticks) if any(keyed for _, keyed, _ in tick))
     ticks = ticks[first:]
+    volumes = volumes[:len(ticks)]
     last = max(i for i, v in enumerate(volumes) if v) if any(volumes) else 0
     out = bytearray(struct.pack("<H", round(rate_hz * 100)))
     freq = [None] * VOICES

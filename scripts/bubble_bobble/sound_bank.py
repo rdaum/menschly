@@ -26,8 +26,18 @@ import sound_stream  # noqa: E402
 # The theme ($30 in the game, $0F when hurried: the same writes).
 MUSIC = 0x30
 HURRY = 0x0F
-# The effects the game plays, and the arcade's commands for them.
-EFFECTS = [("BLOW", 0x31), ("POP", 0x25), ("FRUIT", 0x11), ("CAUGHT", 0x0D)]
+# The effects the game plays, the arcade's commands for them, and the SID
+# each plays on (an effect cuts off the one before it on its SID; those that
+# come together get different ones).
+EFFECTS = [("BLOW", 0x31, 0), ("POP", 0x25, 2), ("FRUIT", 0x11, 2), ("CAUGHT", 0x0D, 3),
+           ("JUMP", 0x2C, 1), ("BOUNCE", 0x20, 1), ("HURRY", 0x18, 3)]
+# Frames from the round's start (or Bub's coming back, which sets the clock
+# to HURRY_RESTART) to the hurry-up: the music stops, then the jingle plays,
+# then the theme starts again fast, as the arcade sends $00, $18 and $0F.
+HURRY_STOP = 1800
+HURRY_JINGLE = 1830
+HURRY_THEME = 1931
+HURRY_RESTART = 300
 
 
 def main():
@@ -40,9 +50,9 @@ def main():
     bank = inject_bank.BANK + len(blob)
     blob += music
     effects = []
-    for name, cmd in EFFECTS:
+    for name, cmd, slot in EFFECTS:
         stream = (sound / f"{cmd:02x}.sid").read_bytes()
-        effects.append((name, len(blob) - (bank - inject_bank.BANK)))
+        effects.append((name, len(blob) - (bank - inject_bank.BANK), slot))
         blob += stream
     assert len(blob) <= inject_bank.SPACE, f"the game's bank is {len(blob)} bytes, over {inject_bank.SPACE}"
     (assets / "game-bank.bin").write_bytes(blob)
@@ -56,9 +66,12 @@ def main():
         f"export const HURRY_HZ = {round(hurry['timer_a_hz'] * 100)}",
         f"export const EFFECTS = {len(effects)}",
     ]
-    for i, (name, _) in enumerate(effects):
+    for i, (name, _, _) in enumerate(effects):
         lines.append(f"export const EFFECT_{name} = {i}")
-    lines.append(f"export const EFFECT_AT: [{len(effects)}]u16 = [{', '.join(str(at) for _, at in effects)}]")
+    lines.append(f"export const EFFECT_AT: [{len(effects)}]u16 = [{', '.join(str(at) for _, at, _ in effects)}]")
+    lines.append(f"export const EFFECT_SLOT: [{len(effects)}]u8 = [{', '.join(str(s) for _, _, s in effects)}]")
+    for name in ("HURRY_STOP", "HURRY_JINGLE", "HURRY_THEME", "HURRY_RESTART"):
+        lines.append(f"export const {name}: u16 = {globals()[name]}")
     (assets / "bubble-sound-bank.mensch").write_text("\n".join(lines) + "\n")
     sound_bytes = len(blob) - (bank - inject_bank.BANK)
     print(f"game bank: {len(blob)} bytes ({len(music)} music, {sound_bytes - len(music)} effects)")

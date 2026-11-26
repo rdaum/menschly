@@ -39,7 +39,7 @@ fi
 (cd "$here" && python3 rom_tables.py "$assets" >/dev/null)
 (cd "$here" && python3 demo_assets.py)
 # The sound bank: the arcade's theme and effects, captured from MAME
-# (capture_sound.py 30 0f; sound_effects.py 31 25 11 0d).
+# (capture_sound.py 30 0f; sound_effects.py 31 25 11 0d 2c 20 18).
 (cd "$here" && python3 sound_bank.py "$assets")
 # The input replay module: replay.py writes one with a script of inputs;
 # otherwise the game reads the joystick.

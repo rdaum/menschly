@@ -71,6 +71,7 @@ var effect_at: [SLOTS]u16
 var effect_rate: [SLOTS]u16
 var effect_owed: [SLOTS]u16
 var music_on: u8
+export var music_hurried: u8
 var music_at: u16
 var music_loop: u16
 var music_rate: u16
@@ -144,9 +145,18 @@ export procedure sound_start()
     return
 end
 
-# Starts the theme from the top, at MUSIC_HZ.
+# Starts the theme from the top, at MUSIC_HZ (music_start) or HURRY_HZ
+# (music_hurry).
+export procedure music_hurry()
+    music_start()
+    music_rate = HURRY_HZ
+    music_hurried = 1
+    return
+end
+
 export procedure music_start()
     music_rate = MUSIC_HZ
+    music_hurried = 0
     word_at = 2
     music_loop = bank_word()
     music_at = 4
@@ -236,10 +246,10 @@ export procedure sound_frame()
     return
 end
 
-# Plays effect `effect` (EFFECT_BLOW ...) from the start, each on a SID of
-# its own.
+# Plays effect `effect` (EFFECT_BLOW ...) from the start, on its SID
+# (EFFECT_SLOT), cutting off what that SID played.
 export procedure effect_play(effect: u8)
-    effect_slot = effect & (SLOTS - 1)
+    effect_slot = EFFECT_SLOT[effect]
     effect_base = effect_slot << 5
     sid[effect_base + VOLUME] = 0
     voice_at = effect_base
