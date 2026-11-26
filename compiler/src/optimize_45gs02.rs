@@ -1008,6 +1008,44 @@ fn carry_increments(insts: &mut Vec<Inst>, returns_carry: bool) -> bool {
     let mut i = 0;
     let mut changed = false;
     while i + 2 < insts.len() {
+        // A run of `lda m / adc #0 / sta m` (the upper bytes of an add,
+        // in place) is a ripple: `bcc + / inc m1 / bne + / inc m2 ...`,
+        // since INC leaves Z set exactly when the byte wraps to 0.
+        let chain: Vec<Operand> = (0..)
+            .map(|k| i + 3 * k)
+            .take_while(|&j| j + 2 < insts.len())
+            .map_while(|j| match (&insts[j], &insts[j + 1], &insts[j + 2]) {
+                (
+                    Inst::Op(Op::Lda, load),
+                    Inst::Op(Op::Adc, Operand::Immediate(zero)),
+                    Inst::Op(Op::Sta, store),
+                ) if zero == "$00"
+                    && load == store
+                    && matches!(load, Operand::Base(symbol) | Operand::Absolute(symbol) if is_compiler_symbol(symbol)) =>
+                {
+                    Some(load.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if chain.len() >= 2 && live[i + 3 * chain.len() - 1] & (A | NZ | C) == 0 {
+            let label = format!(
+                "@m65_carry_{}",
+                NEXT_CARRY_LABEL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            let mut ripple = vec![Inst::op(Op::Bcc, Operand::Label(label.clone()))];
+            for (k, byte) in chain.iter().enumerate() {
+                if k > 0 {
+                    ripple.push(Inst::op(Op::Bne, Operand::Label(label.clone())));
+                }
+                ripple.push(Inst::op(Op::Inc, byte.clone()));
+            }
+            ripple.push(Inst::Label(label));
+            insts.splice(i..i + 3 * chain.len(), ripple);
+            changed = true;
+            i += 1;
+            continue;
+        }
         let replacement = match (&insts[i], &insts[i + 1], &insts[i + 2]) {
             (
                 Inst::Op(Op::Lda, load),
@@ -1284,6 +1322,37 @@ mod tests {
 
     fn label(name: &str) -> Operand {
         Operand::Label(name.to_owned())
+    }
+
+    #[test]
+    fn carry_chains_in_place_ripple() {
+        let byte = |k: u32| {
+            if k == 0 {
+                Operand::Absolute("__static_f_at".to_owned())
+            } else {
+                Operand::Absolute(format!("__static_f_at+{k}"))
+            }
+        };
+        let mut insts = vec![
+            Inst::implied(Op::Clc),
+            op(Op::Lda, byte(0)),
+            op(Op::Adc, imm("$10")),
+            op(Op::Sta, byte(0)),
+        ];
+        for k in 1..4 {
+            insts.push(op(Op::Lda, byte(k)));
+            insts.push(op(Op::Adc, imm("$00")));
+            insts.push(op(Op::Sta, byte(k)));
+        }
+        // Then on to other work: A, N/Z and C are given new values.
+        insts.push(Inst::implied(Op::Clc));
+        insts.push(op(Op::Lda, imm("$01")));
+        insts.push(op(Op::Sta, Operand::Absolute("out".to_owned())));
+        insts.push(Inst::implied(Op::Rts));
+        let out = optimize_routine(insts, true);
+        let incs = out.iter().filter(|inst| matches!(inst, Inst::Op(Op::Inc, _))).count();
+        let adcs = out.iter().filter(|inst| matches!(inst, Inst::Op(Op::Adc, _))).count();
+        assert_eq!((incs, adcs), (3, 1), "{out:?}");
     }
 
     #[test]
