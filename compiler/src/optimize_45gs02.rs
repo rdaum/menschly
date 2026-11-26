@@ -111,7 +111,10 @@ pub fn optimize_routine_with(
         carry: returns_carry,
         bytes: result_bytes,
     };
-    if insts.iter().any(|inst| matches!(inst, Inst::Raw(_))) {
+    // Inline assembly is an opaque step (see `effect`), unless it names one
+    // of the routine's labels: then control may pass between it and the
+    // compiled code in ways the analysis cannot see.
+    if names_a_label(&insts) {
         return insts;
     }
     let mut insts = insts;
@@ -226,12 +229,52 @@ fn quad_locs(operand: &Operand) -> Locs {
     }
 }
 
+/// Whether any inline assembly mentions one of the routine's labels.
+fn names_a_label(insts: &[Inst]) -> bool {
+    let labels: Vec<&str> = insts
+        .iter()
+        .filter_map(|inst| match inst {
+            Inst::Label(label) => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    insts.iter().any(|inst| match inst {
+        Inst::Raw(text) => text
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '@'))
+            .any(|word| labels.contains(&word)),
+        _ => false,
+    })
+}
+
+/// The most bytes a piece of inline assembly can take: 5 an instruction
+/// (a 32-bit form with an absolute operand), none for labels, comments and
+/// directives.
+fn raw_size_bound(text: &str) -> u16 {
+    let instructions = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty() && !line.ends_with(':') && !line.starts_with(';') && !line.starts_with('.')
+        })
+        .count();
+    u16::try_from(instructions * 5).unwrap_or(u16::MAX)
+}
+
 fn effect(inst: &Inst) -> Effect {
     let none = Effect {
         uses: 0,
         defs: 0,
         removable: false,
     };
+    // Inline assembly may read and change anything (it leaves Z zero, but
+    // liveness need not know that).
+    if matches!(inst, Inst::Raw(_)) {
+        return Effect {
+            uses: ALL,
+            defs: ALL,
+            removable: false,
+        };
+    }
     let Inst::Op(op, operand) = inst else {
         return none;
     };
@@ -533,7 +576,7 @@ fn quad_runs(
                 z_established |= z_zero;
             }
             Inst::Op(Op::Inz | Op::Dez | Op::Plz | Op::Ldq | Op::Adcq, _) => z_zero = false,
-            Inst::Op(Op::Jsr, _) => z_zero = true,
+            Inst::Op(Op::Jsr, _) | Inst::Raw(_) => z_zero = true,
             _ => {}
         }
         out.push(insts[i].clone());
@@ -565,7 +608,8 @@ fn temporary_byte(symbol: &str, extra: u32) -> Option<String> {
 /// `None` for reads it cannot pin down (a call may read any of them).
 fn temporary_effect(inst: &Inst) -> (Option<Vec<String>>, Option<String>) {
     let Inst::Op(op, operand) = inst else {
-        return (Some(Vec::new()), None);
+        // Inline assembly may read any of them.
+        return (if matches!(inst, Inst::Raw(_)) { None } else { Some(Vec::new()) }, None);
     };
     if *op == Op::Jsr {
         return (None, None);
@@ -931,7 +975,16 @@ fn eliminate_redundant(
                 }
                 continue;
             }
-            Inst::Raw(_) => unreachable!("routines with raw assembly are not optimized"),
+            // Inline assembly: afterwards nothing is known but Z = 0.
+            Inst::Raw(_) => {
+                let next_value = known.next_value;
+                known = Known::entry();
+                known.next_value = next_value;
+                for reg in [REG_A, REG_X, REG_Y] {
+                    known.forget(reg);
+                }
+                continue;
+            }
             Inst::Op(op, operand) => (*op, operand),
         };
         let flags_dead = live[i] & NZ == 0;
@@ -1516,7 +1569,8 @@ fn relax_branches(insts: &mut [Inst]) {
                         2
                     }
                 }
-                _ => i64::from(inst.size().expect("raw assembly is never relaxed")),
+                Inst::Raw(text) => i64::from(raw_size_bound(text)),
+                _ => i64::from(inst.size().expect("only raw assembly has no size")),
             };
         }
         let labels = label_positions(insts);
@@ -1565,6 +1619,44 @@ mod tests {
 
     fn label(name: &str) -> Operand {
         Operand::Label(name.to_owned())
+    }
+
+    #[test]
+    fn inline_assembly_is_an_opaque_step() {
+        let scratch = base("__dp_scratch_0");
+        let insts = vec![
+            // Optimised around the block: the reload of A goes.
+            op(Op::Lda, imm("$05")),
+            op(Op::Sta, scratch.clone()),
+            op(Op::Lda, scratch.clone()),
+            // Kept: the block may read the scratch byte.
+            op(Op::Sta, Operand::Absolute("out".to_owned())),
+            Inst::Raw("\t.scope\n\tlda __dp_scratch_0\n\t.endscope".to_owned()),
+            // After it nothing is known: this load stays.
+            op(Op::Lda, scratch.clone()),
+            op(Op::Sta, Operand::Absolute("out".to_owned())),
+            Inst::implied(Op::Rts),
+        ];
+        let out = optimize_routine(insts, true);
+        assert_eq!(
+            out.iter().filter(|inst| **inst == op(Op::Lda, scratch.clone())).count(),
+            1,
+            "{out:?}"
+        );
+        assert!(out.contains(&op(Op::Sta, scratch)), "{out:?}");
+    }
+
+    #[test]
+    fn inline_assembly_naming_a_label_leaves_the_routine_alone() {
+        let insts = vec![
+            op(Op::Lda, imm("$05")),
+            op(Op::Lda, imm("$05")),
+            Inst::Label("back".to_owned()),
+            Inst::Raw("\tjmp back".to_owned()),
+            Inst::implied(Op::Rts),
+        ];
+        let out = optimize_routine(insts.clone(), true);
+        assert_eq!(out, insts);
     }
 
     #[test]
