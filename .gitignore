@@ -6,3 +6,5 @@ loader/asm/*.lbl
 loader/asm/*.lst
 loader/asm/*.map
 loader/asm/*.o
+*.mp3
+*.mid

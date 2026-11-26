@@ -48,7 +48,7 @@ cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- 
   "$root/lib/actors.mensch" \
   "$assets/bubble-demo-data.mensch"
 # The sprite images go in the ROM image's upper 64 KiB.
-python3 "$here/tools/inject_bank.py" "$rom" "$assets/demo-images.bin"
+python3 "$root/tools/inject_bank.py" "$rom" "$assets/demo-images.bin"
 
 echo "rom: $rom"
 

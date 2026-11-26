@@ -40,6 +40,9 @@ const DMA_F018B = $0b
 const DMA_SOURCE_MB = $80
 const DMA_DEST_MB = $81
 const DMA_DEST_SKIP = $85
+const DMA_TRANSPARENT_VALUE = $86
+const DMA_TRANSPARENCY_ON = $07
+const DMA_NO_OPTION = $00
 
 const JOY_BITS = $1f
 
@@ -116,7 +119,32 @@ type DmaJob = record(
     modulo: u16
 )
 
+# A blit: a copy whose destination steps by `skip`, leaving the bytes
+# under the source's transparent value (0) alone.
+type DmaBlit = record(
+    format: u8,
+    source_mb_option: u8,
+    source_mb: u8,
+    dest_mb_option: u8,
+    dest_mb: u8,
+    skip_option: u8,
+    skip: u8,
+    transparent_option: u8,
+    transparent: u8,
+    transparency: u8,
+    end_of_options: u8,
+    command: u8,
+    count: u16,
+    source: u16,
+    source_bank: u8,
+    dest: u16,
+    dest_bank: u8,
+    sub_command: u8,
+    modulo: u16
+)
+
 var job: DmaJob
+var blit: DmaBlit
 var screen_base: u32
 var row_bytes: u16
 var sprite_table: u32
@@ -305,6 +333,37 @@ end
 # Sets every `step`-th byte from `dest`, `count` times.
 export procedure dma_fill_step(dest: u32, value: u8, count: u16, step: u8)
     dma_run(DMA_FILL, u32(value), dest, count, step)
+    return
+end
+
+# Copies `count` bytes from `source` to every `step`-th byte from `dest`,
+# skipping the source's zero bytes (they leave the destination as it was).
+# The whole of a column of a full-colour screen whose characters run down
+# the columns is 8 bytes apart, so one call draws a column of a sprite.
+export procedure dma_blit(source: u32, dest: u32, count: u16, step: u8)
+    blit.format = DMA_F018B
+    blit.source_mb_option = DMA_SOURCE_MB
+    blit.source_mb = u8(source >> 20)
+    blit.dest_mb_option = DMA_DEST_MB
+    blit.dest_mb = u8(dest >> 20)
+    blit.skip_option = DMA_DEST_SKIP
+    blit.skip = step
+    blit.transparent_option = DMA_TRANSPARENT_VALUE
+    blit.transparent = 0
+    blit.transparency = DMA_TRANSPARENCY_ON
+    blit.end_of_options = DMA_NO_OPTION
+    blit.command = DMA_COPY
+    blit.count = count
+    blit.source = u16(source)
+    blit.source_bank = u8(source >> 16) & $0f
+    blit.dest = u16(dest)
+    blit.dest_bank = u8(dest >> 16) & $0f
+    blit.sub_command = 0
+    blit.modulo = 0
+    dma_list_bank = 0
+    dma_list_mb = 0
+    dma_list_high = u8(addr(blit) >> 8)
+    dma_start_enhanced = u8(addr(blit))
     return
 end
 

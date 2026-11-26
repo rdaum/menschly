@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 GAME = HERE.parent
 ROOT = GAME.parent.parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT / "tools"))
 
 import inject_bank  # noqa: E402
 import sound_stream  # noqa: E402

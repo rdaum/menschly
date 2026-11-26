@@ -30,7 +30,9 @@ Writes `target/bubble-bobble/bubble-demo-data.mensch`, module
 from pathlib import Path
 
 from convert import MIRRORED, mirror_image, pack_set
-from inject_bank import BANK as IMAGES_AT
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools"))
+from inject_bank import BANK as IMAGES_AT  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
 D = ROOT / "target/bubble-bobble"

@@ -19,7 +19,7 @@ python3 "$here/tools/sound_stream.py" "$cmd" "$out/$cmd.opl"
 cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- \
   --no-run --rom "$rom" --work-dir "$out/build-player" \
   "$here/src/sound-player.mensch" "$root/lib/sound.mensch" "$root/lib/vic4.mensch" >/dev/null
-python3 "$here/tools/inject_bank.py" "$rom" "$out/$cmd.opl"
+python3 "$root/tools/inject_bank.py" "$rom" "$out/$cmd.opl"
 xemu="${MENSCH_XMEGA65:-$HOME/src/xemu/build/bin/xmega65.native}"
 # Xemu wants an SD card; a virtual one in a directory will do.
 sd="$out/sd"

@@ -69,7 +69,7 @@ cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- 
   "$replay"
 
 # The sprite images and the sound go in the ROM image's upper 64 KiB.
-python3 "$here/tools/inject_bank.py" "$rom" "$assets/game-bank.bin"
+python3 "$root/tools/inject_bank.py" "$rom" "$assets/game-bank.bin"
 echo "rom: $rom"
 
 if [[ -n "$keep_rom" ]]; then cp "$rom" "$keep_rom"; echo "kept: $keep_rom"; fi

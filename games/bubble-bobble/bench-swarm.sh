@@ -26,7 +26,7 @@ cargo run --quiet --manifest-path "$root/Cargo.toml" --bin mensch-run-mega65 -- 
   "$root/lib/actors.mensch" \
   "$assets/bubble-demo-data.mensch" \
   "$work/swarm-size.mensch" >/dev/null
-python3 "$here/tools/inject_bank.py" "$rom" "$assets/demo-images.bin"
+python3 "$root/tools/inject_bank.py" "$rom" "$assets/demo-images.bin"
 
 xemu="${MENSCH_XMEGA65:-$HOME/src/xemu/build/bin/xmega65.native}"
 mkdir -p "$work/sd"

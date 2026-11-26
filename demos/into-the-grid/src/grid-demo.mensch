@@ -1,0 +1,363 @@
+module GridDemo
+
+# Into the Grid: a MEGA65 demo. This is its first scene, "through the
+# pane": a chrome runner crosses a perspective floor and runs through a
+# slab of frosted glass; inside the glass he is seen tinted, and past it he
+# comes apart into a halftone of dots that stream away.
+#
+# The screen is Chunky's 320x200 full-colour framebuffer, double buffered.
+# Each frame, all by DMA but the dots:
+# - the buffer is cleared and the floor (drawn once, into bank 1) copied in;
+#   the floor moves only by its palette (FLOOR's 16 depth bands cycle);
+# - the glass: each of its columns a run of a sheen strip, sliding;
+# - the runner, column by column: before the glass from his frames in the
+#   ROM bank, inside it from a tinted copy (made at start, in attic RAM),
+#   and past it as dots, each pushed further the further it is past.
+
+import Vic4
+import Chunky
+import GridData
+
+const HORIZON = 120
+const FLOOR_ROWS = 80
+const FLOOR_IMAGE: u32 = $11000
+const FLOOR_COLUMN_BYTES: u16 = 640
+# Depth on the floor at row r below the horizon is DEPTH / r; rows deeper
+# than FAR are fog (black).
+const DEPTH = 1024
+const FAR = 128
+
+# The runner's frames seen through the glass (each byte + GLASS).
+const TINTED: u32 = $8000000
+const RUNNER_Y = 70
+const RUNNER_SPAN = 448
+
+# The glass is a slab standing on the floor, turned away to the right
+# (GridData's PANE_* tables give, per column, the rows its front face and
+# its near end cover). The runner's path goes through its plane at column
+# PANE_CROSS: left of there the glass is in front of him, right of there he
+# has gone through.
+const PANE_EDGE = 127
+const SIDE_EDGE = 111
+
+# Frame timing, for checking: the raster line drawing ended on, the worst
+# seen, and frames drawn.
+fixed($0f00) volatile var ended_line: u16
+fixed($0f02) volatile var worst_line: u16
+fixed($0f04) volatile var frames_drawn: u16
+
+var t: u16
+var runner_x: i16
+var frame_at: u32
+var column: i16
+var sx: i16
+var ry: i16
+var y_end: i16
+var first: i16
+var count: i16
+var source: far ^u8
+var pixel: u8
+var past: i16
+var level: i16
+var dx: i16
+var dy: i16
+var px: i16
+var py: i16
+var dot: far ^u8
+var fx: u16
+var fy: u16
+var fz: i16
+var wide: i16
+var tint_at: u32
+var phase: u8
+var band: u8
+
+# The rows column x of the glass covers in front of the runner (from
+# glass_top to glass_bottom; none when glass_bottom is 0).
+var glass_top: i16
+var glass_bottom: i16
+var pane_i: u8
+
+procedure glass_rows(x: i16)
+    glass_top = 0
+    glass_bottom = 0
+    if x < PANE_FIRST or x >= PANE_FIRST + PANE_COLUMNS
+        return
+    end
+    pane_i = u8(x - PANE_FIRST)
+    glass_top = i16(FRONT_TOP[pane_i])
+    glass_bottom = i16(FRONT_BOTTOM[pane_i])
+    if SIDE_BOTTOM[pane_i]
+        if glass_bottom == 0 or i16(SIDE_TOP[pane_i]) < glass_top
+            glass_top = i16(SIDE_TOP[pane_i])
+        end
+        if i16(SIDE_BOTTOM[pane_i]) > glass_bottom
+            glass_bottom = i16(SIDE_BOTTOM[pane_i])
+        end
+    end
+    return
+end
+
+procedure plot(x: i16, row: i16, colour: u8)
+    if x < 0 or x >= WIDTH or row < 0 or row >= HEIGHT
+        return
+    end
+    dot = chunky_at(u16(x), u16(row))
+    dot^ = colour
+    return
+end
+
+# ---------------------------------------------------------------- setup
+
+# The floor, once: depth bands (whose colours cycle) crossed by lines
+# running away from the viewer, into FLOOR_IMAGE laid out as the floor's
+# part of each screen column (rows HORIZON on, 8 bytes a row).
+procedure build_floor()
+    var cell: far ^u8
+    dma_fill(FLOOR_IMAGE, 0, FLOOR_COLUMN_BYTES * COLUMNS)
+    fy = 1
+    while fy != FLOOR_ROWS
+        fz = DEPTH / i16(fy)
+        if fz <= FAR
+            band = FLOOR + (u8(fz >> 1) & 15)
+            fx = 0
+            while fx != WIDTH
+                wide = ((i16(fx) - 160) * fz) >> 5
+                cell = FLOOR_IMAGE + u32((fx >> 3) * FLOOR_COLUMN_BYTES) + u32(fy << 3) + u32(fx & 7)
+                # A pixel spans fz / 32 of the floor across: lines about
+                # 1.5 pixels wide at any depth.
+                if (wide & 63) < (fz >> 5) + 1
+                    cell^ = FLOOR_LINES + u8(fz >> 4)
+                else
+                    cell^ = band
+                end
+                fx = fx + 1
+            end
+        end
+        fy = fy + 1
+    end
+    # The horizon: a thin glow.
+    fx = 0
+    while fx != WIDTH
+        cell = FLOOR_IMAGE + u32((fx >> 3) * FLOOR_COLUMN_BYTES) + u32(fx & 7)
+        cell^ = FLOOR_LINES + 2
+        fx = fx + 1
+    end
+    return
+end
+
+# The runner's frames as seen through the glass, in attic RAM.
+procedure build_tinted()
+    var cell: far ^u8
+    dma_copy(RUNNER_AT, TINTED, RUNNER_FRAME_BYTES * RUNNER_FRAMES)
+    tint_at = TINTED
+    while tint_at != TINTED + u32(RUNNER_FRAME_BYTES * RUNNER_FRAMES)
+        cell = tint_at
+        if cell^
+            cell^ = cell^ + GLASS
+        end
+        tint_at = tint_at + 1
+    end
+    return
+end
+
+# ---------------------------------------------------------------- a frame
+
+procedure draw_floor()
+    var c: u8
+    c = 0
+    while c != COLUMNS
+        dma_copy(FLOOR_IMAGE + u32(u16(c) * FLOOR_COLUMN_BYTES),
+                 drawing + u32(u16(c) * COLUMN_BYTES) + u32(HORIZON << 3), FLOOR_COLUMN_BYTES)
+        c = c + 1
+    end
+    return
+end
+
+# The floor's motion: one band of the 16 lit (and its neighbour dimly),
+# the lit one moving towards the viewer.
+procedure cycle_floor()
+    var i: u8
+    phase = u8(t >> 1) & 15
+    i = 0
+    while i != 16
+        band = (i + phase) & 15
+        if band == 0
+            vic4_palette_set(FLOOR + i, 210, 100, 255)
+        elsif band == 1
+            vic4_palette_set(FLOOR + i, 90, 36, 150)
+        else
+            vic4_palette_set(FLOOR + i, 14, 4, 30)
+        end
+        i = i + 1
+    end
+    return
+end
+
+# The glass: its front face from the sheen strip, the bands receding with
+# the face's depth and sliding up; its near end from the end strip; bright
+# lines along its edges.
+procedure draw_pane()
+    pane_i = 0
+    while pane_i != PANE_COLUMNS
+        column = PANE_FIRST + i16(pane_i)
+        if FRONT_BOTTOM[pane_i]
+            first = i16(FRONT_TOP[pane_i])
+            count = i16(FRONT_BOTTOM[pane_i]) - first
+            chunky_column(u32(addr(SHEEN_STRIP)) + u32((u16(FRONT_U[pane_i]) + (t << 1)) & 255),
+                          u16(column), u16(first), u16(count))
+            plot(column, first, PANE_EDGE)
+            plot(column, first + count - 1, PANE_EDGE)
+        end
+        if SIDE_BOTTOM[pane_i]
+            first = i16(SIDE_TOP[pane_i])
+            count = i16(SIDE_BOTTOM[pane_i]) - first
+            chunky_column(u32(addr(SIDE_STRIP)) + u32(t & 127), u16(column), u16(first), u16(count))
+            plot(column, first, SIDE_EDGE)
+            plot(column, first + count - 1, SIDE_EDGE)
+        end
+        pane_i = pane_i + 1
+    end
+    # The upright edges: where the front face starts and ends.
+    pane_i = 0
+    while pane_i != PANE_COLUMNS
+        if FRONT_BOTTOM[pane_i]
+            if pane_i == 0 or FRONT_BOTTOM[pane_i - 1] == 0 or pane_i == PANE_COLUMNS - 1
+                column = PANE_FIRST + i16(pane_i)
+                ry = i16(FRONT_TOP[pane_i])
+                while ry != i16(FRONT_BOTTOM[pane_i])
+                    plot(column, ry, PANE_EDGE)
+                    ry = ry + 1
+                end
+            end
+        end
+        pane_i = pane_i + 1
+    end
+    return
+end
+
+# Column `column` of the runner at screen x `sx`, short of the glass's
+# plane: solid, but tinted where the glass is in front of him.
+procedure draw_runner_column()
+    glass_rows(sx)
+    y_end = RUNNER_Y + RUNNER_HEIGHT
+    first = RUNNER_Y
+    # Above the glass (or all of him, where there is none).
+    count = glass_top - first
+    if glass_bottom == 0 or count > RUNNER_HEIGHT
+        count = RUNNER_HEIGHT
+    end
+    if count > 0
+        chunky_column(frame_at + u32(u16(column) * RUNNER_HEIGHT), u16(sx), u16(first), u16(count))
+        first = first + count
+    end
+    if glass_bottom == 0 or first >= y_end
+        return
+    end
+    # Behind the glass.
+    count = glass_bottom
+    if count > y_end
+        count = y_end
+    end
+    count = count - first
+    if count > 0
+        chunky_column(TINTED + (frame_at - RUNNER_AT) + u32(u16(column) * RUNNER_HEIGHT + u16(first - RUNNER_Y)),
+                      u16(sx), u16(first), u16(count))
+        first = first + count
+    end
+    # Below it.
+    if first < y_end
+        chunky_column(frame_at + u32(u16(column) * RUNNER_HEIGHT + u16(first - RUNNER_Y)),
+                      u16(sx), u16(first), u16(y_end - first))
+    end
+    return
+end
+
+# Past the glass's plane: every other pixel of every other row as a dot,
+# pushed right (more the further past), waving, fading and thinning out.
+procedure draw_runner_dots()
+    past = sx - PANE_CROSS
+    ry = RUNNER_Y
+    y_end = RUNNER_Y + RUNNER_HEIGHT
+    while ry < y_end
+        source = frame_at + u32(u16(column) * RUNNER_HEIGHT + u16(ry - RUNNER_Y))
+        pixel = source^
+        if pixel
+            if pixel < 33
+                level = i16((pixel - 1) >> 1)
+            elsif pixel < 49
+                level = i16((pixel - 33) >> 1) + 2
+            else
+                level = 15
+            end
+            level = level - (past >> 3)
+            if level > 0 and i16((u16(sx) * 7 + u16(ry) * 13 + t) & 31) >= (past >> 2)
+                dx = ((past * past) >> 5) + ((i16(SINE[u8(u16(ry) * 3 + (t << 2))]) * past) >> 8)
+                dy = (i16(SINE[u8(u16(sx) * 2 + t * 3)]) * past) >> 9
+                px = sx + dx
+                py = ry + dy
+                plot(px, py, DOTS + u8(level))
+                if level > 1
+                    plot(px - 1, py, DOTS + u8(level >> 1))
+                end
+            end
+        end
+        ry = ry + 2
+    end
+    return
+end
+
+procedure draw_runner()
+    frame_at = RUNNER_AT + u32(((t >> 2) & (RUNNER_FRAMES - 1)) * RUNNER_FRAME_BYTES)
+    runner_x = i16(t % RUNNER_SPAN) - RUNNER_WIDTH
+    column = 0
+    while column != RUNNER_WIDTH
+        sx = runner_x + column
+        if sx >= 0 and sx < WIDTH
+            if sx < PANE_CROSS
+                draw_runner_column()
+            elsif (sx & 1) == 0
+                draw_runner_dots()
+            end
+        end
+        column = column + 1
+    end
+    return
+end
+
+procedure measure()
+    var line: u16
+    line = vic4_raster()
+    # Lines since the flip at line 251 (a PAL frame is 312 lines).
+    if line < 251
+        line = line + 312
+    end
+    ended_line = line - 251
+    if ended_line > worst_line
+        worst_line = ended_line
+    end
+    frames_drawn = frames_drawn + 1
+    return
+end
+
+export function main(): u8
+    vic4_init()
+    vic4_palette_load(0, 256, addr(DEMO_PALETTE))
+    chunky_init()
+    build_floor()
+    build_tinted()
+    worst_line = 0
+    frames_drawn = 0
+    t = START_FRAME
+    while 1
+        chunky_clear(0)
+        draw_floor()
+        draw_pane()
+        draw_runner()
+        measure()
+        chunky_flip()
+        cycle_floor()
+        t = t + 1
+    end
+    return 0
+end

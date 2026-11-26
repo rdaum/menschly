@@ -1,0 +1,107 @@
+module Chunky
+
+# A 320x200 chunky screen on the VIC-IV: full-colour characters (a byte per
+# pixel, a palette index) numbered down the columns, so the screen's bytes
+# run like a framebuffer turned on its side. Pixel (x, y) of a buffer is at
+#
+#     buffer + (x >> 3) * 1600 + y * 8 + (x & 7)
+#
+# and a column of pixels steps by 8 bytes: dma_blit draws a column of a
+# sprite in one go, dma_fill clears a buffer in one.
+#
+# Two buffers, each with its own screen map pointing at its characters: one
+# is shown while the other is drawn, and chunky_flip swaps them between
+# frames.
+
+import Vic4
+
+export const WIDTH = 320
+export const HEIGHT = 200
+export const COLUMNS = 40
+export const ROWS = 25
+export const COLUMN_BYTES: u16 = 1600
+export const BUFFER_BYTES: u16 = 64000
+
+const BUFFER_A: u32 = $40000
+const BUFFER_B: u32 = $50000
+const MAP_A: u32 = $10000
+const MAP_B: u32 = $10800
+# The raster line the swap waits for: past the screen's last line.
+const FLIP_LINE = 251
+
+# The buffer being drawn, and which one it is (0 A, 1 B).
+export var drawing: u32
+var shown_b: u8
+var fill_column: u8
+var fill_row: u8
+var map_at: u32
+var character: u16
+
+# Fills `map` with the characters of `buffer`, down the columns.
+procedure fill_map(map: u32, buffer: u32)
+    var cell: far ^u8
+    character = vic4_tile_at(buffer)
+    fill_column = 0
+    while fill_column != COLUMNS
+        map_at = map + u32(fill_column << 1)
+        fill_row = 0
+        while fill_row != ROWS
+            cell = map_at
+            cell^ = u8(character)
+            cell = map_at + 1
+            cell^ = u8(character >> 8)
+            map_at = map_at + u32(COLUMNS * 2)
+            character = character + 1
+            fill_row = fill_row + 1
+        end
+        fill_column = fill_column + 1
+    end
+    return
+end
+
+# Sets up both buffers (cleared to colour 0) and shows A, drawing into B.
+export procedure chunky_init()
+    fill_map(MAP_A, BUFFER_A)
+    fill_map(MAP_B, BUFFER_B)
+    vic4_fill_colour(0, 0, 0, COLUMNS * ROWS)
+    dma_fill(BUFFER_A, 0, BUFFER_BYTES)
+    dma_fill(BUFFER_B, 0, BUFFER_BYTES)
+    vic4_text16(MAP_A, COLUMNS, 0)
+    shown_b = 0
+    drawing = BUFFER_B
+    return
+end
+
+# Waits for the frame to end, shows the buffer just drawn and makes the
+# other the one to draw.
+export procedure chunky_flip()
+    vic4_wait_line(FLIP_LINE)
+    if shown_b
+        vic4_text16(MAP_A, COLUMNS, 0)
+        drawing = BUFFER_B
+        shown_b = 0
+    else
+        vic4_text16(MAP_B, COLUMNS, 0)
+        drawing = BUFFER_A
+        shown_b = 1
+    end
+    return
+end
+
+# Fills the buffer being drawn with `colour`.
+export procedure chunky_clear(colour: u8)
+    dma_fill(drawing, colour, BUFFER_BYTES)
+    return
+end
+
+# The address of pixel (x, y) in the buffer being drawn.
+export function chunky_at(x: u16, y: u16): u32
+    return drawing + u32((x >> 3) * COLUMN_BYTES) + u32(y << 3) + u32(x & 7)
+end
+
+# Draws `count` pixels of a column from `source` (0 is transparent) at
+# (x, y) down; the caller keeps it on the screen.
+export procedure chunky_column(source: u32, x: u16, y: u16, count: u16)
+    dma_blit(source, chunky_at(x, y), count, 8)
+    return
+end
