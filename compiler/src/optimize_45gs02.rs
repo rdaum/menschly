@@ -87,6 +87,7 @@ pub fn optimize_routine_with(
         let before = insts.len();
         let mut changed = clean_jumps(&mut insts);
         changed |= eliminate_dead_code(&mut insts, returns_carry);
+        changed |= eliminate_dead_temporaries(&mut insts);
         changed |= eliminate_redundant(&mut insts, z_zero_on_entry, flag_routines, returns_carry);
         changed |= carry_increments(&mut insts, returns_carry);
         if !changed && insts.len() == before {
@@ -346,6 +347,121 @@ fn live_after(insts: &[Inst], returns_carry: bool) -> Vec<Locs> {
     }
 }
 
+// ---- dead stores to temporaries -----------------------------------------
+
+/// Whether `symbol` (with any offset) is one of the compiler's temporaries:
+/// the scratch slots and expression temporaries, whose values matter only
+/// within the routine that writes them (unlike locals and parameters).
+fn is_temporary(symbol: &str) -> bool {
+    let (name, _) = split_offset(symbol);
+    name.starts_with("__dp_") && (name.contains("_scratch") || name.contains("_temp_"))
+}
+
+/// The key of one byte of a temporary: "name+offset".
+fn temporary_byte(symbol: &str, extra: u32) -> Option<String> {
+    let (name, offset) = split_offset(symbol);
+    if !is_temporary(symbol) {
+        return None;
+    }
+    Some(format!("{name}+{}", offset? + extra))
+}
+
+/// The temporary bytes an instruction reads, and the one it overwrites;
+/// `None` for reads it cannot pin down (a call may read any of them).
+fn temporary_effect(inst: &Inst) -> (Option<Vec<String>>, Option<String>) {
+    let Inst::Op(op, operand) = inst else {
+        return (Some(Vec::new()), None);
+    };
+    if *op == Op::Jsr {
+        return (None, None);
+    }
+    let stores = matches!(op, Op::Sta | Op::Stx | Op::Sty | Op::Stz);
+    match operand {
+        Operand::Base(symbol) | Operand::Absolute(symbol) => {
+            if stores {
+                (Some(Vec::new()), temporary_byte(symbol, 0))
+            } else {
+                let bytes = if matches!(op, Op::Inw | Op::Dew) { 2 } else { 1 };
+                (Some((0..bytes).filter_map(|i| temporary_byte(symbol, i)).collect()), None)
+            }
+        }
+        Operand::IndirectY(pointer) | Operand::IndirectZ(pointer) => {
+            (Some((0..2).filter_map(|i| temporary_byte(pointer, i)).collect()), None)
+        }
+        Operand::FlatZ(pointer) => {
+            (Some((0..4).filter_map(|i| temporary_byte(pointer, i)).collect()), None)
+        }
+        Operand::AbsoluteX(symbol) if is_temporary(symbol) => (None, None),
+        _ => (Some(Vec::new()), None),
+    }
+}
+
+/// Deletes stores to temporaries that nothing reads before the byte is
+/// written again or the routine returns.
+fn eliminate_dead_temporaries(insts: &mut Vec<Inst>) -> bool {
+    let effects: Vec<_> = insts.iter().map(temporary_effect).collect();
+    if !effects.iter().any(|(_, def)| def.is_some()) {
+        return false;
+    }
+    let every: HashSet<String> = effects
+        .iter()
+        .flat_map(|(uses, def)| uses.iter().flatten().chain(def.iter()).cloned())
+        .collect();
+    let labels = label_positions(insts);
+    let n = insts.len();
+    // Falling off the end leaves everything live.
+    let mut live_in: Vec<HashSet<String>> = vec![HashSet::new(); n + 1];
+    live_in[n] = every.clone();
+    let mut live_out: Vec<HashSet<String>> = vec![HashSet::new(); n];
+    loop {
+        let mut changed = false;
+        for i in (0..n).rev() {
+            let (falls_through, returns) = match &insts[i] {
+                Inst::Op(op, _) => (
+                    !op.ends_flow(),
+                    matches!(op, Op::Rts | Op::Rtn | Op::Rti),
+                ),
+                _ => (true, false),
+            };
+            let mut out = if falls_through && !returns {
+                live_in[i + 1].clone()
+            } else {
+                HashSet::new()
+            };
+            if let Some(target) = branch_target(&insts[i]) {
+                match labels.get(target) {
+                    Some(&at) => out.extend(live_in[at].iter().cloned()),
+                    None => out.extend(every.iter().cloned()),
+                }
+            }
+            let (uses, def) = &effects[i];
+            let mut input = out.clone();
+            if let Some(def) = def {
+                input.remove(def);
+            }
+            match uses {
+                Some(uses) => input.extend(uses.iter().cloned()),
+                None => input.extend(every.iter().cloned()),
+            }
+            if out != live_out[i] || input != live_in[i] {
+                live_out[i] = out;
+                live_in[i] = input;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut i = 0;
+    let before = insts.len();
+    insts.retain(|_| {
+        i += 1;
+        !matches!(&effects[i - 1].1, Some(def) if !live_out[i - 1].contains(def))
+    });
+    insts.len() != before
+}
+
 fn eliminate_dead_code(insts: &mut Vec<Inst>, returns_carry: bool) -> bool {
     let live = live_after(insts, returns_carry);
     let before = insts.len();
@@ -374,6 +490,12 @@ struct Known {
     /// Memory known to hold a copy of other memory: (copy, original), by
     /// key, from a store of a register that held the original.
     copies: Vec<(String, String)>,
+    /// The carry flag, when known (after CLC, SEC, or a folded add).
+    carry: Option<bool>,
+    /// Memory known to hold a constant, by key: (key, immediate), from a
+    /// store of a register that held the immediate. Kept after the
+    /// register moves on, until the memory is written again.
+    values: Vec<(String, String)>,
 }
 
 const REG_A: usize = 0;
@@ -416,19 +538,47 @@ impl Known {
         self.regs[reg] = vec![format!("v:{}", self.next_value)];
     }
 
+    /// The byte register `reg` is known to hold.
+    fn byte_in(&self, reg: usize) -> Option<u8> {
+        self.regs[reg]
+            .iter()
+            .find_map(|key| key.strip_prefix('#').and_then(parse_byte))
+    }
+
+    /// The byte an operand is known to read: an immediate, or memory known
+    /// to hold a constant.
+    fn byte_of(&self, operand: &Operand) -> Option<u8> {
+        match operand {
+            Operand::Immediate(text) => parse_byte(text),
+            _ => self
+                .key(operand)
+                .and_then(|key| self.constant(&key))
+                .and_then(|text| parse_byte(&text)),
+        }
+    }
+
     /// The register holding the value at `key`, other than `except`.
     fn holder(&self, key: &str, except: usize) -> Option<usize> {
         (0..4).find(|&reg| reg != except && self.holds(reg, key))
     }
 
-    /// The immediate a key is known to equal (a register holds both).
+    /// The immediate a key is known to equal (a register holds both, or
+    /// the memory was last given a known byte).
     fn constant(&self, key: &str) -> Option<String> {
-        self.regs.iter().find_map(|keys| {
-            keys.iter().any(|held| held == key).then(|| {
-                keys.iter()
-                    .find_map(|held| held.strip_prefix('#').map(str::to_owned))
-            })?
-        })
+        self.regs
+            .iter()
+            .find_map(|keys| {
+                keys.iter().any(|held| held == key).then(|| {
+                    keys.iter()
+                        .find_map(|held| held.strip_prefix('#').map(str::to_owned))
+                })?
+            })
+            .or_else(|| {
+                self.values
+                    .iter()
+                    .find(|(held, _)| held == key)
+                    .map(|(_, value)| value.clone())
+            })
     }
 
     /// Whether two registers are known to hold the same value.
@@ -442,6 +592,7 @@ impl Known {
         }
         self.copies
             .retain(|(copy, original)| keep(copy) && keep(original));
+        self.values.retain(|(held, _)| keep(held));
     }
 
     /// Whether memory `key` holds a copy of a value register `reg` holds.
@@ -642,6 +793,9 @@ fn eliminate_redundant(
                     continue;
                 }
                 known.clobber(operand, 1);
+                if let (Some(key), Some(byte)) = (key.as_ref(), known.byte_in(reg)) {
+                    known.values.push((key.clone(), format!("${byte:02x}")));
+                }
                 if let Some(key) = key {
                     let originals: Vec<String> = known.regs[reg]
                         .iter()
@@ -688,8 +842,84 @@ fn eliminate_redundant(
             {
                 delete[i] = true;
             }
-            Op::Adc | Op::Sbc | Op::And | Op::Ora | Op::Eor | Op::Pla => {
+            // Logic on known bytes is a load of the answer; with A an
+            // identity for the operation, a load of the operand (the same
+            // read of the same memory).
+            Op::And | Op::Ora | Op::Eor => {
+                let a = known.byte_in(REG_A);
+                if let (Some(a), Some(b)) = (a, known.byte_of(operand)) {
+                    let result = match op {
+                        Op::And => a & b,
+                        Op::Ora => a | b,
+                        _ => a ^ b,
+                    };
+                    let text = format!("${result:02x}");
+                    rewrite.push((i, Inst::op(Op::Lda, Operand::Immediate(text.clone()))));
+                    known.set(REG_A, Some(format!("#{text}")));
+                    known.nz_from_a = true;
+                    continue;
+                }
+                if matches!((op, a), (Op::Ora | Op::Eor, Some(0)) | (Op::And, Some(0xff))) {
+                    rewrite.push((i, Inst::op(Op::Lda, operand.clone())));
+                    let key = known.key(operand);
+                    known.set(REG_A, key);
+                    known.nz_from_a = true;
+                    continue;
+                }
+                if let Some(constant) = known
+                    .key(operand)
+                    .filter(|key| !key.starts_with('#'))
+                    .and_then(|key| known.constant(&key))
+                {
+                    rewrite.push((i, Inst::op(op, Operand::Immediate(constant))));
+                }
+                known.forget(REG_A);
+                known.nz_from_a = true;
+            }
+            // An add of known bytes and a known carry is a load of the sum
+            // (when the carry out is the carry in, or is not needed); with A
+            // 0 and no carry in, a load of the operand (nothing carries out);
+            // of 0 with no carry in, nothing.
+            Op::Adc
+                if known.carry.is_some() && {
+                    let (a, b, carry_in) = (
+                        known.byte_in(REG_A),
+                        known.byte_of(operand),
+                        known.carry == Some(true),
+                    );
+                    match (a, b) {
+                        (Some(a), Some(b)) => {
+                            let sum = u16::from(a) + u16::from(b) + u16::from(carry_in);
+                            (sum > 0xff) == carry_in || carry_dead
+                        }
+                        (Some(0), None) => !carry_in,
+                        (_, Some(0)) => !carry_in && (known.nz_from_a || flags_dead),
+                        _ => false,
+                    }
+                } =>
+            {
+                let (a, b) = (known.byte_in(REG_A), known.byte_of(operand));
+                let carry_in = known.carry == Some(true);
+                match (a, b) {
+                    (Some(a), Some(b)) => {
+                        let sum = u16::from(a) + u16::from(b) + u16::from(carry_in);
+                        let text = format!("${:02x}", sum as u8);
+                        rewrite.push((i, Inst::op(Op::Lda, Operand::Immediate(text.clone()))));
+                        known.set(REG_A, Some(format!("#{text}")));
+                        known.nz_from_a = true;
+                    }
+                    (Some(0), None) => {
+                        rewrite.push((i, Inst::op(Op::Lda, operand.clone())));
+                        let key = known.key(operand);
+                        known.set(REG_A, key);
+                        known.nz_from_a = true;
+                    }
+                    _ => delete[i] = true,
+                }
+            }
+            Op::Adc | Op::Sbc | Op::Pla => {
                 if op != Op::Pla {
+                    known.carry = None;
                     if let Some(constant) = known
                         .key(operand)
                         .filter(|key| !key.starts_with('#'))
@@ -702,6 +932,9 @@ fn eliminate_redundant(
                 known.nz_from_a = true;
             }
             Op::Inc | Op::Dec | Op::Asl | Op::Lsr | Op::Rol | Op::Ror | Op::Inw | Op::Dew => {
+                if matches!(op, Op::Asl | Op::Lsr | Op::Rol | Op::Ror) {
+                    known.carry = None;
+                }
                 if matches!(operand, Operand::Implied) {
                     known.forget(REG_A);
                     known.nz_from_a = true;
@@ -729,7 +962,10 @@ fn eliminate_redundant(
                 known.forget(REG_Z);
                 known.nz_from_a = false;
             }
-            Op::Cmp | Op::Cpx => known.nz_from_a = false,
+            Op::Cmp | Op::Cpx => {
+                known.nz_from_a = false;
+                known.carry = None;
+            }
             Op::Jsr => {
                 let next_value = known.next_value;
                 known = Known::entry();
@@ -740,7 +976,9 @@ fn eliminate_redundant(
                 known.nz_from_a =
                     matches!(operand, Operand::Label(name) if flag_routines.contains(name));
             }
-            Op::Clc | Op::Sec | Op::Pha | Op::Phx | Op::Phy | Op::Phz => {}
+            Op::Clc => known.carry = Some(false),
+            Op::Sec => known.carry = Some(true),
+            Op::Pha | Op::Phx | Op::Phy | Op::Phz => {}
             Op::Bne | Op::Beq | Op::Bcc | Op::Bcs | Op::Lbne | Op::Lbeq | Op::Lbcc | Op::Lbcs => {}
             Op::Bra | Op::Lbra | Op::Rts | Op::Rtn | Op::Rti => {
                 known = Known::default();
@@ -1046,6 +1284,84 @@ mod tests {
 
     fn label(name: &str) -> Operand {
         Operand::Label(name.to_owned())
+    }
+
+    #[test]
+    fn dead_stores_to_temporaries_go() {
+        let insts = vec![
+            // Overwritten before it is read.
+            op(Op::Lda, Operand::Absolute("user".to_owned())),
+            op(Op::Sta, base("__dp_scratch_0")),
+            op(Op::Lda, Operand::Absolute("other".to_owned())),
+            op(Op::Sta, base("__dp_scratch_0")),
+            op(Op::Ldx, base("__dp_scratch_0")),
+            op(Op::Stx, Operand::Absolute("out".to_owned())),
+            // Read by nothing before the return.
+            op(Op::Sta, base("__dp_f_temp_t")),
+            Inst::implied(Op::Rts),
+        ];
+        let out = optimize_routine(insts, true);
+        let stores = |symbol: &str| {
+            out.iter()
+                .filter(|inst| **inst == op(Op::Sta, base(symbol)))
+                .count()
+        };
+        assert_eq!(stores("__dp_scratch_0"), 0, "{out:?}");
+        assert_eq!(stores("__dp_f_temp_t"), 0, "{out:?}");
+    }
+
+    #[test]
+    fn stores_to_temporaries_before_a_call_stay() {
+        let insts = vec![
+            op(Op::Lda, Operand::Absolute("user".to_owned())),
+            op(Op::Sta, base("__dp_scratch_1")),
+            op(Op::Jsr, label("f")),
+            Inst::implied(Op::Rts),
+        ];
+        let out = optimize_routine(insts, true);
+        assert!(out.contains(&op(Op::Sta, base("__dp_scratch_1"))), "{out:?}");
+    }
+
+    #[test]
+    fn adds_of_known_bytes_fold() {
+        let insts = vec![
+            Inst::implied(Op::Clc),
+            op(Op::Lda, imm("$00")),
+            op(Op::Adc, imm("$00")),
+            op(Op::Sta, base("__dp_scratch_0")),
+            Inst::implied(Op::Rts),
+        ];
+        let out = optimize_routine(insts, true);
+        assert!(!out.iter().any(|inst| matches!(inst, Inst::Op(Op::Adc, _))), "{out:?}");
+    }
+
+    #[test]
+    fn logic_with_an_identity_loads_the_operand() {
+        let user = Operand::Absolute("user".to_owned());
+        let insts = vec![
+            op(Op::Lda, imm("$00")),
+            op(Op::Ora, user.clone()),
+            op(Op::Sta, Operand::Absolute("out".to_owned())),
+            Inst::implied(Op::Rts),
+        ];
+        let out = optimize_routine(insts, true);
+        assert!(out.contains(&op(Op::Lda, user)), "{out:?}");
+        assert!(!out.iter().any(|inst| matches!(inst, Inst::Op(Op::Ora, _))), "{out:?}");
+    }
+
+    #[test]
+    fn stored_constants_outlive_the_register() {
+        let insts = vec![
+            op(Op::Lda, imm("$05")),
+            op(Op::Sta, base("__dp_scratch_0")),
+            op(Op::Lda, Operand::Absolute("user".to_owned())),
+            op(Op::Sta, base("__dp_scratch_1")),
+            op(Op::Lda, base("__dp_scratch_0")),
+            op(Op::Sta, Operand::Absolute("out".to_owned())),
+            Inst::implied(Op::Rts),
+        ];
+        let out = optimize_routine(insts, true);
+        assert!(!out.contains(&op(Op::Lda, base("__dp_scratch_0"))), "{out:?}");
     }
 
     #[test]
