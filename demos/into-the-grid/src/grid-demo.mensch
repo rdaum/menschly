@@ -6,7 +6,9 @@ vector irq = tick
 #
 # - PaneScene: a chrome runner goes through a slab of glass and comes apart;
 # - RotoScene: a spinning, zooming tiled plane that breaks into a mosaic and
-#   explodes.
+#   explodes;
+# - ScrollScene: big letters in rolling colours riding a sine wave over
+#   copper-style bars.
 #
 # Each part draws a frame into Chunky's buffer being drawn (its own frame
 # count from 0), the buffers swap, and the part gets its vertical-blank
@@ -19,22 +21,30 @@ import Chunky
 import GridData
 import PaneScene
 import RotoScene
+import ScrollScene
 import GridMusic
 
 const PANE_FRAMES: u16 = 560
 const ROTO_FRAMES: u16 = ROTO_LENGTH
+const SCROLL_FRAMES: u16 = SCROLL_LENGTH
 const PANE = 0
 const ROTO = 1
+const SCROLL = 2
 
 # Frame timing, for checking: the raster line drawing ended on, the worst
 # seen, and frames drawn.
 fixed($0f00) volatile var ended_line: u16
 fixed($0f02) volatile var worst_line: u16
 fixed($0f04) volatile var frames_drawn: u16
-# And the frames the machine has shown since the start, counted by a
-# raster interrupt once a frame, to set the frames drawn against.
+# And the frames the machine has shown since the start, to set the frames
+# drawn against: the raster interrupt adds up the machine's own frame
+# counter, since an interrupt can be missed (a long DMA can carry the
+# raster past its line), and the music gets a tick for each frame.
 fixed($0f06) volatile var frames_shown: u16
+fixed($d7fa) volatile var frame_counter: u8
 const TICK_LINE = 0
+var last_frame: u8
+var elapsed: u8
 
 var part: u8
 var part_frame: u16
@@ -42,8 +52,13 @@ var demo_frame: u16
 
 # Once a frame.
 interrupt procedure tick()
-    frames_shown = frames_shown + 1
-    music_tick()
+    elapsed = frame_counter - last_frame
+    last_frame = last_frame + elapsed
+    while elapsed
+        frames_shown = frames_shown + 1
+        music_tick()
+        elapsed = elapsed - 1
+    end
     vic4_raster_irq(TICK_LINE)
     return
 end
@@ -66,13 +81,16 @@ end
 # Which part frame `demo_frame` of the demo falls in, and its frame there.
 procedure place()
     var at: u16
-    at = demo_frame % (PANE_FRAMES + ROTO_FRAMES)
+    at = demo_frame % (PANE_FRAMES + ROTO_FRAMES + SCROLL_FRAMES)
     if at < PANE_FRAMES
         part = PANE
         part_frame = at
-    else
+    elsif at < PANE_FRAMES + ROTO_FRAMES
         part = ROTO
         part_frame = at - PANE_FRAMES
+    else
+        part = SCROLL
+        part_frame = at - PANE_FRAMES - ROTO_FRAMES
     end
     return
 end
@@ -80,8 +98,10 @@ end
 procedure start_part()
     if part == PANE
         pane_start()
-    else
+    elsif part == ROTO
         roto_start()
+    else
+        scroll_start()
     end
     return
 end
@@ -93,6 +113,7 @@ export function main(): u8
     worst_line = 0
     frames_drawn = 0
     frames_shown = 0
+    last_frame = frame_counter
     music_start()
     vic4_raster_irq(TICK_LINE)
     asm "cli"
@@ -102,13 +123,17 @@ export function main(): u8
     while 1
         if part == PANE
             pane_frame(part_frame)
-        else
+        elsif part == ROTO
             roto_frame(part_frame)
+        else
+            scroll_frame(part_frame)
         end
         measure()
         chunky_flip()
         if part == PANE
             pane_vblank()
+        elsif part == SCROLL
+            scroll_vblank()
         end
         demo_frame = demo_frame + 1
         was = part

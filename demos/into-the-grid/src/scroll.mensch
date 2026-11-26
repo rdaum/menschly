@@ -1,0 +1,181 @@
+module ScrollScene
+
+# Into the Grid's scroller: big letters in a rolling colour gradient,
+# riding a sine wave across copper-style bars.
+#
+# At the start (scroll_start), in attic RAM:
+# - the font (GridData's 32-bit column masks) is expanded to a byte per
+#   pixel: a letter's pixels take the palette entry for their row
+#   (LETTERS + row), the pixels around a letter the outline's;
+# - the scroll text is laid out as one long strip of such columns, a DMA
+#   copy per character;
+# - one character column of the bars (8 pixels across, all alike) is made.
+#
+# Each frame (scroll_frame), all by DMA: the bars' column copied across
+# the screen, then each screen column of text blitted at its wave's height
+# (the strip's zero bytes leave the bars showing). The colours move by the
+# palette alone (scroll_vblank): the bars' 64 entries and the letters' 32
+# turn through their patterns.
+
+import Vic4
+import Chunky
+import GridData
+
+const FONT_RAM: u32 = $8020000
+const STRIP: u32 = $8100000
+const BAR_COLUMN: u32 = $8200000
+const GLYPH_ROWS = 32
+const ROW_SHIFT = 5
+
+# Palette entries: the bars (64, by row), the letters (32, by row), the
+# outline.
+const BARS = 64
+const LETTERS = 128
+const OUTLINE = 160
+
+# Pixels a frame the text moves; the wave's middle row and height.
+const SPEED: u16 = 3
+const WAVE_MIDDLE = 84
+const WAVE_HEIGHT = 44
+export const SCROLL_LENGTH: u16 = (TEXT_COLUMNS + WIDTH) / SPEED
+
+var t: u16
+var column: u16
+var mask: u32
+var before: u32
+var after: u32
+var edge: u32
+var row_bit: u32
+var line_i: u8
+var out: far ^u8
+var source: far ^u8
+var c: u16
+var at: u32
+var sx: u16
+var top: i16
+var phase: u8
+var k: u8
+
+# A font column's mask (0 outside the font).
+function font_mask(index: u16): u32
+    var word: far ^u32
+    if index >= FONT_COLUMNS
+        return 0
+    end
+    word = FONT_AT + u32(index << 2)
+    return word^
+end
+
+procedure expand_font()
+    before = 0
+    mask = font_mask(0)
+    column = 0
+    out = FONT_RAM
+    while column != FONT_COLUMNS
+        after = font_mask(column + 1)
+        edge = (before | after | (mask << 1) | (mask >> 1)) & (mask xor $ffffffff)
+        row_bit = 1
+        line_i = 0
+        while line_i != GLYPH_ROWS
+            if mask & row_bit
+                out^ = LETTERS + line_i
+            elsif edge & row_bit
+                out^ = OUTLINE
+            else
+                out^ = 0
+            end
+            out = out + 1
+            row_bit = row_bit << 1
+            line_i = line_i + 1
+        end
+        before = mask
+        mask = after
+        column = column + 1
+    end
+    return
+end
+
+procedure build_strip()
+    at = STRIP
+    c = 0
+    while c != TEXT_LENGTH
+        k = TEXT[c]
+        dma_copy(FONT_RAM + u32(GLYPH_FIRST[k] << ROW_SHIFT), at, u16(GLYPH_WIDTH[k]) << ROW_SHIFT)
+        at = at + u32(u16(GLYPH_WIDTH[k]) << ROW_SHIFT)
+        c = c + 1
+    end
+    return
+end
+
+# One character column of bars: every pixel of row y is BARS + y mod 64.
+procedure build_bars()
+    out = BAR_COLUMN
+    c = 0
+    while c != HEIGHT
+        k = 0
+        while k != 8
+            out^ = BARS + u8(c & 63)
+            out = out + 1
+            k = k + 1
+        end
+        c = c + 1
+    end
+    return
+end
+
+export procedure scroll_start()
+    k = 0
+    repeat
+        vic4_palette_set(k, 0, 0, 0)
+        k = k + 1
+    until k == 0
+    vic4_palette_set(OUTLINE, 10, 6, 26)
+    vic4_border(0)
+    vic4_background(0)
+    expand_font()
+    build_strip()
+    build_bars()
+    return
+end
+
+# Draws the part's frame `frame` (from 0) into the buffer being drawn.
+export procedure scroll_frame(frame: u16)
+    t = frame
+    c = 0
+    while c != COLUMNS
+        dma_copy(BAR_COLUMN, drawing + u32(c * COLUMN_BYTES), COLUMN_BYTES)
+        c = c + 1
+    end
+    # The text enters from the right: screen column x shows text column
+    # t * SPEED + x - WIDTH.
+    sx = 0
+    column = t * SPEED
+    while sx != WIDTH
+        if column >= WIDTH and column - WIDTH < TEXT_COLUMNS
+            # A cycle every 341 columns: gentle enough to keep letters whole.
+            top = WAVE_MIDDLE + ((i16(SINE[u8((sx >> 1) + (sx >> 2) + t * 3)]) * WAVE_HEIGHT) >> 7)
+            chunky_column(STRIP + u32((column - WIDTH) << ROW_SHIFT), sx, u16(top), GLYPH_ROWS)
+        end
+        column = column + 1
+        sx = sx + 1
+    end
+    return
+end
+
+# The bars roll down and the letters' colours run through them.
+export procedure scroll_vblank()
+    phase = u8(t)
+    k = 0
+    while k != 64
+        c = u16((k - phase) & 63) * 3
+        vic4_palette_set(BARS + k, BARS_PATTERN[c], BARS_PATTERN[c + 1], BARS_PATTERN[c + 2])
+        k = k + 1
+    end
+    k = 0
+    while k != GLYPH_ROWS
+        c = u16(((k << 1) + phase) & 63) * 3
+        vic4_palette_set(LETTERS + k, LETTERS_PATTERN[c], LETTERS_PATTERN[c + 1], LETTERS_PATTERN[c + 2])
+        k = k + 1
+    end
+    return
+end

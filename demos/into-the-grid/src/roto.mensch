@@ -1,7 +1,7 @@
 module RotoScene
 
-# Into the Grid's rotozoomer: a plane of chrome tiles (GridData's TEXTURE,
-# 128x128, tiling) spinning and zooming, then breaking into a mosaic of
+# Into the Grid's rotozoomer: a plane of chrome tiles (GridData's texture
+# at TEXTURE_AT, 128x128, tiling) spinning and zooming, then breaking into a mosaic of
 # 8x8 tiles that explodes: each tile flies off as a particle, thrown out
 # from the middle, falling, fading.
 #
@@ -29,7 +29,6 @@ export const ROTO_LENGTH: u16 = SPIN + MOSAIC + EXPLODE
 const BLOCKS_ACROSS = 160
 # (plane_column's loop has it as a literal.)
 const BLOCKS_DOWN = 100
-const TEXTURE_MASK: u16 = $3f80
 # The wide texture: the first 128 pages of bank 1, so a row's page is just
 # v (it shares memory with PaneScene's floor, which that part redraws when
 # it starts).
@@ -102,8 +101,8 @@ export procedure roto_start()
     # The texture, twice across, a 256-byte page a row.
     r = 0
     while r != TEXTURE_SIZE
-        dma_copy(u32(addr(TEXTURE)) + u32(r << 7), WIDE_TEXTURE + u32(r << 8), TEXTURE_SIZE)
-        dma_copy(u32(addr(TEXTURE)) + u32(r << 7), WIDE_TEXTURE + u32(r << 8) + TEXTURE_SIZE, TEXTURE_SIZE)
+        dma_copy(TEXTURE_AT + u32(r << 7), WIDE_TEXTURE + u32(r << 8), TEXTURE_SIZE)
+        dma_copy(TEXTURE_AT + u32(r << 7), WIDE_TEXTURE + u32(r << 8) + TEXTURE_SIZE, TEXTURE_SIZE)
         r = r + 1
     end
     return
@@ -133,8 +132,11 @@ procedure motion()
     return
 end
 
+# The texel at (u, v), from the wide copy.
 function texel_at(): u16
-    return u16(TEXTURE[((v >> 1) & TEXTURE_MASK) | ((u >> 8) & $7f)])
+    var wide: far ^u8
+    wide = WIDE_TEXTURE + u32(((v >> 8) & $7f) << 8) + u32(u >> 8)
+    return u16(wide^)
 end
 
 # Two columns of the plane side by side, at `at` (4 pixels across, so 4

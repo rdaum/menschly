@@ -9,8 +9,8 @@ module PaneScene
 # - the buffer is cleared and the floor (drawn once, into bank 1) copied in;
 #   the floor moves only by its palette (FLOOR's 16 depth bands cycle);
 # - the glass: each of its columns a run of a sheen strip, sliding;
-# - the runner, column by column: before the glass from his frames in the
-#   ROM bank, inside it from a tinted copy (made at start, in attic RAM),
+# - the runner, column by column: before the glass from his frames, inside
+#   it from a tinted copy (both unpacked into attic RAM at the start),
 #   and past it as dots, each pushed further the further it is past.
 
 import Vic4
@@ -280,17 +280,33 @@ procedure build_floor()
     return
 end
 
-# The runner's frames as seen through the glass, in attic RAM.
-procedure build_tinted()
-    var cell: far ^u8
-    dma_copy(RUNNER_AT, TINTED, RUNNER_FRAME_BYTES * RUNNER_FRAMES)
-    tint_at = TINTED
-    while tint_at != TINTED + u32(RUNNER_FRAME_BYTES * RUNNER_FRAMES)
-        cell = tint_at
-        if cell^
-            cell^ = cell^ + GLASS
+# The runner's frames, unpacked from the ROM bank into attic RAM twice: as
+# they are (RUNNER_AT) and as seen through the glass (TINTED, each byte +
+# GLASS). Runs of zeros (a 0 and a count) are DMA fills.
+procedure unpack_runner()
+    var packed: far ^u8
+    var plain: far ^u8
+    var tinted: far ^u8
+    packed = RUNNER_PACKED
+    plain = RUNNER_AT
+    tinted = TINTED
+    tint_at = RUNNER_AT + u32(RUNNER_FRAME_BYTES * RUNNER_FRAMES)
+    while u32(plain) != tint_at
+        pixel = packed^
+        packed = packed + 1
+        if pixel == 0
+            pixel = packed^
+            packed = packed + 1
+            dma_fill(u32(plain), 0, u16(pixel))
+            dma_fill(u32(tinted), 0, u16(pixel))
+            plain = plain + u32(pixel)
+            tinted = tinted + u32(pixel)
+        else
+            plain^ = pixel
+            tinted^ = pixel + GLASS
+            plain = plain + 1
+            tinted = tinted + 1
         end
-        tint_at = tint_at + 1
     end
     return
 end
@@ -510,7 +526,7 @@ export procedure pane_start()
     vic4_border(0)
     vic4_background(0)
     build_floor()
-    build_tinted()
+    unpack_runner()
     glass_lo = 0
     glass_hi = WIDTH - 1
     return

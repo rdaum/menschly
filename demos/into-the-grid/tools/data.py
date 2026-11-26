@@ -8,8 +8,12 @@ Writes, in the out dir (default target/into-the-grid):
   rotozoomer's texture, the glass slab's tables, and where the runner's
   frames lie;
 - grid-bank.bin: the blob for the ROM image's upper bank (inject_bank.py
-  puts it at linear $30000): the runner's frames (figure.py), then the
-  music's stream (music.py, at MUSIC_AT).
+  puts it at linear $30000): the runner's frames (figure.py), packed (at
+  RUNNER_PACKED: a 0 then a count 1-255 is that many zeros, any other byte
+  itself; the demo unpacks them to RUNNER_AT), the rotozoomer's texture
+  (texture.py, at TEXTURE_AT), the scroller's font (font.py, at FONT_AT:
+  a little-endian 32-bit mask per column) and the music's stream
+  (music.py, at MUSIC_AT).
 
 The music is the demo's own tune (tune.py) arranged by music.DEFAULT, or
 the MIDI file MUSIC_MIDI names in the environment (arranged by the JSON
@@ -38,6 +42,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import json  # noqa: E402
 
 import figure  # noqa: E402
+import font  # noqa: E402
 import music  # noqa: E402
 import tune  # noqa: E402
 import inject_bank  # noqa: E402
@@ -104,6 +109,46 @@ def pane_cross(sine):
     return round(project(PANE_CENTRE[0] + along * cos, 0, RUNNER_Z)[0])
 
 
+def pack(data):
+    """Runs of zeros as a 0 and a count (1-255); other bytes as themselves."""
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        if data[i] == 0:
+            j = i
+            while j < len(data) and data[j] == 0 and j - i < 255:
+                j += 1
+            out += bytes([0, j - i])
+            i = j
+        else:
+            out.append(data[i])
+            i += 1
+    return bytes(out)
+
+
+def bars_pattern():
+    """64 colours down the screen, cycled: three glowing bars on deep navy."""
+    navy = (6, 4, 22)
+    out = [navy] * 64
+    for centre, colour in ((10, (255, 60, 200)), (31, (60, 220, 255)), (52, (255, 170, 40))):
+        for d in range(-6, 7):
+            f = (1 - abs(d) / 7) ** 1.5
+            out[(centre + d) % 64] = tuple(round(n + (c - n) * f) for n, c in zip(navy, colour))
+    return out
+
+
+def text_pattern():
+    """64 colours the letters' rows run through: a sunset loop."""
+    stops = [(255, 255, 255), (255, 210, 80), (255, 120, 40), (240, 40, 150),
+             (140, 60, 230), (60, 200, 255), (255, 255, 255)]
+    out = []
+    for i in range(64):
+        f = i / 64 * (len(stops) - 1)
+        a, b = stops[int(f)], stops[int(f) + 1]
+        out.append(tuple(round(x + (y - x) * (f - int(f))) for x, y in zip(a, b)))
+    return out
+
+
 def array(name, kind, values, per_line=16):
     lines = [f"export const {name}: [{len(values)}]{kind} = ["]
     for i in range(0, len(values), per_line):
@@ -116,7 +161,21 @@ def main():
     out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "target" / "into-the-grid"
     out_dir.mkdir(parents=True, exist_ok=True)
     frames = b"".join(figure.frame(i / figure.FRAMES).T.tobytes() for i in range(figure.FRAMES))
-    blob = bytearray(frames)
+    blob = bytearray(pack(frames))
+    blob += bytes(-len(blob) % 256)
+    texture_at = inject_bank.BANK + len(blob)
+    blob += texture.texture().tobytes()
+    blob += bytes(-len(blob) % 4)
+    font_at = inject_bank.BANK + len(blob)
+    glyphs = font.glyphs()
+    for g in glyphs:
+        for column in g:
+            blob += column.to_bytes(4, "little")
+    glyph_first, at = [], 0
+    for g in glyphs:
+        glyph_first.append(at)
+        at += len(g)
+    text = font.text_indices()
     midi_path = os.environ.get("MUSIC_MIDI")
     if not midi_path:
         midi_path = out_dir / "tune.mid"
@@ -150,7 +209,10 @@ def main():
         "# The frame the demo starts at (START_FRAME in the environment, for",
         "# looking at a moment of it).",
         f"export const START_FRAME: u16 = {int(os.environ.get('START_FRAME', '0'))}",
-        f"export const RUNNER_AT: u32 = ${inject_bank.BANK:x}",
+        f"export const RUNNER_PACKED: u32 = ${inject_bank.BANK:x}",
+        "# Where the demo unpacks the runner's frames (attic RAM).",
+        "export const RUNNER_AT: u32 = $8010000",
+        f"export const TEXTURE_AT: u32 = ${texture_at:x}",
         f"export const RUNNER_WIDTH = {figure.WIDTH}",
         f"export const RUNNER_HEIGHT = {figure.HEIGHT}",
         f"export const RUNNER_FRAMES = {figure.FRAMES}",
@@ -162,6 +224,18 @@ def main():
         f"export const GLASS = {GLASS}",
         array("DEMO_PALETTE", "u8", [v for c in palette for v in c], 24),
         f"export const MUSIC_AT: u32 = ${music_at:x}",
+        "# The scroller (font.py): its font's columns at FONT_AT, each glyph's",
+        "# first column and width, the text as glyphs and its width in columns,",
+        "# and the colours the bars and the letters cycle through.",
+        f"export const FONT_AT: u32 = ${font_at:x}",
+        f"export const FONT_COLUMNS: u16 = {at}",
+        f"export const TEXT_LENGTH: u16 = {len(text)}",
+        f"export const TEXT_COLUMNS: u16 = {sum(len(glyphs[i]) for i in text)}",
+        array("GLYPH_FIRST", "u16", glyph_first),
+        array("GLYPH_WIDTH", "u8", [len(g) for g in glyphs]),
+        array("TEXT", "u8", text, 32),
+        array("BARS_PATTERN", "u8", [v for c in bars_pattern() for v in c], 24),
+        array("LETTERS_PATTERN", "u8", [v for c in text_pattern() for v in c], 24),
         song_text,
         array("SINE", "i8", sine),
         "# The sine at four amplitudes, (k + 1) * 16 at most for row k: the dots'",
@@ -170,11 +244,10 @@ def main():
         *["    " + ", ".join(str(round(s * (k + 1) * 16 / 127)) for s in sine[i:i + 16]) + ","
           for k in range(4) for i in range(0, 256, 16)],
         "]",
-        "# The rotozoomer's texture (texture.py): 128x128, row by row, and its",
-        "# palette.",
+        "# The rotozoomer's texture (texture.py, 128x128, row by row, at",
+        "# TEXTURE_AT in the ROM bank) and its palette.",
         f"export const TEXTURE_SIZE = {texture.SIZE}",
         array("ROTO_PALETTE", "u8", [v for c in texture.palette() for v in c], 24),
-        array("TEXTURE", "u8", [int(v) for v in texture.texture().flatten()], 32),
         array("SHEEN_STRIP", "u8", sheen),
         array("SIDE_STRIP", "u8", side_strip),
         "# The glass slab, in eighths of the floor's units (see data.py), and the",
