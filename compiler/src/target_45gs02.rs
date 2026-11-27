@@ -80,6 +80,14 @@ pub enum Op {
     Stq,
     /// 32-bit add with carry of four bytes to A, X, Y and Z.
     Adcq,
+    /// Pushes the processor flags.
+    Php,
+    /// Pulls the processor flags (including interrupt disable).
+    Plp,
+    /// Disables interrupts.
+    Sei,
+    /// Tests memory: N and V from bits 7 and 6, Z from A AND memory.
+    Bit,
     Pha,
     Phx,
     Phy,
@@ -92,8 +100,16 @@ pub enum Op {
     Beq,
     Bcc,
     Bcs,
+    Bmi,
+    Bpl,
+    Bvs,
+    Bvc,
     Bra,
     Lbra,
+    Lbmi,
+    Lbpl,
+    Lbvs,
+    Lbvc,
     Lbeq,
     Lbne,
     Lbcc,
@@ -148,6 +164,10 @@ impl Op {
             Self::Ldq => "ldq",
             Self::Stq => "stq",
             Self::Adcq => "adcq",
+            Self::Php => "php",
+            Self::Plp => "plp",
+            Self::Sei => "sei",
+            Self::Bit => "bit",
             Self::Pha => "pha",
             Self::Phx => "phx",
             Self::Phy => "phy",
@@ -160,6 +180,14 @@ impl Op {
             Self::Beq => "beq",
             Self::Bcc => "bcc",
             Self::Bcs => "bcs",
+            Self::Bmi => "bmi",
+            Self::Bpl => "bpl",
+            Self::Bvs => "bvs",
+            Self::Bvc => "bvc",
+            Self::Lbmi => "lbmi",
+            Self::Lbpl => "lbpl",
+            Self::Lbvs => "lbvs",
+            Self::Lbvc => "lbvc",
             Self::Bra => "bra",
             Self::Lbra => "lbra",
             Self::Lbeq => "lbeq",
@@ -180,6 +208,10 @@ impl Op {
             Self::Beq | Self::Lbeq => (Self::Beq, Self::Lbeq, Some(Self::Lbne)),
             Self::Bcc | Self::Lbcc => (Self::Bcc, Self::Lbcc, Some(Self::Lbcs)),
             Self::Bcs | Self::Lbcs => (Self::Bcs, Self::Lbcs, Some(Self::Lbcc)),
+            Self::Bmi | Self::Lbmi => (Self::Bmi, Self::Lbmi, Some(Self::Lbpl)),
+            Self::Bpl | Self::Lbpl => (Self::Bpl, Self::Lbpl, Some(Self::Lbmi)),
+            Self::Bvs | Self::Lbvs => (Self::Bvs, Self::Lbvs, Some(Self::Lbvc)),
+            Self::Bvc | Self::Lbvc => (Self::Bvc, Self::Lbvc, Some(Self::Lbvs)),
             Self::Bra | Self::Lbra => (Self::Bra, Self::Lbra, None),
             _ => return None,
         })
@@ -221,7 +253,8 @@ impl Inst {
             // `[bp],z` is `(bp),z` behind a NOP prefix.
             Operand::FlatZ(_) => 3,
             Operand::Label(_) => match op {
-                Op::Bne | Op::Beq | Op::Bcc | Op::Bcs | Op::Bra => 2,
+                Op::Bne | Op::Beq | Op::Bcc | Op::Bcs | Op::Bmi | Op::Bpl | Op::Bvs | Op::Bvc
+                | Op::Bra => 2,
                 _ => 3,
             },
         })

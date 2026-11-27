@@ -52,7 +52,9 @@ const ARG: Locs = 0xf << 18;
 const TMP: Locs = 0xff << 22;
 /// The top byte of the accumulator, which carries a 32-bit result's byte 3.
 const ACC3: Locs = 1 << 9;
-const ALL: Locs = (1 << 30) - 1;
+/// The overflow flag.
+const V: Locs = 1 << 30;
+const ALL: Locs = (1 << 31) - 1;
 
 /// Runtime base-page registers: (symbol, first bit, bytes).
 const RUNTIME: [(&str, u32, u32); 6] = [
@@ -128,6 +130,7 @@ pub fn optimize_routine_with(
         changed |= carry_increments(&mut insts, returns, plain_memory);
         changed |= loop_counters_in_x(&mut insts, returns);
         changed |= overwritten_variable_stores(&mut insts, plain_memory);
+        changed |= merge_interrupt_holds(&mut insts, returns);
         if !changed && insts.len() == before {
             break;
         }
@@ -351,9 +354,15 @@ fn effect(inst: &Inst) -> Effect {
                 target.count_ones() == 4,
             )
         }
+        Op::Php => (NZ | C | V, 0, false),
+        Op::Plp => (0, NZ | C | V, false),
+        Op::Sei => (0, 0, false),
+        Op::Bit => (A | read, NZ | V, pure_read(operand)),
         Op::Pha | Op::Phx | Op::Phy | Op::Phz => (register_bit(op), 0, false),
         Op::Pla | Op::Plx | Op::Ply | Op::Plz => (0, register_bit(op) | NZ, false),
         Op::Bne | Op::Beq | Op::Lbne | Op::Lbeq => (NZ, 0, false),
+        Op::Bmi | Op::Bpl | Op::Lbmi | Op::Lbpl => (NZ, 0, false),
+        Op::Bvs | Op::Bvc | Op::Lbvs | Op::Lbvc => (V, 0, false),
         Op::Bcc | Op::Bcs | Op::Lbcc | Op::Lbcs => (C, 0, false),
         Op::Bra | Op::Lbra => (0, 0, false),
         // Callees take their arguments on the stack or in their own
@@ -462,6 +471,39 @@ fn live_after(insts: &[Inst], returns: Returns) -> Vec<Locs> {
 /// read it ends the wait: a read of that byte or (indexed) of that variable,
 /// any access through a pointer, a store elsewhere that may be hardware
 /// (DMA reads memory), inline assembly.
+/// `plp / php / sei` between two stretches that hold interrupts off (two
+/// uses of the math unit) is dropped when the flags `plp` restores are not
+/// read: interrupts stay off across both, and the second stretch's `plp`
+/// pulls what the first pushed.
+fn merge_interrupt_holds(insts: &mut Vec<Inst>, returns: Returns) -> bool {
+    let held = |at: usize| {
+        matches!(
+            insts.get(at..at + 3),
+            Some([Inst::Op(Op::Plp, _), Inst::Op(Op::Php, _), Inst::Op(Op::Sei, _)])
+        )
+    };
+    if !(0..insts.len()).any(held) {
+        return false;
+    }
+    let live = live_after(insts, returns);
+    let mut delete = vec![false; insts.len()];
+    let mut i = 0;
+    while i < insts.len() {
+        if held(i) && live[i + 2] & (NZ | C | V) == 0 {
+            delete[i..i + 3].fill(true);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    let mut k = 0;
+    insts.retain(|_| {
+        k += 1;
+        !delete[k - 1]
+    });
+    delete.contains(&true)
+}
+
 fn overwritten_variable_stores(insts: &mut Vec<Inst>, plain_memory: &HashSet<String>) -> bool {
     if plain_memory.is_empty() {
         return false;
@@ -1511,7 +1553,12 @@ fn eliminate_redundant(
             }
             Op::Clc => known.carry = Some(false),
             Op::Sec => known.carry = Some(true),
-            Op::Pha | Op::Phx | Op::Phy | Op::Phz => {}
+            Op::Pha | Op::Phx | Op::Phy | Op::Phz | Op::Php | Op::Sei => {}
+            Op::Plp => {
+                known.nz_from_a = false;
+                known.carry = None;
+            }
+            Op::Bit => known.nz_from_a = false,
             Op::Ldq | Op::Adcq => {
                 let key = known.key(operand);
                 // The registers already hold these four bytes.
@@ -1533,7 +1580,22 @@ fn eliminate_redundant(
                 known.clobber(operand, 4);
                 known.quad = known.key(operand);
             }
-            Op::Bne | Op::Beq | Op::Bcc | Op::Bcs | Op::Lbne | Op::Lbeq | Op::Lbcc | Op::Lbcs => {}
+            Op::Bne
+            | Op::Beq
+            | Op::Bcc
+            | Op::Bcs
+            | Op::Bmi
+            | Op::Bpl
+            | Op::Bvs
+            | Op::Bvc
+            | Op::Lbne
+            | Op::Lbeq
+            | Op::Lbcc
+            | Op::Lbcs
+            | Op::Lbmi
+            | Op::Lbpl
+            | Op::Lbvs
+            | Op::Lbvc => {}
             Op::Bra | Op::Lbra | Op::Rts | Op::Rtn | Op::Rti => {
                 known = Known::default();
                 known.plain = plain.clone();
@@ -1883,6 +1945,33 @@ mod tests {
 
     fn label(name: &str) -> Operand {
         Operand::Label(name.to_owned())
+    }
+
+    #[test]
+    fn back_to_back_interrupt_holds_merge_unless_the_flags_are_read() {
+        let returns = Returns {
+            carry: false,
+            bytes: Some(0),
+        };
+        let held = |tail: Vec<Inst>| {
+            let mut insts = vec![
+                Inst::implied(Op::Php),
+                Inst::implied(Op::Sei),
+                op(Op::Sta, Operand::Absolute("$d770".to_owned())),
+                Inst::implied(Op::Plp),
+                Inst::implied(Op::Php),
+                Inst::implied(Op::Sei),
+            ];
+            insts.extend(tail);
+            insts.extend([Inst::implied(Op::Plp), Inst::implied(Op::Rts)]);
+            insts
+        };
+        let mut merged = held(vec![op(Op::Lda, Operand::imm_byte(1))]);
+        assert!(merge_interrupt_holds(&mut merged, returns));
+        assert_eq!(merged.len(), 6, "{merged:?}");
+        // The carry `plp` restores is added in: the stretches stay apart.
+        let mut apart = held(vec![op(Op::Adc, Operand::imm_byte(1))]);
+        assert!(!merge_interrupt_holds(&mut apart, returns));
     }
 
     #[test]

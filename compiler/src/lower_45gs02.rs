@@ -1145,7 +1145,9 @@ impl<'a> RoutineLowerer<'a> {
         let (routine, result) = match op {
             BinaryOp::Xor => return self.byte_op(width, Op::Eor, dst, lhs, rhs),
             BinaryOp::ShiftRightSigned => return self.shift(width, false, true, dst, lhs, rhs),
-            BinaryOp::Mul => (MUL_ROUTINE, ACC_SYMBOL),
+            BinaryOp::Mul => return self.multiply(width, dst, lhs, rhs),
+            BinaryOp::Div { signed: false } => return self.divide(width, false, dst, lhs, rhs),
+            BinaryOp::Rem { signed: false } => return self.divide(width, true, dst, lhs, rhs),
             BinaryOp::Div { signed } => (div_routine(signed), ACC_SYMBOL),
             BinaryOp::Rem { signed } => (div_routine(signed), ARG_SYMBOL),
         };
@@ -1158,6 +1160,88 @@ impl<'a> RoutineLowerer<'a> {
         }
         self.emit(Op::Jsr, Operand::Label(routine.to_owned()));
         self.copy_value(width, dst, &Value::Direct(result.to_owned()))
+    }
+
+    /// Starts a use of the math unit. Interrupt code may use it too, so
+    /// interrupts are held off until [`Self::release_math_unit`], except in
+    /// an interrupt handler, where they already are.
+    fn hold_math_unit(&mut self) {
+        if !matches!(self.routine.abi, Abi::Interrupt) {
+            self.implied(Op::Php);
+            self.implied(Op::Sei);
+        }
+    }
+
+    fn release_math_unit(&mut self) {
+        if !matches!(self.routine.abi, Abi::Interrupt) {
+            self.implied(Op::Plp);
+        }
+    }
+
+    /// Waits while the math unit's busy flag is set: `bvs` for the
+    /// multiplier (bit 6), `bmi` for the divider (bit 7).
+    fn wait_math_unit(&mut self, busy: Op) {
+        let wait = self.local_label();
+        self.out.push(Inst::Label(wait.clone()));
+        self.emit(Op::Bit, Operand::Absolute(MATH_BUSY.to_owned()));
+        self.emit(busy, Operand::Label(wait));
+    }
+
+    /// `dst = lhs * rhs` on the hardware multiplier. The low `n` bytes of a
+    /// product depend only on the low `n` bytes of its factors, so only
+    /// those are written, whatever the inputs' upper bytes hold.
+    fn multiply(
+        &mut self,
+        width: Width,
+        dst: &Value,
+        lhs: &Value,
+        rhs: &Value,
+    ) -> Result<(), LowerError> {
+        let (a, b, out) = math_registers();
+        self.hold_math_unit();
+        self.copy_value(width, &a, lhs)?;
+        self.copy_value(width, &b, rhs)?;
+        self.wait_math_unit(Op::Bvs);
+        self.copy_value(width, dst, &out)?;
+        self.release_math_unit();
+        Ok(())
+    }
+
+    /// Unsigned `dst = lhs / rhs` (or, with `remainder`, `lhs % rhs`) on
+    /// the hardware divider, which divides 32 bits by 32: the operands'
+    /// upper bytes are zeroed. The remainder is `lhs - quotient * rhs`,
+    /// the quotient multiplied back on the multiplier (whose other input
+    /// still holds `rhs`). Dividing by zero gives a quotient of all ones
+    /// (so a remainder of `lhs`).
+    fn divide(
+        &mut self,
+        width: Width,
+        remainder: bool,
+        dst: &Value,
+        lhs: &Value,
+        rhs: &Value,
+    ) -> Result<(), LowerError> {
+        let (a, b, product) = math_registers();
+        let quotient = Value::Global(DIV_QUOTIENT.to_owned());
+        let bytes = width.size_bytes();
+        self.hold_math_unit();
+        self.copy_value(width, &a, lhs)?;
+        self.copy_value(width, &b, rhs)?;
+        for i in bytes..4 {
+            self.emit(Op::Stz, Operand::Absolute(offset(MULT_A, i)));
+            self.emit(Op::Stz, Operand::Absolute(offset(MULT_B, i)));
+        }
+        self.wait_math_unit(Op::Bmi);
+        if remainder {
+            self.copy_value(width, &a, &quotient)?;
+            self.wait_math_unit(Op::Bvs);
+            self.implied(Op::Sec);
+            self.byte_op(width, Op::Sbc, dst, lhs, &product)?;
+        } else {
+            self.copy_value(width, dst, &quotient)?;
+        }
+        self.release_math_unit();
+        Ok(())
     }
 
     fn inc(&mut self, width: Width, value: &Value) -> Result<(), LowerError> {
@@ -1566,6 +1650,22 @@ fn is_step_in_place(dst: &Value, lhs: &Value, rhs: &Value) -> bool {
                 | Value::Global(_)
                 | Value::Stack { .. }
         )
+}
+
+/// The math unit (MEGA65 I/O): the multiplier's (and divider's) inputs,
+/// the product, the quotient's whole part, and the busy flags.
+const MULT_A: &str = "$d770";
+const MULT_B: &str = "$d774";
+const MULT_OUT: &str = "$d778";
+const DIV_QUOTIENT: &str = "$d76c";
+const MATH_BUSY: &str = "$d70f";
+
+fn math_registers() -> (Value, Value, Value) {
+    (
+        Value::Global(MULT_A.to_owned()),
+        Value::Global(MULT_B.to_owned()),
+        Value::Global(MULT_OUT.to_owned()),
+    )
 }
 
 fn div_routine(signed: bool) -> &'static str {

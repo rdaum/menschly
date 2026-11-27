@@ -2272,6 +2272,59 @@ fn multiplication_by_two_bit_constants() {
 }
 
 #[test]
+fn unsigned_multiply_divide_and_remainder_at_every_width() {
+    // Products, quotients and remainders of variables (so nothing folds),
+    // against Rust's: top bits set, a divisor bigger than the dividend,
+    // and dividing by zero (a quotient of all ones, a remainder of the
+    // dividend).
+    let pairs: [(u32, u32); 6] = [
+        (0xffff_fff1, 7),
+        (0x8765_4321, 0x1234),
+        (1_000_000_007, 65_521),
+        (12, 0xfedc_ba98),
+        (0xdead_beef, 0),
+        (0x0100_0000, 0x0000_0101),
+    ];
+    let types: [(&str, u32); 4] = [("u8", 1), ("u16", 2), ("u24", 3), ("u32", 4)];
+    let mut source = String::from("module UnsignedMath\n");
+    let mut body = String::new();
+    let mut expected = Vec::new();
+    let mut at = 0x1000u32;
+    for (ty, bytes) in types {
+        let mask = if bytes == 4 { u32::MAX } else { (1u32 << (8 * bytes)) - 1 };
+        for (k, (a, b)) in pairs.iter().enumerate() {
+            let (a, b) = (a & mask, b & mask);
+            source.push_str(&format!("var a_{ty}_{k}: {ty} = ${a:x}\nvar b_{ty}_{k}: {ty} = ${b:x}\n"));
+            let results = [
+                ("*", a.wrapping_mul(b) & mask),
+                ("/", if b == 0 { mask } else { a / b }),
+                ("%", if b == 0 { a } else { a % b }),
+            ];
+            for (op, value) in results {
+                source.push_str(&format!("fixed(${at:x}) volatile var r_{at:x}: {ty}\n"));
+                body.push_str(&format!("    r_{at:x} = a_{ty}_{k} {op} b_{ty}_{k}\n"));
+                expected.push((at, bytes, value, format!("{ty} ${a:x} {op} ${b:x}")));
+                at += bytes;
+            }
+        }
+    }
+    source.push_str("export function main(): u8\n");
+    source.push_str(&body);
+    source.push_str("    return 0\nend\n");
+    let Some(run) = run_source("unsigned-math", &source) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 0);
+    for (at, bytes, value, what) in expected {
+        let at = at as usize;
+        let got = (0..bytes as usize)
+            .map(|i| u32::from(run.memory[at + i]) << (8 * i))
+            .sum::<u32>();
+        assert_eq!(got, value, "{what}");
+    }
+}
+
+#[test]
 fn parallel_arrays_past_256_bytes_index_by_variable() {
     // `wide`'s column starts 200 bytes in and `cell`'s 600: their element
     // addresses are formed from symbol + offset beyond a byte.
