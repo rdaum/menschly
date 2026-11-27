@@ -2287,7 +2287,10 @@ fn unsigned_multiply_divide_and_remainder_at_every_width() {
     ];
     let types: [(&str, u32); 4] = [("u8", 1), ("u16", 2), ("u24", 3), ("u32", 4)];
     let mut source = String::from("module UnsignedMath\n");
+    // Each case twice: in straight-line code and inside a loop, which
+    // are compiled differently.
     let mut body = String::new();
+    let mut looped = String::new();
     let mut expected = Vec::new();
     let mut at = 0x1000u32;
     for (ty, bytes) in types {
@@ -2301,17 +2304,98 @@ fn unsigned_multiply_divide_and_remainder_at_every_width() {
                 ("%", if b == 0 { a } else { a % b }),
             ];
             for (op, value) in results {
-                source.push_str(&format!("fixed(${at:x}) volatile var r_{at:x}: {ty}\n"));
-                body.push_str(&format!("    r_{at:x} = a_{ty}_{k} {op} b_{ty}_{k}\n"));
-                expected.push((at, bytes, value, format!("{ty} ${a:x} {op} ${b:x}")));
-                at += bytes;
+                for (code, place) in [(&mut body, "straight"), (&mut looped, "in a loop")] {
+                    source.push_str(&format!("fixed(${at:x}) volatile var r_{at:x}: {ty}\n"));
+                    code.push_str(&format!("    r_{at:x} = a_{ty}_{k} {op} b_{ty}_{k}\n"));
+                    expected.push((at, bytes, value, format!("{ty} ${a:x} {op} ${b:x}, {place}")));
+                    at += bytes;
+                }
             }
         }
     }
     source.push_str("export function main(): u8\n");
+    source.push_str("    var pass: u8\n");
     source.push_str(&body);
-    source.push_str("    return 0\nend\n");
+    source.push_str("    pass = 0\n    while pass != 1\n");
+    source.push_str(&looped);
+    source.push_str("        pass = pass + 1\n    end\n    return 0\nend\n");
     let Some(run) = run_source("unsigned-math", &source) else {
+        return;
+    };
+    assert_eq!(run.exit_code, 0);
+    for (at, bytes, value, what) in expected {
+        let at = at as usize;
+        let got = (0..bytes as usize)
+            .map(|i| u32::from(run.memory[at + i]) << (8 * i))
+            .sum::<u32>();
+        assert_eq!(got, value, "{what}");
+    }
+}
+
+#[test]
+fn signed_divide_and_remainder_at_every_width() {
+    // Quotients truncate toward zero and remainders take the dividend's
+    // sign, for every pairing of signs, the most negative value over -1,
+    // and constant divisors of either sign. Dividing by zero gives a
+    // quotient of all ones, negated for a negative dividend, and a
+    // remainder of the dividend.
+    let pairs: [(i64, i64); 8] = [
+        (100, 7),
+        (-100, 7),
+        (100, -7),
+        (-100, -7),
+        (i64::MIN, -1),
+        (-5, 0),
+        (5, 0),
+        (-1_000_003, 977),
+    ];
+    let types: [(&str, u32); 3] = [("i8", 1), ("i16", 2), ("i32", 4)];
+    let mut source = String::from("module SignedMath\n");
+    // Each case twice: in straight-line code and inside a loop, which
+    // are compiled differently.
+    let mut body = String::new();
+    let mut looped = String::new();
+    let mut variables = String::new();
+    let mut expected = Vec::new();
+    let mut at = 0x1000u32;
+    for (ty, bytes) in types {
+        let bits = 8 * bytes;
+        let wrap = |v: i64| (v << (64 - bits)) >> (64 - bits);
+        let mask = if bytes == 4 { u32::MAX } else { (1u32 << bits) - 1 };
+        let mut check = |lhs: String, rhs: String, a: i64, b: i64, what: String| {
+            let quotient = match b {
+                0 if a < 0 => 1,
+                0 => -1,
+                _ => wrap(a.wrapping_div(b)),
+            };
+            let remainder = if b == 0 { a } else { wrap(a.wrapping_rem(b)) };
+            for (op, value) in [("/", quotient), ("%", remainder)] {
+                for (code, place) in [&mut body, &mut looped].into_iter().zip(["straight", "in a loop"]) {
+                    source.push_str(&format!("fixed(${at:x}) volatile var r_{at:x}: {ty}\n"));
+                    code.push_str(&format!("    r_{at:x} = {lhs} {op} {rhs}\n"));
+                    expected.push((at, bytes, value as u32 & mask, format!("{what} {op}, {place}")));
+                    at += bytes;
+                }
+            }
+        };
+        for (k, (a, b)) in pairs.iter().enumerate() {
+            let (a, b) = (wrap(*a), wrap(*b));
+            let hex = |v: i64| format!("${:x}", v as u32 & mask);
+            variables.push_str(&format!("var a_{ty}_{k}: {ty} = {}\nvar b_{ty}_{k}: {ty} = {}\n", hex(a), hex(b)));
+            check(format!("a_{ty}_{k}"), format!("b_{ty}_{k}"), a, b, format!("{ty} {a} by {b}"));
+            for c in [7i64, -7] {
+                check(format!("a_{ty}_{k}"), format!("{c}"), a, c, format!("{ty} {a} by constant {c}"));
+            }
+        }
+    }
+    source.push_str(&variables);
+    source.push_str("export function main(): u8\n");
+    source.push_str("    var pass: u8\n");
+    source.push_str(&body);
+    source.push_str("    pass = 0\n    while pass != 1\n");
+    source.push_str(&looped);
+    source.push_str("        pass = pass + 1\n    end\n    return 0\nend\n");
+    let Some(run) = run_source("signed-math", &source) else {
         return;
     };
     assert_eq!(run.exit_code, 0);

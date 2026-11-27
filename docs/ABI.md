@@ -142,8 +142,8 @@ power of two becomes a shift or mask instead):
   not safe to use from an interrupt handler and the code it interrupts at the
   same time. Signed compares stage their right operand in the static
   `__mensch_compare`, with the same caveat.
-- MEGA65: `*` and unsigned `/` and `%` use the math unit in line; signed
-  `/` and `%` call a routine (see below).
+- MEGA65: `*`, `/` and `%` use the math unit in line, except a signed `/`
+  or `%` outside a loop, which calls a routine (see below).
 
 Division truncates toward zero and the remainder takes the dividend's sign.
 
@@ -579,18 +579,25 @@ assignment with the 65816 backend but lowers everything byte by byte:
   the same module tests the result without a `cmp #0` (other callers, such
   as those going through a window stub, cannot rely on it).
 - Far pointers are 32-bit flat addresses, dereferenced through `[__m65_farp],z`.
-- `*` and unsigned `/` and `%` are done in line on the MEGA65 math unit
-  (`$D768-$D77F`), between `php / sei` and `plp` (an interrupt handler,
-  already holding interrupts off, skips them): the operands are written
-  straight to the multiplier's inputs, the busy flag at `$D70F` waited on,
-  and the result read straight from the product or quotient. A product
-  writes only as many input bytes as its width; a divide zeroes the inputs'
-  upper bytes, and a remainder is the dividend less the quotient times the
-  divisor. Dividing by zero gives a quotient of all ones and a remainder of
-  the dividend. Signed `/` and `%` load the operands into `__m65_acc` and
-  `__m65_arg` and call `__m65_divs` (`X` = the operand width in bytes):
-  quotient in `__m65_acc`, remainder in `__m65_arg`; it clobbers A/X/Y and
-  `__m65_farp`. It lives in `mega65::MATH_RUNTIME`, which is linked only into
+- `*`, `/` and `%` are done in line on the MEGA65 math unit (`$D768-$D77F`),
+  between `php / sei` and `plp` (an interrupt handler, already holding
+  interrupts off, skips them; two uses back to back share one hold): the
+  operands are written straight to the unit's inputs, the busy flag at
+  `$D70F` waited on, and the result read straight from the product or
+  quotient. A product writes only as many input bytes as its width. A
+  divide zeroes the inputs' upper bytes first, in line inside a loop and
+  otherwise by calling `__m65_clear_inputsN` (N = the operand width in
+  bytes; it touches nothing else). A signed divide writes the operands'
+  magnitudes and negates the quotient when their signs differ; a remainder
+  is the dividend less the quotient times the divisor. Dividing by zero
+  gives a quotient of all ones (negated for a negative dividend) and a
+  remainder of the dividend.
+- Outside a loop, where the code it takes counts for more than its time, a
+  signed `/` or `%` instead loads the operands into `__m65_acc` and
+  `__m65_arg` and calls `__m65_divs` (`X` = the operand width in bytes):
+  quotient in `__m65_acc`, remainder in `__m65_arg`, with the same results;
+  it clobbers A/X/Y and `__m65_farp`. The math routines live in
+  `mega65::CLEAR_RUNTIME` and `mega65::DIVS_RUNTIME`, each linked only into
   images that call it.
 - Internal and exported routines use direct-page parameters, as on the 65816
   (with register arguments and carry results as described above).

@@ -52,6 +52,41 @@ fn in_loop(body: &[IrInst], at: usize) -> bool {
     })
 }
 
+/// For each instruction of `body`, whether it is inside a loop: between a
+/// label and a later branch back to it.
+pub fn loop_members(body: &[IrInst]) -> Vec<bool> {
+    let mut labels = BTreeMap::new();
+    for (at, inst) in body.iter().enumerate() {
+        if let IrInst::Label(label) = inst {
+            labels.insert(label.0.clone(), at);
+        }
+    }
+    // +1 where a loop starts, -1 just past where it ends.
+    let mut edges = vec![0i32; body.len() + 1];
+    for (at, inst) in body.iter().enumerate() {
+        if matches!(inst, IrInst::Label(_)) {
+            continue;
+        }
+        let _ = inst.map_labels(&mut |target| {
+            if let Some(&start) = labels.get(&target.0) {
+                if start < at {
+                    edges[start] += 1;
+                    edges[at + 1] -= 1;
+                }
+            }
+            target.clone()
+        });
+    }
+    let mut depth = 0;
+    edges[..body.len()]
+        .iter()
+        .map(|edge| {
+            depth += edge;
+            depth > 0
+        })
+        .collect()
+}
+
 /// Whether a call to `callee` at instruction `at` of `body` should be
 /// inlined, `calls` being how many calls the module makes to it.
 fn worth_inlining(callee: &Routine, calls: usize, body: &[IrInst], at: usize) -> bool {
@@ -280,6 +315,34 @@ mod tests {
                     | IrInst::CallFunction { name: called, .. } if called == name)
             })
             .count()
+    }
+
+    #[test]
+    fn loop_members_mark_what_lies_between_a_label_and_a_branch_back() {
+        let module = crate::frontend::compile_source(
+            "
+            module Loops
+            var total: u16
+            var factor: u16
+            var i: u8
+            export procedure main()
+                total = 1
+                i = 0
+                while i != 4
+                    total = total * factor
+                    i = i + 1
+                end
+                total = total / factor
+                return
+            end
+            ",
+        )
+        .unwrap();
+        let body = &module.routines[0].body;
+        let members = loop_members(body);
+        let at = |op: fn(&IrInst) -> bool| members[body.iter().position(op).unwrap()];
+        assert!(at(|inst| matches!(inst, IrInst::Binary { op: crate::ir::BinaryOp::Mul, .. })));
+        assert!(!at(|inst| matches!(inst, IrInst::Binary { op: crate::ir::BinaryOp::Div { .. }, .. })));
     }
 
     #[test]

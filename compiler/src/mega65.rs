@@ -197,9 +197,38 @@ machine_call:
 
 "#;
 
-pub const MATH_RUNTIME: &str = r#".setcpu "45GS02"
+/// The runtime's routines zeroing the math unit's inputs, linked into
+/// images that call them (see `lower_45gs02::CLEAR_ROUTINES`).
+pub const CLEAR_RUNTIME: &str = r#".setcpu "45GS02"
+.export __m65_clear_inputs1, __m65_clear_inputs2, __m65_clear_inputs3
+
+; The math unit's inputs (MEGA65 I/O personality).
+MULTINA = $d770
+MULTINB = $d774
+
+.segment "CODE"
+; Products, quotients and remainders are mostly worked out in line (see
+; lower_45gs02). A divide of N-byte operands outside a loop calls
+; __m65_clear_inputsN first: it zeroes both inputs' bytes N to 3, falling
+; through from one entry to the next. Only Z (zero) is read; nothing else
+; is touched.
+__m65_clear_inputs1:
+	stz MULTINA+1
+	stz MULTINB+1
+__m65_clear_inputs2:
+	stz MULTINA+2
+	stz MULTINB+2
+__m65_clear_inputs3:
+	stz MULTINA+3
+	stz MULTINB+3
+	rts
+"#;
+
+/// The runtime's signed divide, linked into images that call it (see
+/// `lower_45gs02::DIVS_ROUTINE`).
+pub const DIVS_RUNTIME: &str = r#".setcpu "45GS02"
 .importzp __m65_acc, __m65_farp, __m65_arg
-.export __m65_mul, __m65_divu, __m65_divs
+.export __m65_divs
 
 ; The math unit (MEGA65 I/O personality).
 MULTINA = $d770
@@ -209,58 +238,10 @@ DIVOUT_WHOLE = $d76c
 MATHBUSY = $d70f                ; bit 7: divider busy, bit 6: multiplier busy
 
 .segment "CODE"
-; Math (see lower_45gs02). The operands are ACC and ARG; the results go to
-; ACC (product, quotient) and ARG (remainder). The math unit is shared, so
-; interrupts are held off while it is in use. A, X, Y and FARP are
-; clobbered; Z stays 0.
-
-; ACC = ACC * ARG (low 32 bits). Only the low bytes of the operands that
-; the caller set matter for the low bytes of the product.
-__m65_mul:
-	php
-	sei
-	jsr __m65_load_operands
-@wait:
-	bit MATHBUSY
-	bvs @wait
-	ldx #$03
-@out:
-	lda MULTOUT,x
-	sta __m65_acc,x
-	dex
-	bpl @out
-	plp
-	rts
-
-; Writes ACC and ARG to the math unit's inputs.
-__m65_load_operands:
-	ldx #$03
-@in:
-	lda __m65_acc,x
-	sta MULTINA,x
-	lda __m65_arg,x
-	sta MULTINB,x
-	dex
-	bpl @in
-	rts
-
-; Unsigned ACC / ARG for X-byte operands (1-4): ACC = quotient, ARG =
-; remainder. Dividing by zero gives a quotient of $FFFFFFFF.
-__m65_divu:
-	php
-	sei
-@zero:
-	cpx #$04
-	beq @extended
-	lda #$00
-	sta __m65_acc,x
-	sta __m65_arg,x
-	inx
-	bra @zero
-@extended:
-	jsr __m65_divide
-	plp
-	rts
+; A signed divide outside a loop is a call, being long in line: operands
+; in ACC and ARG, results in ACC (quotient) and ARG (remainder). The math
+; unit is shared, so interrupts are held off while it is in use. A, X, Y
+; and FARP are clobbered; Z stays 0.
 
 ; Signed ACC / ARG for X-byte operands: the quotient truncates toward zero
 ; and the remainder has the dividend's sign.
@@ -371,6 +352,18 @@ __m65_divide:
 	sta __m65_acc,x
 	dex
 	bpl @copy
+	rts
+
+; Writes ACC and ARG to the math unit's inputs.
+__m65_load_operands:
+	ldx #$03
+@in:
+	lda __m65_acc,x
+	sta MULTINA,x
+	lda __m65_arg,x
+	sta MULTINB,x
+	dex
+	bpl @in
 	rts
 "#;
 
@@ -1086,14 +1079,15 @@ fn link(
     write(&cfg, config)?;
 
     // The math routines are only linked when some module calls them.
-    let math = modules.iter().any(|(_, source)| {
-        crate::lower_45gs02::MATH_ROUTINES
+    let calls = |routines: &[&str]| {
+        modules
             .iter()
-            .any(|routine| source.contains(routine))
-    });
-    let math = math.then_some(("math", MATH_RUNTIME));
+            .any(|(_, source)| routines.iter().any(|routine| source.contains(routine)))
+    };
+    let clear = calls(&crate::lower_45gs02::CLEAR_ROUTINES).then_some(("math", CLEAR_RUNTIME));
+    let divs = calls(&[crate::lower_45gs02::DIVS_ROUTINE]).then_some(("divs", DIVS_RUNTIME));
     let mut objects = Vec::new();
-    for (name, source) in runtime.iter().chain(math.iter()).chain(modules) {
+    for (name, source) in runtime.iter().chain(clear.iter()).chain(divs.iter()).chain(modules) {
         let asm = dir.join(format!("{name}.s"));
         let obj = dir.join(format!("{name}.o"));
         write(&asm, source)?;

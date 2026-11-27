@@ -29,7 +29,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::lower_45gs02::{
-    ACC_SYMBOL, ARG_SYMBOL, FARP_SYMBOL, FP_SYMBOL, LEAVE_ROUTINE, MATH_ROUTINES, PTR_SYMBOL,
+    ACC_SYMBOL, ARG_SYMBOL, FARP_SYMBOL, FP_SYMBOL, LEAVE_ROUTINE, CLEAR_ROUTINES, DIVS_ROUTINE, PTR_SYMBOL,
     TMP_SYMBOL,
 };
 use crate::target_45gs02::{Inst, Op, Operand};
@@ -365,23 +365,28 @@ fn effect(inst: &Inst) -> Effect {
         Op::Bvs | Op::Bvc | Op::Lbvs | Op::Lbvc => (V, 0, false),
         Op::Bcc | Op::Bcs | Op::Lbcc | Op::Lbcs => (C, 0, false),
         Op::Bra | Op::Lbra => (0, 0, false),
+        // These only zero the math unit's inputs (with Z).
+        Op::Jsr if matches!(operand, Operand::Label(name) if CLEAR_ROUTINES.contains(&name.as_str())) => {
+            (Z, 0, false)
+        }
+        // The signed divide takes ACC and ARG (and the width in X), leaving
+        // the temp registers alone.
+        Op::Jsr if matches!(operand, Operand::Label(name) if name == DIVS_ROUTINE) => (
+            A | X | Y | Z | FP | ACC | ARG,
+            A | X | Y | NZ | C | ACC | FARP | ARG,
+            false,
+        ),
         // Callees take their arguments on the stack or in their own
-        // parameter storage, never in the base-page scratch registers (except
-        // the math helpers, which take theirs in ACC and ARG); they return
-        // results in A/X/Y (and ACC+3), keep Z = 0 and the frame pointer, and
-        // clobber the scratch registers. An indirect call reads its vector.
+        // parameter storage, never in the base-page scratch registers; they
+        // return results in A/X/Y (and ACC+3), keep Z = 0 and the frame
+        // pointer, and clobber the scratch registers. An indirect call reads
+        // its vector.
         Op::Jsr => {
             let arguments = match operand {
-                Operand::Label(name) if MATH_ROUTINES.contains(&name.as_str()) => ACC | ARG,
                 Operand::Indirect(vector) => runtime_bytes(vector, 2),
                 _ => 0,
             };
-            // The math routines only touch their own operands and the flat
-            // pointer, so temp registers survive them.
             let clobbers = match operand {
-                Operand::Label(name) if MATH_ROUTINES.contains(&name.as_str()) => {
-                    A | X | Y | NZ | C | ACC | FARP | ARG
-                }
                 // The frame release keeps the carry (a carry result).
                 Operand::Label(name) if name == LEAVE_ROUTINE => {
                     A | X | Y | NZ | ACC | PTR | FARP | ARG | TMP
@@ -1539,6 +1544,9 @@ fn eliminate_redundant(
             Op::Cmp | Op::Cpx => {
                 known.nz_from_a = false;
                 known.carry = None;
+            }
+            Op::Jsr if matches!(operand, Operand::Label(name) if CLEAR_ROUTINES.contains(&name.as_str())) => {
+                known.clobber_all_memory();
             }
             Op::Jsr => {
                 let next_value = known.next_value;

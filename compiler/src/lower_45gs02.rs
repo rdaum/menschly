@@ -7,9 +7,10 @@
 //! [`ACC_SYMBOL`]; function results come back in `A` (byte 0), `X` (byte 1),
 //! `Y` (byte 2) and `ACC+3` (byte 3).
 //!
-//! Multiplication and division call the runtime's math routines
-//! ([`MATH_ROUTINES`]) with the operands in `ACC` and [`ARG_SYMBOL`]; they
-//! use the MEGA65's hardware multiplier and divider.
+//! Multiplication and division are done in line on the MEGA65's hardware
+//! multiplier and divider. Outside loops, where size counts for more than
+//! time, a divide zeroes the inputs' upper bytes with a call (one of
+//! [`CLEAR_ROUTINES`]), and a signed one calls [`DIVS_ROUTINE`] instead.
 //!
 //! # Stack frames
 //!
@@ -60,7 +61,7 @@ pub const PTR_SYMBOL: &str = "__m65_ptr";
 pub const FARP_SYMBOL: &str = "__m65_farp";
 /// Base-page frame pointer (2 bytes), defined by the runtime.
 pub const FP_SYMBOL: &str = "__m65_fp";
-/// Base-page second operand of the math routines (4 bytes).
+/// Base-page second operand of the signed divide routine (4 bytes).
 pub const ARG_SYMBOL: &str = "__m65_arg";
 /// Base-page temporaries of reentrant routines (see `StorageOptions`).
 pub const TMP_SYMBOL: &str = "__m65_tmp";
@@ -79,23 +80,34 @@ pub const RUNTIME_DIRECT_SYMBOLS: [&str; 6] = [
 pub const ENTER_ROUTINE: &str = "__m65_enter";
 /// Runtime routine that releases a stack frame (Z = local bytes).
 pub const LEAVE_ROUTINE: &str = "__m65_leave";
-/// `ACC = ACC * ARG` (the low 32 bits).
-pub const MUL_ROUTINE: &str = "__m65_mul";
-/// Unsigned `ACC / ARG` for X-byte operands: quotient in ACC, remainder in
-/// ARG (both 32-bit).
-pub const DIVU_ROUTINE: &str = "__m65_divu";
-/// Signed `ACC / ARG`, like [`DIVU_ROUTINE`]: the quotient truncates toward
-/// zero and the remainder has the dividend's sign.
+/// Runtime routines that zero the math unit's input bytes from 1, 2 or 3
+/// up, for a divide (outside a loop) of operands that wide; they touch
+/// nothing else.
+pub const CLEAR_ROUTINES: [&str; 3] = [
+    "__m65_clear_inputs1",
+    "__m65_clear_inputs2",
+    "__m65_clear_inputs3",
+];
+/// Signed `ACC / ARG` for X-byte operands (a divide outside a loop):
+/// quotient in ACC, remainder in ARG; the quotient truncates toward zero
+/// and the remainder has the dividend's sign.
 pub const DIVS_ROUTINE: &str = "__m65_divs";
-/// Runtime routines that take their operands in ACC and ARG.
-pub const MATH_ROUTINES: [&str; 3] = [MUL_ROUTINE, DIVU_ROUTINE, DIVS_ROUTINE];
+/// The runtime's math routines (see `mega65::CLEAR_RUNTIME` and
+/// `mega65::DIVS_RUNTIME`).
+pub const MATH_ROUTINES: [&str; 4] = [
+    CLEAR_ROUTINES[0],
+    CLEAR_ROUTINES[1],
+    CLEAR_ROUTINES[2],
+    DIVS_ROUTINE,
+];
 /// Runtime routines generated code may call.
-pub const RUNTIME_ROUTINES: [&str; 5] = [
+pub const RUNTIME_ROUTINES: [&str; 6] = [
     ENTER_ROUTINE,
     LEAVE_ROUTINE,
-    MUL_ROUTINE,
-    DIVU_ROUTINE,
-    DIVS_ROUTINE,
+    MATH_ROUTINES[0],
+    MATH_ROUTINES[1],
+    MATH_ROUTINES[2],
+    MATH_ROUTINES[3],
 ];
 
 /// Fixed address of the trap vector table: family `n`'s dispatcher address
@@ -323,7 +335,9 @@ fn lower_routine(
         lowerer.lower_inst(inst)?;
     }
     lowerer.prologue();
-    for inst in &routine.body[arrivals..] {
+    let in_loop = crate::inline::loop_members(&routine.body);
+    for (inst, in_loop) in routine.body[arrivals..].iter().zip(&in_loop[arrivals..]) {
+        lowerer.in_loop = *in_loop;
         lowerer.lower_inst(inst)?;
     }
     if lowerer.pending_result.is_some() {
@@ -367,6 +381,8 @@ struct RoutineLowerer<'a> {
     pending_result: Option<Width>,
     /// Whether some return jumped to the routine's single shared epilogue.
     shared_epilogue_used: bool,
+    /// Whether the instruction being lowered is inside a loop.
+    in_loop: bool,
     /// Interrupt handlers: where the prologue saves runtime registers, and
     /// which ones (decided once the body is lowered).
     runtime_save_at: usize,
@@ -418,6 +434,7 @@ impl<'a> RoutineLowerer<'a> {
             param_bytes,
             pending_result: None,
             shared_epilogue_used: false,
+            in_loop: false,
             runtime_save_at: 0,
             saved_runtime: Vec::new(),
         }
@@ -472,12 +489,14 @@ impl<'a> RoutineLowerer<'a> {
     /// disturb: those its own code names, or all of them if it calls out.
     /// Inserts the saves into the prologue; the shared epilogue restores them.
     fn save_runtime_registers(&mut self) {
-        // The frame routines only touch the accumulator and pointer; anything
-        // else (including the math routines) may use every register.
+        // The frame routines only touch the accumulator and pointer, and
+        // the routines zeroing the math unit's inputs only those; anything
+        // else (the signed divide too) may use every register.
         let calls_out = self.out.iter().any(|inst| {
             matches!(inst, Inst::Op(Op::Jsr, operand)
                 if ![ENTER_ROUTINE, LEAVE_ROUTINE]
                     .iter()
+                    .chain(CLEAR_ROUTINES.iter())
                     .any(|helper| operand_mentions(operand, helper)))
         });
         let framed = self.frame.is_some();
@@ -1142,24 +1161,13 @@ impl<'a> RoutineLowerer<'a> {
         lhs: &Value,
         rhs: &Value,
     ) -> Result<(), LowerError> {
-        let (routine, result) = match op {
-            BinaryOp::Xor => return self.byte_op(width, Op::Eor, dst, lhs, rhs),
-            BinaryOp::ShiftRightSigned => return self.shift(width, false, true, dst, lhs, rhs),
-            BinaryOp::Mul => return self.multiply(width, dst, lhs, rhs),
-            BinaryOp::Div { signed: false } => return self.divide(width, false, dst, lhs, rhs),
-            BinaryOp::Rem { signed: false } => return self.divide(width, true, dst, lhs, rhs),
-            BinaryOp::Div { signed } => (div_routine(signed), ACC_SYMBOL),
-            BinaryOp::Rem { signed } => (div_routine(signed), ARG_SYMBOL),
-        };
-        // The right operand goes first: the left may be the accumulator.
-        let arg = Value::Direct(ARG_SYMBOL.to_owned());
-        self.copy_value(width, &arg, rhs)?;
-        self.copy_value(width, &Value::Accumulator, lhs)?;
-        if routine != MUL_ROUTINE {
-            self.emit(Op::Ldx, Operand::imm_byte(width.size_bytes() as u8));
+        match op {
+            BinaryOp::Xor => self.byte_op(width, Op::Eor, dst, lhs, rhs),
+            BinaryOp::ShiftRightSigned => self.shift(width, false, true, dst, lhs, rhs),
+            BinaryOp::Mul => self.multiply(width, dst, lhs, rhs),
+            BinaryOp::Div { signed } => self.divide(width, signed, false, dst, lhs, rhs),
+            BinaryOp::Rem { signed } => self.divide(width, signed, true, dst, lhs, rhs),
         }
-        self.emit(Op::Jsr, Operand::Label(routine.to_owned()));
-        self.copy_value(width, dst, &Value::Direct(result.to_owned()))
     }
 
     /// Starts a use of the math unit. Interrupt code may use it too, so
@@ -1207,13 +1215,89 @@ impl<'a> RoutineLowerer<'a> {
         Ok(())
     }
 
-    /// Unsigned `dst = lhs / rhs` (or, with `remainder`, `lhs % rhs`) on
-    /// the hardware divider, which divides 32 bits by 32: the operands'
-    /// upper bytes are zeroed. The remainder is `lhs - quotient * rhs`,
-    /// the quotient multiplied back on the multiplier (whose other input
-    /// still holds `rhs`). Dividing by zero gives a quotient of all ones
-    /// (so a remainder of `lhs`).
+    /// `dst = lhs / rhs` (or, with `remainder`, `lhs % rhs`) on the
+    /// hardware divider, which divides 32 bits by 32: the inputs' upper
+    /// bytes are zeroed, then the operands written, a signed one as its
+    /// magnitude. A signed quotient is negated when the operands' signs
+    /// differ. A remainder is the dividend less the quotient times the
+    /// divisor: the quotient's magnitude is multiplied back by the
+    /// divisor's (still in the multiplier's other input), and the product
+    /// taken from a dividend of zero or more, added to a negative one. So
+    /// the quotient truncates toward zero and the remainder has the
+    /// dividend's sign. Dividing by zero gives a quotient of all ones
+    /// (negated for a negative dividend) and a remainder of the dividend.
     fn divide(
+        &mut self,
+        width: Width,
+        signed: bool,
+        remainder: bool,
+        dst: &Value,
+        lhs: &Value,
+        rhs: &Value,
+    ) -> Result<(), LowerError> {
+        if signed && !self.in_loop {
+            return self.divide_signed_by_call(width, remainder, dst, lhs, rhs);
+        }
+        let (a, b, product) = math_registers();
+        let quotient = Value::Global(DIV_QUOTIENT.to_owned());
+        let bytes = width.size_bytes();
+        // Operands in registers go to memory first: a magnitude is taken by
+        // subtracting from zero, and frame bytes are reached through Y.
+        let lhs = &self.in_memory(width, lhs, ACC_SYMBOL)?;
+        let rhs = &self.in_memory(width, rhs, ARG_SYMBOL)?;
+        self.hold_math_unit();
+        if bytes < 4 && self.in_loop {
+            for i in bytes..4 {
+                self.emit(Op::Stz, Operand::Absolute(offset(MULT_A, i)));
+                self.emit(Op::Stz, Operand::Absolute(offset(MULT_B, i)));
+            }
+        } else if bytes < 4 {
+            let clear = CLEAR_ROUTINES[usize::from(bytes) - 1];
+            self.emit(Op::Jsr, Operand::Label(clear.to_owned()));
+        }
+        if signed {
+            self.magnitude(width, &a, lhs)?;
+            self.magnitude(width, &b, rhs)?;
+        } else {
+            self.copy_value(width, &a, lhs)?;
+            self.copy_value(width, &b, rhs)?;
+        }
+        self.wait_math_unit(Op::Bmi);
+        if remainder {
+            self.copy_value(width, &a, &quotient)?;
+            self.wait_math_unit(Op::Bvs);
+            let subtract = |this: &mut Self| {
+                this.implied(Op::Sec);
+                this.byte_op(width, Op::Sbc, dst, lhs, &product)
+            };
+            let add = |this: &mut Self| {
+                this.implied(Op::Clc);
+                this.byte_op(width, Op::Adc, dst, lhs, &product)
+            };
+            if signed {
+                self.by_sign(width, &[lhs], add, subtract)?;
+            } else {
+                subtract(self)?;
+            }
+        } else {
+            let negated = |this: &mut Self| {
+                this.implied(Op::Sec);
+                this.byte_op(width, Op::Sbc, dst, &Value::Const(Const::U8(0)), &quotient)
+            };
+            let copied = |this: &mut Self| this.copy_value(width, dst, &quotient);
+            if signed {
+                self.by_sign(width, &[lhs, rhs], negated, copied)?;
+            } else {
+                copied(self)?;
+            }
+        }
+        self.release_math_unit();
+        Ok(())
+    }
+
+    /// A signed divide or remainder through [`DIVS_ROUTINE`]. The right
+    /// operand goes first: the left may be the accumulator.
+    fn divide_signed_by_call(
         &mut self,
         width: Width,
         remainder: bool,
@@ -1221,26 +1305,106 @@ impl<'a> RoutineLowerer<'a> {
         lhs: &Value,
         rhs: &Value,
     ) -> Result<(), LowerError> {
-        let (a, b, product) = math_registers();
-        let quotient = Value::Global(DIV_QUOTIENT.to_owned());
-        let bytes = width.size_bytes();
-        self.hold_math_unit();
-        self.copy_value(width, &a, lhs)?;
-        self.copy_value(width, &b, rhs)?;
-        for i in bytes..4 {
-            self.emit(Op::Stz, Operand::Absolute(offset(MULT_A, i)));
-            self.emit(Op::Stz, Operand::Absolute(offset(MULT_B, i)));
+        let arg = Value::Direct(ARG_SYMBOL.to_owned());
+        self.copy_value(width, &arg, rhs)?;
+        self.copy_value(width, &Value::Accumulator, lhs)?;
+        self.emit(Op::Ldx, Operand::imm_byte(width.size_bytes() as u8));
+        self.emit(Op::Jsr, Operand::Label(DIVS_ROUTINE.to_owned()));
+        let result = if remainder { ARG_SYMBOL } else { ACC_SYMBOL };
+        self.copy_value(width, dst, &Value::Direct(result.to_owned()))
+    }
+
+    /// `value`, or a copy of it in the base-page register `scratch` if any
+    /// of its bytes is in a CPU register.
+    fn in_memory(&mut self, width: Width, value: &Value, scratch: &str) -> Result<Value, LowerError> {
+        for i in 0..width.size_bytes() {
+            if matches!(self.value_byte(value, i)?, ByteSource::A | ByteSource::X | ByteSource::Y) {
+                let copy = Value::Direct(scratch.to_owned());
+                self.copy_value(width, &copy, value)?;
+                return Ok(copy);
+            }
         }
-        self.wait_math_unit(Op::Bmi);
-        if remainder {
-            self.copy_value(width, &a, &quotient)?;
-            self.wait_math_unit(Op::Bvs);
-            self.implied(Op::Sec);
-            self.byte_op(width, Op::Sbc, dst, lhs, &product)?;
-        } else {
-            self.copy_value(width, dst, &quotient)?;
+        Ok(value.clone())
+    }
+
+    /// Writes the magnitude of signed `value` to `target`: `value`, or
+    /// zero less it when negative (the most negative value's magnitude
+    /// still fits, unsigned).
+    fn magnitude(&mut self, width: Width, target: &Value, value: &Value) -> Result<(), LowerError> {
+        let copied = |this: &mut Self| this.copy_value(width, target, value);
+        let negated = |this: &mut Self| {
+            this.implied(Op::Sec);
+            this.byte_op(width, Op::Sbc, target, &Value::Const(Const::U8(0)), value)
+        };
+        self.by_sign(width, &[value], negated, copied)
+    }
+
+    /// Emits `negative` if an odd number of `values` (signed, `width`
+    /// wide) are negative, otherwise `other`: chosen while compiling when
+    /// they are constants, by testing sign bits for the rest. The case the
+    /// tested signs leave as it is falls through; the flipped one is at
+    /// `flip`.
+    fn by_sign(
+        &mut self,
+        width: Width,
+        values: &[&Value],
+        negative: impl FnOnce(&mut Self) -> Result<(), LowerError>,
+        other: impl FnOnce(&mut Self) -> Result<(), LowerError>,
+    ) -> Result<(), LowerError> {
+        let top = width.size_bytes() - 1;
+        let mut odd = false;
+        let mut tested = Vec::new();
+        for value in values {
+            match value {
+                Value::Const(constant) => odd ^= constant.byte(top) & 0x80 != 0,
+                _ => tested.push(*value),
+            }
         }
-        self.release_math_unit();
+        let (mut kept, mut flipped): (Box<dyn FnOnce(&mut Self) -> _>, Box<dyn FnOnce(&mut Self) -> _>) =
+            (Box::new(other), Box::new(negative));
+        if odd {
+            std::mem::swap(&mut kept, &mut flipped);
+        }
+        let (flip, done) = (self.local_label(), self.local_label());
+        match tested.as_slice() {
+            [] => return kept(self),
+            [value] => {
+                self.test_sign(width, value)?;
+                self.emit(Op::Lbmi, Operand::Label(flip.clone()));
+                kept(self)?;
+            }
+            [first, second] => {
+                let (keep, first_negative) = (self.local_label(), self.local_label());
+                self.test_sign(width, first)?;
+                self.emit(Op::Lbmi, Operand::Label(first_negative.clone()));
+                self.test_sign(width, second)?;
+                self.emit(Op::Lbmi, Operand::Label(flip.clone()));
+                self.out.push(Inst::Label(keep.clone()));
+                kept(self)?;
+                self.emit(Op::Lbra, Operand::Label(done.clone()));
+                self.out.push(Inst::Label(first_negative));
+                self.test_sign(width, second)?;
+                self.emit(Op::Lbmi, Operand::Label(keep));
+            }
+            _ => return Err(self.unsupported("a sign test of more than two values")),
+        }
+        if tested.len() == 1 {
+            self.emit(Op::Lbra, Operand::Label(done.clone()));
+        }
+        self.out.push(Inst::Label(flip));
+        flipped(self)?;
+        self.out.push(Inst::Label(done));
+        Ok(())
+    }
+
+    /// Sets N from the sign bit of `value` (`width` wide).
+    fn test_sign(&mut self, width: Width, value: &Value) -> Result<(), LowerError> {
+        let top = width.size_bytes() - 1;
+        let in_a = matches!(self.value_byte(value, top)?, ByteSource::A);
+        self.load_byte_to_a(value, top)?;
+        if in_a {
+            self.emit(Op::Cmp, Operand::imm_byte(0));
+        }
         Ok(())
     }
 
@@ -1666,14 +1830,6 @@ fn math_registers() -> (Value, Value, Value) {
         Value::Global(MULT_B.to_owned()),
         Value::Global(MULT_OUT.to_owned()),
     )
-}
-
-fn div_routine(signed: bool) -> &'static str {
-    if signed {
-        DIVS_ROUTINE
-    } else {
-        DIVU_ROUTINE
-    }
 }
 
 /// `name + i`, folding into an existing numeric offset (`sym+3` + 1 is
