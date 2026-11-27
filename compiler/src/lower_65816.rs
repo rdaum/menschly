@@ -217,7 +217,9 @@ fn lower_module_with_assignment(
     let assigned = apply_storage(module, &assignment);
     let mut lowered = lower_module_unoptimized(&assigned)?;
     lowered.add_storage_symbols(&assigned, &assignment);
-    Ok((optimize_module(&lowered), assignment))
+    let mut optimized = optimize_module(&lowered);
+    optimized.rename_clashing_symbols();
+    Ok((optimized, assignment))
 }
 
 fn lower_routine(routine: &Routine) -> Result<AsmRoutine, LowerError> {

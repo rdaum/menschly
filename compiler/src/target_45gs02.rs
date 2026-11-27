@@ -292,3 +292,26 @@ impl Ca65Inst for Inst {
         }
     }
 }
+
+impl crate::asm::RenameSymbols for Inst {
+    fn rename_symbols(&mut self) {
+        let Inst::Op(_, operand) = self else {
+            if let Inst::Label(label) = self {
+                *label = crate::asm::rename_tokens(label);
+            }
+            return;
+        };
+        match operand {
+            Operand::Implied => {}
+            Operand::Immediate(text)
+            | Operand::Absolute(text)
+            | Operand::AbsoluteX(text)
+            | Operand::Base(text)
+            | Operand::IndirectZ(text)
+            | Operand::IndirectY(text)
+            | Operand::FlatZ(text)
+            | Operand::Label(text)
+            | Operand::Indirect(text) => *text = crate::asm::rename_tokens(text),
+        }
+    }
+}

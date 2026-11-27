@@ -247,5 +247,8 @@ still be compiled and linked into the program.
 
 ## Names
 
-Module-level names (globals and routines) cannot be assembler register
-names: `a`, `x`, `y`, `z`, `s`, `q`, `sp`.
+Any name may be used. A module-level name (a global or a routine) that
+ca65 would read as a register (`a`, `x`, `y`, `z`, `s`, `q`, `sp`) or as an
+instruction (`row`, `bit`, `lda`, ...) is renamed in the output to
+`_m_<name>`, the same way in every module, so exports still meet their
+imports; inline assembly that refers to such a variable uses that name.

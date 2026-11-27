@@ -2269,12 +2269,6 @@ fn lower_module(source: SourceModule) -> Result<Module, FrontendError> {
         kind: entry.kind,
         routine: entry.routine.clone(),
     });
-    for global in &source.globals {
-        check_symbol_name("global", &global.name)?;
-    }
-    for routine in &source.routines {
-        check_symbol_name("routine", &routine.name)?;
-    }
     let consts: BTreeMap<String, i64> = source
         .consts
         .iter()
@@ -4778,6 +4772,14 @@ const ASSEMBLER_MNEMONICS: &[&str] = &[
     "tza", "wai", "wdm", "xba", "xce",
 ];
 
+/// Whether ca65 would read `name` as a register or an instruction rather
+/// than a symbol: such names are renamed in the output (see
+/// `asm::rename_clashing_symbols`).
+pub(crate) fn clashes_with_assembler(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ASSEMBLER_RESERVED.contains(&lower.as_str()) || is_mnemonic(&lower)
+}
+
 fn is_mnemonic(name: &str) -> bool {
     if ASSEMBLER_MNEMONICS.contains(&name) {
         return true;
@@ -4786,20 +4788,6 @@ fn is_mnemonic(name: &str) -> bool {
     name.len() == 4 && numbered.contains(&&name[..3]) && matches!(name.as_bytes()[3], b'0'..=b'7')
 }
 
-fn check_symbol_name(kind: &str, name: &str) -> Result<(), FrontendError> {
-    let lower = name.to_ascii_lowercase();
-    if ASSEMBLER_RESERVED.contains(&lower.as_str()) {
-        return Err(FrontendError::Type(format!(
-            "{kind} name `{name}` is reserved by the assembler (a register name)"
-        )));
-    }
-    if is_mnemonic(&lower) {
-        return Err(FrontendError::Type(format!(
-            "{kind} name `{name}` is reserved by the assembler (an instruction name)"
-        )));
-    }
-    Ok(())
-}
 
 fn insert_binding(
     bindings: &mut BTreeMap<String, Binding>,
@@ -6480,28 +6468,6 @@ mod tests {
             ",
         );
         assert!(error.contains("division by constant zero"), "{error}");
-        let error = compile_error(
-            "
-            module Names
-            var q: u16
-            export procedure main()
-                return
-            end
-            ",
-        );
-        assert!(error.contains("reserved by the assembler"), "{error}");
-        for name in ["BIT", "lda", "smb3", "Rtn"] {
-            let error = compile_error(&format!(
-                "
-                module Names
-                const {name}: [2]u8 = [1, 2]
-                export procedure main()
-                    return
-                end
-                "
-            ));
-            assert!(error.contains("an instruction name"), "{name}: {error}");
-        }
     }
 
     #[test]

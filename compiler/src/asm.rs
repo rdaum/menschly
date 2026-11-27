@@ -306,3 +306,108 @@ impl<I> AsmRoutine<I> {
         self
     }
 }
+
+// ---- names ca65 would misread ------------------------------------------------
+
+/// The symbol `name` goes by in the output: a name ca65 reads as a
+/// register or an instruction (`x`, `row`, `bit`) gets a prefix, the same
+/// in every module, so an exported one still meets its imports.
+pub fn output_name(name: &str) -> String {
+    if crate::frontend::clashes_with_assembler(name) {
+        format!("_m_{name}")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// `text` (an operand: a symbol, `name+3`, `<name`, ...) with each symbol in
+/// it given its output name; numbers (`$a0`, `12`) are left alone.
+pub fn rename_tokens(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut after_number_sign = false;
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            let mut word = String::from(ch);
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_alphanumeric() || next == '_' {
+                    word.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if after_number_sign {
+                out.push_str(&word);
+            } else {
+                out.push_str(&output_name(&word));
+            }
+            after_number_sign = false;
+        } else if ch.is_ascii_digit() {
+            // The rest of a number (hex digits included) is not a symbol.
+            out.push(ch);
+            after_number_sign = true;
+        } else {
+            out.push(ch);
+            after_number_sign = ch == '$' || ch == '%';
+        }
+    }
+    out
+}
+
+/// Instructions whose symbols can be renamed (inline assembly is left as
+/// written).
+pub trait RenameSymbols {
+    fn rename_symbols(&mut self);
+}
+
+impl<I: RenameSymbols> AsmModule<I> {
+    /// Gives every symbol in the module its output name (`output_name`).
+    pub fn rename_clashing_symbols(&mut self) {
+        for symbol in &mut self.direct_symbols {
+            symbol.name = rename_tokens(&symbol.name);
+            if let Some((base, _)) = &mut symbol.alias {
+                *base = rename_tokens(base);
+            }
+        }
+        for symbol in &mut self.static_symbols {
+            symbol.name = rename_tokens(&symbol.name);
+        }
+        for data in &mut self.static_data {
+            data.name = rename_tokens(&data.name);
+            for item in &mut data.items {
+                if let DataItem::Address { symbol, .. } = item {
+                    *symbol = rename_tokens(symbol);
+                }
+            }
+        }
+        for symbol in &mut self.fixed_symbols {
+            symbol.name = rename_tokens(&symbol.name);
+        }
+        for symbol in &mut self.banked_symbols {
+            symbol.name = rename_tokens(&symbol.name);
+        }
+        for vector in &mut self.vectors {
+            vector.routine = rename_tokens(&vector.routine);
+        }
+        for name in self
+            .external_routines
+            .iter_mut()
+            .chain(self.external_direct_symbols.iter_mut())
+        {
+            *name = rename_tokens(name);
+        }
+        for data in &mut self.external_data {
+            data.name = rename_tokens(&data.name);
+        }
+        if let Some(entry) = &mut self.entry {
+            entry.routine = rename_tokens(&entry.routine);
+        }
+        for routine in &mut self.routines {
+            routine.name = rename_tokens(&routine.name);
+            for inst in &mut routine.insts {
+                inst.rename_symbols();
+            }
+        }
+    }
+}

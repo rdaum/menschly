@@ -3358,6 +3358,58 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
     );
 }
 
+/// Names ca65 would read as registers or instructions (`x`, `row`, `bit`)
+/// work as ordinary names, across modules too.
+#[test]
+fn assembler_names_work_across_modules() {
+    let library = "
+        module Clashes
+        export var x: u8
+        var row: u16
+        export function bit(): u8
+            row = u16(x) * 3
+            return u8(row) + 1
+        end
+    ";
+    let caller = "
+        module ClashTest
+        import Clashes
+        fixed($0e00) volatile var out: [2]u8
+        export function main(): u8
+            x = 13
+            out[0] = bit()
+            out[1] = x
+            return 0
+        end
+    ";
+    let sources = [
+        mega65::KernelModule {
+            name: "0-caller".to_owned(),
+            source: caller.to_owned(),
+            window: None,
+        },
+        mega65::KernelModule {
+            name: "1-clashes".to_owned(),
+            source: library.to_owned(),
+            window: None,
+        },
+    ];
+    let modules = mega65::compile_kernel_modules(&sources).expect("modules should compile");
+    let refs = modules
+        .iter()
+        .map(|(name, asm)| (name.as_str(), asm.as_str()))
+        .collect::<Vec<_>>();
+    let dir = temp_dir("assembler-names");
+    let rom = mega65::build_rom(&dir, &refs).expect("modules should link");
+    let Some(xemu) = mega65::find_xemu() else {
+        eprintln!("skipping assembler-names: Xemu not found (set MENSCH_XMEGA65)");
+        return;
+    };
+    let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
+    assert_eq!(run.exit_code, 0);
+    assert_eq!(&run.memory[0x0e00..0x0e02], &[40, 13]);
+}
+
 // ---- benchmarks ----------------------------------------------------------
 //
 // Compiled code timed in Xemu: `body` runs between two readings of the

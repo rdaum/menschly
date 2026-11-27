@@ -183,6 +183,7 @@ fn lower_with_assignment(
         }
     }
     out.add_storage_symbols(&assigned, &assignment);
+    out.rename_clashing_symbols();
     Ok((out, assignment))
 }
 
@@ -1645,6 +1646,33 @@ mod tests {
             !write.contains("__m65_farp") && !write.contains("adc"),
             "{write}"
         );
+    }
+
+    #[test]
+    fn names_the_assembler_would_misread_are_renamed() {
+        let source = "
+            module Names
+            var q: u16
+            var row: u8
+            const BIT: [2]u8 = [1, 2]
+            function lda(): u8
+                return BIT[1]
+            end
+            export procedure main()
+                q = 1
+                row = lda()
+                return
+            end
+        ";
+        for target in [Target::Mega65, Target::W65816] {
+            let asm = compile_source(source, target, DEFAULT_DIRECT_PAGE_BUDGET)
+                .unwrap()
+                .asm;
+            for name in ["q", "row", "BIT", "lda"] {
+                assert!(asm.contains(&format!("_m_{name}")), "{target:?} {name}:\n{asm}");
+            }
+            assert!(!asm.contains("a:q\n") && !asm.contains(" row\n"), "{target:?}:\n{asm}");
+        }
     }
 
     #[test]

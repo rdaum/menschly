@@ -147,3 +147,43 @@ impl fmt::Display for Symbol {
         }
     }
 }
+
+impl Symbol {
+    fn rename(&mut self) {
+        if let Symbol::Named(name) = self {
+            *name = crate::asm::rename_tokens(name);
+        }
+    }
+}
+
+impl crate::asm::RenameSymbols for AsmInst {
+    fn rename_symbols(&mut self) {
+        use AsmInst::*;
+        match self {
+            Lda(operand) | Ldx(operand) | Ldy(operand) | Sta(operand) | Stx(operand)
+            | Sty(operand) | Stz(operand) | Adc(operand) | Sbc(operand) | And(operand)
+            | Ora(operand) | Eor(operand) | Inc(operand) | Dec(operand) | Cmp(operand)
+            | Cpx(operand) => match operand {
+                Operand::Immediate(_) | Operand::StackRelative(_)
+                | Operand::StackRelativeIndirectIndexedY(_) => {}
+                Operand::ImmediateSymbol(symbol)
+                | Operand::Absolute(symbol)
+                | Operand::AbsoluteIndexedX(symbol)
+                | Operand::AbsoluteLong(symbol)
+                | Operand::Direct(symbol)
+                | Operand::DirectIndexedX(symbol)
+                | Operand::DirectIndexedY(symbol)
+                | Operand::IndirectDirect(symbol)
+                | Operand::IndirectDirectIndexedY(symbol)
+                | Operand::IndirectLongDirect(symbol)
+                | Operand::IndirectLongDirectIndexedY(symbol) => symbol.rename(),
+            },
+            Pea(symbol) => symbol.rename(),
+            Label(name) | Per(name) | Beq(name) | Bne(name) | Bcc(name) | Bcs(name)
+            | Bra(name) | Brl(name) | Jsr(name) | Jsl(name) => {
+                *name = crate::asm::rename_tokens(name)
+            }
+            _ => {}
+        }
+    }
+}
