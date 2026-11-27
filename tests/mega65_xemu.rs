@@ -3358,110 +3358,357 @@ fn bubble_bubbles_shoot_float_trap_and_burst() {
     );
 }
 
-/// A benchmark of compiled code: a rotozoomer-style column loop in plain
-/// Mensch (a texel read through a far pointer, two 16-bit writes through
-/// another, 16- and 32-bit steps), 10,000 iterations timed in raster lines
-/// (64 µs each) by the machine's frame counter and raster. Prints the time;
-/// fails if it grows past LIMIT, so a slower code generator is noticed.
-#[test]
-fn texel_loop_benchmark() {
-    const LIMIT: u32 = 1170;
-    let caller = "
-        module LoopBench
-        fixed($d7fa) volatile var frame_counter: u8
-        fixed($d012) volatile var raster_low: u8
-        fixed($d011) volatile var raster_high: u8
-        fixed($0e00) volatile var out: [2]u16
+// ---- benchmarks ----------------------------------------------------------
+//
+// Compiled code timed in Xemu: `body` runs between two readings of the
+// machine's frame counter and raster, and the time in raster lines (64 µs
+// each) is printed. Each benchmark fails past its limit (about 10% over
+// what it takes now), so a slower code generator is noticed.
 
-        var start_at: u32
-        var u0: u16
-        var v0: u16
-        var du: u16
-        var dv: u16
-        var frames: u8
-        var line: u16
+/// Builds and runs a benchmark module (its `imports`, declarations,
+/// `setup` and timed `body`) with `extra` modules; the raster lines taken,
+/// or `None` without Xemu.
+fn bench_lines(
+    name: &str,
+    imports: &str,
+    decls: &str,
+    setup: &str,
+    body: &str,
+    extra: Vec<(&str, String)>,
+) -> Option<u32> {
+    let caller = format!(
+        "
+module Bench
+{imports}
+fixed($d7fa) volatile var frame_counter: u8
+fixed($d012) volatile var raster_low: u8
+fixed($d011) volatile var raster_high: u8
+fixed($0e00) volatile var out: [2]u16
+var bench_frames: u8
+var bench_line: u16
 
-        procedure column()
-            var at: u32
-            var u: u16
-            var v: u16
-            var cell: far ^u16
-            var texel: u16
-            var texture: far ^u8
-            var block_y: u8
-            at = start_at
-            u = u0
-            v = v0
-            block_y = 0
-            while block_y != 100
-                texture = $10000 + u32(((v >> 8) & $7f) << 8) + u32(u >> 8)
-                texel = u16(texture^)
-                texel = texel | (texel << 8)
-                cell = at
-                cell^ = texel
-                cell = at + 8
-                cell^ = texel
-                at = at + 16
-                u = u + du
-                v = v + dv
-                block_y = block_y + 1
-            end
-            return
+# The frame counter and raster line, read until they agree.
+procedure bench_now()
+    repeat
+        bench_frames = frame_counter
+        bench_line = u16(raster_low)
+        if raster_high & $80
+            bench_line = bench_line + 256
         end
+    until bench_frames == frame_counter
+    return
+end
 
-        # The frame counter and raster line, read until they agree.
-        procedure now()
-            repeat
-                frames = frame_counter
-                line = u16(raster_low)
-                if raster_high & $80
-                    line = line + 256
-                end
-            until frames == frame_counter
-            return
-        end
+{decls}
 
-        export function main(): u8
-            var first_frames: u8
-            var first_line: u16
-            var c: u8
-            du = 300
-            dv = 120
-            now()
-            first_frames = frames
-            first_line = line
-            c = 0
-            while c != 100
-                start_at = $40000 + u32(u16(c >> 3) * 1600) + u32((c << 1) & 7)
-                u0 = u16(c) * 77
-                v0 = u16(c) * 31
-                column()
-                c = c + 1
-            end
-            now()
-            out[0] = u16(frames - first_frames) * 312 + line - first_line
-            return 0
-        end
-        ";
-    let sources = [mega65::KernelModule {
+export function main(): u8
+    var first_frames: u8
+    var first_line: u16
+{setup}
+    bench_now()
+    first_frames = bench_frames
+    first_line = bench_line
+{body}
+    bench_now()
+    out[0] = u16(bench_frames - first_frames) * 312 + bench_line - first_line
+    return 0
+end
+"
+    );
+    let mut sources = vec![mega65::KernelModule {
         name: "0-bench".to_owned(),
-        source: caller.to_owned(),
+        source: caller,
         window: None,
     }];
+    for (index, (module, source)) in extra.into_iter().enumerate() {
+        sources.push(mega65::KernelModule {
+            name: format!("{}-{module}", index + 1),
+            source,
+            window: None,
+        });
+    }
     let modules = mega65::compile_kernel_modules(&sources).expect("benchmark should compile");
     let refs = modules
         .iter()
         .map(|(name, asm)| (name.as_str(), asm.as_str()))
         .collect::<Vec<_>>();
-    let dir = temp_dir("texel-loop-benchmark");
+    let dir = temp_dir(name);
     let rom = mega65::build_rom(&dir, &refs).expect("benchmark should link");
     let Some(xemu) = mega65::find_xemu() else {
-        eprintln!("skipping texel-loop-benchmark: Xemu not found (set MENSCH_XMEGA65)");
-        return;
+        eprintln!("skipping {name}: Xemu not found (set MENSCH_XMEGA65)");
+        return None;
     };
     let run = mega65::run_rom(&xemu, &dir, &rom, Duration::from_secs(30)).unwrap();
     assert_eq!(run.exit_code, 0);
     let lines = u32::from(u16::from_le_bytes([run.memory[0x0e00], run.memory[0x0e01]]));
-    eprintln!("texel loop: 10,000 iterations in {lines} raster lines");
-    assert!(lines > 0 && lines <= LIMIT, "texel loop took {lines} raster lines (limit {LIMIT})");
+    eprintln!("{name}: {lines} raster lines");
+    Some(lines)
+}
+
+fn repo_file(path: &str) -> String {
+    std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path))
+        .expect("source should be readable")
+}
+
+fn assert_within(name: &str, lines: Option<u32>, limit: u32) {
+    if let Some(lines) = lines {
+        assert!(lines > 0 && lines <= limit, "{name} took {lines} raster lines (limit {limit})");
+    }
+}
+
+/// A rotozoomer-style column loop in plain Mensch: a texel read through a
+/// far pointer, two 16-bit writes through another, 16- and 32-bit steps;
+/// 10,000 iterations.
+#[test]
+fn texel_loop_benchmark() {
+    let decls = "
+var start_at: u32
+var u0: u16
+var v0: u16
+var du: u16
+var dv: u16
+
+procedure column()
+    var at: u32
+    var u: u16
+    var v: u16
+    var cell: far ^u16
+    var texel: u16
+    var texture: far ^u8
+    var block_y: u8
+    at = start_at
+    u = u0
+    v = v0
+    block_y = 0
+    while block_y != 100
+        texture = $10000 + u32(((v >> 8) & $7f) << 8) + u32(u >> 8)
+        texel = u16(texture^)
+        texel = texel | (texel << 8)
+        cell = at
+        cell^ = texel
+        cell = at + 8
+        cell^ = texel
+        at = at + 16
+        u = u + du
+        v = v + dv
+        block_y = block_y + 1
+    end
+    return
+end
+";
+    let setup = "
+    var c: u8
+    du = 300
+    dv = 120
+";
+    let body = "
+    c = 0
+    while c != 100
+        start_at = $40000 + u32(u16(c >> 3) * 1600) + u32((c << 1) & 7)
+        u0 = u16(c) * 77
+        v0 = u16(c) * 31
+        column()
+        c = c + 1
+    end
+";
+    let lines = bench_lines("texel-loop-benchmark", "", decls, setup, body, vec![]);
+    assert_within("texel loop", lines, 1170);
+}
+
+/// The demo's dots past the glass, in the same style: module variables,
+/// table lookups, branches, a pixel address from a table of column offsets
+/// and two plots a dot; 64 columns of 50 samples, four times over.
+#[test]
+fn dot_loop_benchmark() {
+    let decls = "
+const SINE: [256]i8 = [SINE_TABLE]
+const LEVEL: [64]u8 = [LEVEL_TABLE]
+const COLUMN_OFFSET: [40]u16 = [OFFSET_TABLE]
+const DOTS = 64
+const RUNNER_Y = 70
+
+var t: u16
+var sx: i16
+var ry: i16
+var y_end: i16
+var past: i16
+var push: i16
+var dy: i16
+var fade: i16
+var thin: i16
+var wave: u8
+var hash: u16
+var level: i16
+var px: i16
+var py: i16
+var pixel: u8
+var source: far ^u8
+var dot: far ^u8
+
+function chunky_at(x: u16, y: u16): u32
+    return $40000 + u32(COLUMN_OFFSET[u8(x >> 3)] + (y << 3) + (x & 7))
+end
+
+procedure dots()
+    past = sx - 100
+    push = sx + ((past * past) >> 5)
+    dy = (i16(SINE[u8(u16(sx) * 2 + t * 3)]) * past) >> 9
+    fade = past >> 3
+    thin = past >> 2
+    wave = u8(t << 2) + u8(RUNNER_Y * 3)
+    hash = u16(sx) * 7 + u16(RUNNER_Y) * 13 + t
+    source = $10000 + u32(u16(sx) * 100)
+    ry = RUNNER_Y
+    y_end = RUNNER_Y + 100
+    while ry < y_end
+        pixel = source^
+        if pixel
+            level = i16(LEVEL[pixel & 63]) - fade
+            if level > 0 and i16(hash & 31) >= thin
+                px = push + i16(SINE[wave] >> 3)
+                py = ry + dy
+                if px >= 1 and px < 320 and py >= 0 and py < 200
+                    dot = chunky_at(u16(px), u16(py))
+                    dot^ = DOTS + u8(level)
+                    if level > 1
+                        if (px & 7) == 0
+                            dot = dot - 1593
+                        else
+                            dot = dot - 1
+                        end
+                        dot^ = DOTS + u8(level >> 1)
+                    end
+                end
+            end
+        end
+        source = source + 2
+        wave = wave + 6
+        hash = hash + 26
+        ry = ry + 2
+    end
+    return
+end
+"
+    .replace("SINE_TABLE", "0, 3, 6, 9, 12, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46, 49, 51, 54, 57, 60, 63, 65, 68, 71, 73, 76, 78, 81, 83, 85, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 107, 109, 111, 112, 113, 115, 116, 117, 118, 120, 121, 122, 122, 123, 124, 125, 125, 126, 126, 126, 127, 127, 127, 127, 127, 127, 127, 126, 126, 126, 125, 125, 124, 123, 122, 122, 121, 120, 118, 117, 116, 115, 113, 112, 111, 109, 107, 106, 104, 102, 100, 98, 96, 94, 92, 90, 88, 85, 83, 81, 78, 76, 73, 71, 68, 65, 63, 60, 57, 54, 51, 49, 46, 43, 40, 37, 34, 31, 28, 25, 22, 19, 16, 12, 9, 6, 3, 0, -3, -6, -9, -12, -16, -19, -22, -25, -28, -31, -34, -37, -40, -43, -46, -49, -51, -54, -57, -60, -63, -65, -68, -71, -73, -76, -78, -81, -83, -85, -88, -90, -92, -94, -96, -98, -100, -102, -104, -106, -107, -109, -111, -112, -113, -115, -116, -117, -118, -120, -121, -122, -122, -123, -124, -125, -125, -126, -126, -126, -127, -127, -127, -127, -127, -127, -127, -126, -126, -126, -125, -125, -124, -123, -122, -122, -121, -120, -118, -117, -116, -115, -113, -112, -111, -109, -107, -106, -104, -102, -100, -98, -96, -94, -92, -90, -88, -85, -83, -81, -78, -76, -73, -71, -68, -65, -63, -60, -57, -54, -51, -49, -46, -43, -40, -37, -34, -31, -28, -25, -22, -19, -16, -12, -9, -6, -3")
+    .replace("LEVEL_TABLE", "0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15")
+    .replace("OFFSET_TABLE", "0, 1600, 3200, 4800, 6400, 8000, 9600, 11200, 12800, 14400, 16000, 17600, 19200, 20800, 22400, 24000, 25600, 27200, 28800, 30400, 32000, 33600, 35200, 36800, 38400, 40000, 41600, 43200, 44800, 46400, 48000, 49600, 51200, 52800, 54400, 56000, 57600, 59200, 60800, 62400");
+    let setup = "
+    var fill: far ^u8
+    var i: u16
+    var c: u8
+    var pass: u8
+    # Something to draw: a pattern of palette entries, zero now and then.
+    fill = $10000
+    i = 0
+    while i != 12800
+        fill^ = u8(i * 7) & 63
+        fill = fill + 1
+        i = i + 1
+    end
+";
+    let body = "
+    pass = 0
+    while pass != 4
+        t = u16(pass) * 5
+        c = 0
+        while c != 64
+            sx = 110 + i16(c)
+            dots()
+            c = c + 1
+        end
+        pass = pass + 1
+    end
+";
+    let lines = bench_lines("dot-loop-benchmark", "", &decls, setup, body, vec![]);
+    assert_within("dot loop", lines, 3680);
+}
+
+/// DMA set-up: 2,000 small fills through lib/vic4, so the time is mostly
+/// building the job.
+#[test]
+fn dma_setup_benchmark() {
+    let setup = "
+    var i: u16
+";
+    let body = "
+    i = 0
+    while i != 2000
+        dma_fill($40000 + u32(i << 3), u8(i), 8)
+        i = i + 1
+    end
+";
+    let lines = bench_lines(
+        "dma-setup-benchmark",
+        "import Vic4",
+        "",
+        setup,
+        body,
+        vec![("vic4", repo_file("lib/vic4.mensch"))],
+    );
+    assert_within("dma setup", lines, 560);
+}
+
+/// Game code: the Bubble Bobble port's physics stepping and walking ten
+/// bodies around a room for 100 frames.
+#[test]
+fn physics_benchmark() {
+    let decls = "
+var room_map: [832]u8
+
+procedure build()
+    var row: u8
+    var col: u8
+    var i: u16
+    i = 0
+    for row = 0 to 25
+        for col = 0 to 31
+            room_map[i] = 0
+            if col < 2 or col >= 30
+                room_map[i] = 1
+            elsif row == 25 or (row == 20 and col >= 8 and col <= 15)
+                room_map[i] = 5
+            end
+            i = i + 1
+        end
+    end
+    return
+end
+";
+    let setup = "
+    var body: u8
+    var frame: u8
+    var stopped: u8
+    build()
+    physics_room(u32(addr(room_map)))
+    body = 0
+    while body != 10
+        body_place(body, 30 + i16(body) * 20, 40)
+        body = body + 1
+    end
+";
+    let body = "
+    frame = 0
+    while frame != 100
+        body = 0
+        while body != 10
+            if body & 1
+                stopped = body_walk(body, 16)
+            else
+                stopped = body_walk(body, -16)
+            end
+            body_step(body)
+            body = body + 1
+        end
+        frame = frame + 1
+    end
+";
+    let lines = bench_lines(
+        "physics-benchmark",
+        "import BubblePhysics",
+        decls,
+        setup,
+        body,
+        vec![("physics", repo_file("games/bubble-bobble/src/bubble-physics.mensch"))],
+    );
+    assert_within("physics", lines, 1880);
 }
