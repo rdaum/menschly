@@ -127,6 +127,7 @@ pub fn optimize_routine_with(
             eliminate_redundant(&mut insts, z_zero_on_entry, flag_routines, returns, plain_memory);
         changed |= carry_increments(&mut insts, returns, plain_memory);
         changed |= loop_counters_in_x(&mut insts, returns);
+        changed |= overwritten_variable_stores(&mut insts, plain_memory);
         if !changed && insts.len() == before {
             break;
         }
@@ -451,6 +452,78 @@ fn live_after(insts: &[Inst], returns: Returns) -> Vec<Locs> {
             return live_out;
         }
     }
+}
+
+// ---- overwritten stores to variables ----------------------------------------
+
+/// Deletes a store to one of the module's ordinary variables that is
+/// stored again, before anything could read it, in the same straight run
+/// of code (no label, branch, call or return between). Anything that might
+/// read it ends the wait: a read of that byte or (indexed) of that variable,
+/// any access through a pointer, a store elsewhere that may be hardware
+/// (DMA reads memory), inline assembly.
+fn overwritten_variable_stores(insts: &mut Vec<Inst>, plain_memory: &HashSet<String>) -> bool {
+    if plain_memory.is_empty() {
+        return false;
+    }
+    let plain_byte = |operand: &Operand| match operand {
+        Operand::Base(symbol) | Operand::Absolute(symbol)
+            if plain_memory.contains(split_offset(symbol).0) =>
+        {
+            Some(symbol.clone())
+        }
+        _ => None,
+    };
+    let mut waiting: HashMap<String, usize> = HashMap::new();
+    let mut dead = vec![false; insts.len()];
+    for (i, inst) in insts.iter().enumerate() {
+        let Inst::Op(op, operand) = inst else {
+            waiting.clear();
+            continue;
+        };
+        if op.branch_forms().is_some() || matches!(op, Op::Jsr | Op::Rts | Op::Rtn | Op::Rti) {
+            waiting.clear();
+            continue;
+        }
+        let stores = matches!(op, Op::Sta | Op::Stx | Op::Sty | Op::Stz);
+        match operand {
+            Operand::Base(symbol) | Operand::Absolute(symbol) => {
+                if let Some(byte) = plain_byte(operand) {
+                    if stores {
+                        if let Some(earlier) = waiting.insert(byte, i) {
+                            dead[earlier] = true;
+                        }
+                    } else {
+                        // A read (or read-modify-write) of the byte.
+                        waiting.remove(&byte);
+                    }
+                } else if stores && !is_compiler_symbol(symbol) {
+                    // May be hardware that reads memory.
+                    waiting.clear();
+                }
+            }
+            Operand::AbsoluteX(symbol) => {
+                let name = split_offset(symbol).0;
+                waiting.retain(|byte, _| split_offset(byte).0 != name);
+                if stores && !plain_memory.contains(name) && !is_compiler_symbol(symbol) {
+                    waiting.clear();
+                }
+            }
+            Operand::IndirectY(_) | Operand::IndirectZ(_) | Operand::FlatZ(_) | Operand::Indirect(_) => {
+                waiting.clear();
+            }
+            _ => {}
+        }
+    }
+    if !dead.contains(&true) {
+        return false;
+    }
+    let mut i = 0;
+    insts.retain(|_| {
+        i += 1;
+        !dead[i - 1]
+    });
+    true
 }
 
 // ---- loop counters in X -----------------------------------------------------
@@ -1810,6 +1883,28 @@ mod tests {
 
     fn label(name: &str) -> Operand {
         Operand::Label(name.to_owned())
+    }
+
+    #[test]
+    fn overwritten_stores_to_variables_go() {
+        let plain: HashSet<String> = ["count".to_owned()].into_iter().collect();
+        let count = Operand::Absolute("count".to_owned());
+        let run = |between: Vec<Inst>| {
+            let mut insts = vec![op(Op::Stz, count.clone())];
+            insts.extend(between);
+            insts.push(op(Op::Lda, Operand::Absolute("user".to_owned())));
+            insts.push(op(Op::Sta, count.clone()));
+            insts.push(Inst::implied(Op::Rts));
+            optimize_routine_with(insts, true, &HashSet::new(), false, Some(0), &plain)
+        };
+        let first_store = op(Op::Stz, count.clone());
+        // Stored again with nothing reading it between: the first goes.
+        assert!(!run(vec![]).contains(&first_store));
+        // A call might read it.
+        assert!(run(vec![op(Op::Jsr, label("f"))]).contains(&first_store));
+        // So might a read through a pointer.
+        let pointer = vec![op(Op::Lda, Operand::FlatZ("__m65_farp".to_owned())), op(Op::Sta, Operand::Absolute("out".to_owned()))];
+        assert!(run(pointer).contains(&first_store));
     }
 
     #[test]
