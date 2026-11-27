@@ -130,6 +130,7 @@ pub fn lower_module_with_storage_budget(
 ) -> Result<(AsmModule, StorageAssignment), LowerError> {
     let mut module = module.clone();
     crate::inline::inline_small_routines(&mut module);
+    crate::narrow::narrow_module(&mut module);
     lower_with_assignment(
         &module,
         assign_storage_with_options(&module, Some(direct_page_budget), STORAGE_OPTIONS),
@@ -1067,17 +1068,27 @@ impl<'a> RoutineLowerer<'a> {
             }
             bit_shift = 0;
         }
+        // The bytes the whole-byte move filled with zeros stay zero as the
+        // bits shift (the sign fill of an arithmetic shift does not), so
+        // the passes leave them out.
+        let (low, high) = if left {
+            (byte_shift.min(bytes), bytes)
+        } else if signed {
+            (0, bytes)
+        } else {
+            (0, bytes.saturating_sub(byte_shift))
+        };
         for _ in 0..bit_shift {
             if left {
-                for i in 0..bytes {
-                    let op = if i == 0 { Op::Asl } else { Op::Rol };
+                for i in low..high {
+                    let op = if i == low { Op::Asl } else { Op::Rol };
                     let target = operand(self, i);
                     self.emit(op, target);
                 }
             } else {
-                for i in (0..bytes).rev() {
+                for i in (low..high).rev() {
                     let target = operand(self, i);
-                    let op = if i + 1 != bytes {
+                    let op = if i + 1 != high {
                         Op::Ror
                     } else if signed {
                         // Carry in a copy of the sign bit.

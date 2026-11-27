@@ -6,6 +6,7 @@ pub mod frontend;
 pub mod inline;
 pub mod ir;
 pub mod lower_45gs02;
+pub mod narrow;
 pub mod lower_65816;
 pub mod mega65;
 pub mod optimize_45gs02;
