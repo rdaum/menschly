@@ -143,6 +143,7 @@ pub fn lower_module_with_storage_budget(
     let mut module = module.clone();
     crate::inline::inline_small_routines(&mut module);
     crate::narrow::narrow_module(&mut module);
+    crate::forward::forward_module(&mut module);
     lower_with_assignment(
         &module,
         assign_storage_with_options(&module, Some(direct_page_budget), STORAGE_OPTIONS),

@@ -3,6 +3,7 @@ pub mod ca65;
 pub mod driver;
 pub mod fixtures;
 pub mod frontend;
+pub mod forward;
 pub mod inline;
 pub mod ir;
 pub mod lower_45gs02;
