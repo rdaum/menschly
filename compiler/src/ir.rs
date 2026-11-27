@@ -896,3 +896,262 @@ impl fmt::Display for Label {
         f.write_str(&self.0)
     }
 }
+
+impl IrInst {
+    /// This instruction with every value it reads or writes (addresses'
+    /// included) replaced by `f` of it.
+    pub fn map_values(&self, f: &mut dyn FnMut(&Value) -> Value) -> IrInst {
+    match self {
+        IrInst::InlineAsm(_) => self.clone(),
+        IrInst::Move { width, dst, src } => IrInst::Move {
+            width: *width,
+            dst: f(dst),
+            src: f(src),
+        },
+        IrInst::LoadConst { dst, value } => IrInst::LoadConst {
+            dst: f(dst),
+            value: *value,
+        },
+        IrInst::LoadAddress { dst, symbol, width } => IrInst::LoadAddress {
+            dst: f(dst),
+            symbol: symbol.clone(),
+            width: *width,
+        },
+        IrInst::Load { width, dst, addr } => IrInst::Load {
+            width: *width,
+            dst: f(dst),
+            addr: addr.map_values(f),
+        },
+        IrInst::Store { width, addr, src } => IrInst::Store {
+            width: *width,
+            addr: addr.map_values(f),
+            src: f(src),
+        },
+        IrInst::Add {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => IrInst::Add {
+            width: *width,
+            dst: f(dst),
+            lhs: f(lhs),
+            rhs: f(rhs),
+        },
+        IrInst::Sub {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => IrInst::Sub {
+            width: *width,
+            dst: f(dst),
+            lhs: f(lhs),
+            rhs: f(rhs),
+        },
+        IrInst::BitAnd {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => IrInst::BitAnd {
+            width: *width,
+            dst: f(dst),
+            lhs: f(lhs),
+            rhs: f(rhs),
+        },
+        IrInst::BitOr {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => IrInst::BitOr {
+            width: *width,
+            dst: f(dst),
+            lhs: f(lhs),
+            rhs: f(rhs),
+        },
+        IrInst::ShiftLeft {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => IrInst::ShiftLeft {
+            width: *width,
+            dst: f(dst),
+            lhs: f(lhs),
+            rhs: f(rhs),
+        },
+        IrInst::ShiftRight {
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => IrInst::ShiftRight {
+            width: *width,
+            dst: f(dst),
+            lhs: f(lhs),
+            rhs: f(rhs),
+        },
+        IrInst::Dec { width, value } => IrInst::Dec {
+            width: *width,
+            value: f(value),
+        },
+        IrInst::Inc { width, value } => IrInst::Inc {
+            width: *width,
+            value: f(value),
+        },
+        IrInst::Compare {
+            width,
+            signed,
+            lhs,
+            rhs,
+        } => IrInst::Compare {
+            width: *width,
+            signed: *signed,
+            lhs: f(lhs),
+            rhs: f(rhs),
+        },
+        IrInst::Binary {
+            op,
+            width,
+            dst,
+            lhs,
+            rhs,
+        } => IrInst::Binary {
+            op: *op,
+            width: *width,
+            dst: f(dst),
+            lhs: f(lhs),
+            rhs: f(rhs),
+        },
+        IrInst::SignExtend {
+            width,
+            src_width,
+            dst,
+            src,
+        } => IrInst::SignExtend {
+            width: *width,
+            src_width: *src_width,
+            dst: f(dst),
+            src: f(src),
+        },
+        IrInst::CallIndirect {
+            target,
+            abi,
+            result,
+        } => IrInst::CallIndirect {
+            target: f(target),
+            abi: *abi,
+            result: result
+                .as_ref()
+                .map(|(width, dst)| (*width, f(dst))),
+        },
+        IrInst::BranchIfZero { value, target } => IrInst::BranchIfZero {
+            value: f(value),
+            target: target.clone(),
+        },
+        IrInst::Push { width, value } => IrInst::Push {
+            width: *width,
+            value: f(value),
+        },
+        IrInst::CallFunction {
+            name,
+            abi,
+            width,
+            dst,
+        } => IrInst::CallFunction {
+            name: name.clone(),
+            abi: *abi,
+            width: *width,
+            dst: f(dst),
+        },
+        IrInst::CopSignature { dst } => IrInst::CopSignature {
+            dst: f(dst),
+        },
+        IrInst::CopRegister { register, dst } => IrInst::CopRegister {
+            register: *register,
+            dst: f(dst),
+        },
+        IrInst::Trap {
+            family,
+            call,
+            x,
+            y,
+            dst,
+        } => IrInst::Trap {
+            family: *family,
+            call: f(call),
+            x: f(x),
+            y: f(y),
+            dst: f(dst),
+        },
+        IrInst::ReturnValue(value) => {
+            IrInst::ReturnValue(f(value))
+        }
+        IrInst::LoadRegisters { args } => IrInst::LoadRegisters {
+            args: args
+                .iter()
+                .map(|(register, value)| (*register, f(value)))
+                .collect(),
+        },
+        IrInst::MoveCarry { dst } => IrInst::MoveCarry {
+            dst: f(dst),
+        },
+        other => other.clone(),
+    }
+    }
+
+    /// This instruction with every label it defines or branches to
+    /// replaced by `f` of it.
+    pub fn map_labels(&self, f: &mut dyn FnMut(&Label) -> Label) -> IrInst {
+        match self {
+            IrInst::Label(label) => IrInst::Label(f(label)),
+            IrInst::Branch { target } => IrInst::Branch { target: f(target) },
+            IrInst::BranchIfEqual { target } => IrInst::BranchIfEqual { target: f(target) },
+            IrInst::BranchIfNotEqual { target } => IrInst::BranchIfNotEqual { target: f(target) },
+            IrInst::BranchIfCarrySet { target } => IrInst::BranchIfCarrySet { target: f(target) },
+            IrInst::BranchIfCarryClear { target } => {
+                IrInst::BranchIfCarryClear { target: f(target) }
+            }
+            IrInst::BranchIfZero { value, target } => IrInst::BranchIfZero {
+                value: value.clone(),
+                target: f(target),
+            },
+            other => other.clone(),
+        }
+    }
+}
+
+impl Address {
+    /// This address with every value in it replaced by `f` of it.
+    pub fn map_values(&self, f: &mut dyn FnMut(&Value) -> Value) -> Address {
+    match self {
+        Address::ValueOffset { base, offset } => Address::ValueOffset {
+            base: f(base),
+            offset: *offset,
+        },
+        Address::NearPtr(value) => Address::NearPtr(f(value)),
+        Address::FarPtr(value) => Address::FarPtr(f(value)),
+        Address::PointerOffset {
+            pointer,
+            far,
+            offset,
+        } => Address::PointerOffset {
+            pointer: f(pointer),
+            far: *far,
+            offset: *offset,
+        },
+        Address::Indexed {
+            base,
+            index,
+            byte_offset,
+        } => Address::Indexed {
+            base: base.clone(),
+            index: f(index),
+            byte_offset: *byte_offset,
+        },
+        other => other.clone(),
+    }
+    }
+}

@@ -128,9 +128,11 @@ pub fn lower_module_with_storage_budget(
     module: &Module,
     direct_page_budget: u16,
 ) -> Result<(AsmModule, StorageAssignment), LowerError> {
+    let mut module = module.clone();
+    crate::inline::inline_small_routines(&mut module);
     lower_with_assignment(
-        module,
-        assign_storage_with_options(module, Some(direct_page_budget), STORAGE_OPTIONS),
+        &module,
+        assign_storage_with_options(&module, Some(direct_page_budget), STORAGE_OPTIONS),
     )
 }
 
@@ -1655,7 +1657,7 @@ mod tests {
             var q: u16
             var row: u8
             const BIT: [2]u8 = [1, 2]
-            function lda(): u8
+            export function lda(): u8
                 return BIT[1]
             end
             export procedure main()
