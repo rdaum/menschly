@@ -143,8 +143,17 @@ type DmaBlit = record(
     modulo: u16
 )
 
-var job: DmaJob
-var blit: DmaBlit
+# The jobs' fixed fields are set here, once; the routines below write the
+# rest (format, options and the end of them, sub-command and modulo stay).
+var job: DmaJob = (
+    DMA_F018B, DMA_SOURCE_MB, 0, DMA_DEST_MB, 0, DMA_DEST_SKIP, 1, DMA_NO_OPTION,
+    DMA_COPY, 0, 0, 0, 0, 0, 0, 0
+)
+var blit: DmaBlit = (
+    DMA_F018B, DMA_SOURCE_MB, 0, DMA_DEST_MB, 0, DMA_DEST_SKIP, 1,
+    DMA_TRANSPARENT_VALUE, 0, DMA_TRANSPARENCY_ON, DMA_NO_OPTION,
+    DMA_COPY, 0, 0, 0, 0, 0, 0, 0
+)
 var screen_base: u32
 var row_bytes: u16
 var sprite_table: u32
@@ -300,23 +309,8 @@ end
 
 # ---------------------------------------------------------------- DMA
 
-procedure dma_run(command: u8, source: u32, dest: u32, count: u16, skip: u8)
-    job.format = DMA_F018B
-    job.source_mb_option = DMA_SOURCE_MB
-    job.source_mb = u8(u16(source >> 16) >> 4)
-    job.dest_mb_option = DMA_DEST_MB
-    job.dest_mb = u8(u16(dest >> 16) >> 4)
-    job.skip_option = DMA_DEST_SKIP
-    job.skip = skip
-    job.end_of_options = 0
-    job.command = command
-    job.count = count
-    job.source = u16(source)
-    job.source_bank = u8(source >> 16) & $0f
-    job.dest = u16(dest)
-    job.dest_bank = u8(dest >> 16) & $0f
-    job.sub_command = 0
-    job.modulo = 0
+# Starts `job` (its fields set) or `blit`.
+procedure dma_go()
     dma_list_bank = 0
     dma_list_mb = 0
     dma_list_high = u8(addr(job) >> 8)
@@ -324,15 +318,41 @@ procedure dma_run(command: u8, source: u32, dest: u32, count: u16, skip: u8)
     return
 end
 
+procedure dma_go_blit()
+    dma_list_bank = 0
+    dma_list_mb = 0
+    dma_list_high = u8(addr(blit) >> 8)
+    dma_start_enhanced = u8(addr(blit))
+    return
+end
+
 # Sets `count` bytes from `dest` to `value` (a count of 0 means 64 KiB).
 export procedure dma_fill(dest: u32, value: u8, count: u16)
-    dma_run(DMA_FILL, u32(value), dest, count, 1)
+    job.command = DMA_FILL
+    job.skip = 1
+    job.count = count
+    job.source = u16(value)
+    job.source_bank = 0
+    job.source_mb = 0
+    job.dest = u16(dest)
+    job.dest_bank = u8(dest >> 16) & $0f
+    job.dest_mb = u8(dest >> 20)
+    dma_go()
     return
 end
 
 # Sets every `step`-th byte from `dest`, `count` times.
 export procedure dma_fill_step(dest: u32, value: u8, count: u16, step: u8)
-    dma_run(DMA_FILL, u32(value), dest, count, step)
+    job.command = DMA_FILL
+    job.skip = step
+    job.count = count
+    job.source = u16(value)
+    job.source_bank = 0
+    job.source_mb = 0
+    job.dest = u16(dest)
+    job.dest_bank = u8(dest >> 16) & $0f
+    job.dest_mb = u8(dest >> 20)
+    dma_go()
     return
 end
 
@@ -341,36 +361,31 @@ end
 # The whole of a column of a full-colour screen whose characters run down
 # the columns is 8 bytes apart, so one call draws a column of a sprite.
 export procedure dma_blit(source: u32, dest: u32, count: u16, step: u8)
-    blit.format = DMA_F018B
-    blit.source_mb_option = DMA_SOURCE_MB
-    blit.source_mb = u8(u16(source >> 16) >> 4)
-    blit.dest_mb_option = DMA_DEST_MB
-    blit.dest_mb = u8(u16(dest >> 16) >> 4)
-    blit.skip_option = DMA_DEST_SKIP
     blit.skip = step
-    blit.transparent_option = DMA_TRANSPARENT_VALUE
-    blit.transparent = 0
-    blit.transparency = DMA_TRANSPARENCY_ON
-    blit.end_of_options = DMA_NO_OPTION
-    blit.command = DMA_COPY
     blit.count = count
     blit.source = u16(source)
     blit.source_bank = u8(source >> 16) & $0f
+    blit.source_mb = u8(source >> 20)
     blit.dest = u16(dest)
     blit.dest_bank = u8(dest >> 16) & $0f
-    blit.sub_command = 0
-    blit.modulo = 0
-    dma_list_bank = 0
-    dma_list_mb = 0
-    dma_list_high = u8(addr(blit) >> 8)
-    dma_start_enhanced = u8(addr(blit))
+    blit.dest_mb = u8(dest >> 20)
+    dma_go_blit()
     return
 end
 
 # Copies `count` bytes from `source` to `dest` (ascending; the ranges must
 # not overlap with `dest` above `source`).
 export procedure dma_copy(source: u32, dest: u32, count: u16)
-    dma_run(DMA_COPY, source, dest, count, 1)
+    job.command = DMA_COPY
+    job.skip = 1
+    job.count = count
+    job.source = u16(source)
+    job.source_bank = u8(source >> 16) & $0f
+    job.source_mb = u8(source >> 20)
+    job.dest = u16(dest)
+    job.dest_bank = u8(dest >> 16) & $0f
+    job.dest_mb = u8(dest >> 20)
+    dma_go()
     return
 end
 
