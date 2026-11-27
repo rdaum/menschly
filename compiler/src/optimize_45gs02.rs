@@ -26,7 +26,7 @@
 //! User globals may be volatile I/O registers, so accesses to them are kept
 //! exactly as written. Routines containing inline assembly are not touched.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::lower_45gs02::{
     ACC_SYMBOL, ARG_SYMBOL, FARP_SYMBOL, FP_SYMBOL, LEAVE_ROUTINE, MATH_ROUTINES, PTR_SYMBOL,
@@ -126,6 +126,7 @@ pub fn optimize_routine_with(
         changed |=
             eliminate_redundant(&mut insts, z_zero_on_entry, flag_routines, returns, plain_memory);
         changed |= carry_increments(&mut insts, returns, plain_memory);
+        changed |= loop_counters_in_x(&mut insts, returns);
         if !changed && insts.len() == before {
             break;
         }
@@ -450,6 +451,144 @@ fn live_after(insts: &[Inst], returns: Returns) -> Vec<Locs> {
             return live_out;
         }
     }
+}
+
+// ---- loop counters in X -----------------------------------------------------
+
+/// Keeps a byte of the routine's own storage (a local or temporary) in X
+/// for a loop: when all its uses lie between its first store before the
+/// loop's label and the branch back (so it is dead after), nothing else
+/// there uses or changes X, there are no calls or inline assembly, nothing
+/// jumps in from outside, and it is only loaded, stored, cleared, stepped,
+/// or loaded into X for indexing. Its loads become TXA, its stores TAX, its
+/// steps INX/DEX, and its loads into X go; `txa / cmp #n` becomes
+/// `cpx #n` when A is not needed after. One byte a pass.
+fn loop_counters_in_x(insts: &mut Vec<Inst>, returns: Returns) -> bool {
+    if insts.iter().any(|inst| matches!(inst, Inst::Raw(_))) {
+        return false;
+    }
+    let live = live_after(insts, returns);
+    let labels = label_positions(insts);
+    // Each candidate byte's uses; names used wider, or through, are out.
+    let mut uses: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut out = HashSet::new();
+    for (i, inst) in insts.iter().enumerate() {
+        let Inst::Op(_, operand) = inst else { continue };
+        match operand {
+            Operand::Base(symbol) | Operand::Absolute(symbol) => {
+                let (name, offset) = split_offset(symbol);
+                if offset != Some(0) {
+                    out.insert(name.to_owned());
+                } else if is_temporary(name) {
+                    uses.entry(name.to_owned()).or_default().push(i);
+                }
+            }
+            Operand::IndirectY(pointer)
+            | Operand::IndirectZ(pointer)
+            | Operand::FlatZ(pointer)
+            | Operand::AbsoluteX(pointer) => {
+                out.insert(split_offset(pointer).0.to_owned());
+            }
+            _ => {}
+        }
+    }
+    for (back, inst) in insts.iter().enumerate() {
+        let Some(target) = branch_target(inst) else { continue };
+        let Some(&head) = labels.get(target) else { continue };
+        if head >= back {
+            continue;
+        }
+        for (name, at) in &uses {
+            if out.contains(name) {
+                continue;
+            }
+            let (first, last) = (at[0], at[at.len() - 1]);
+            if first > head || last > back || last < head {
+                continue;
+            }
+            if let Some(rewrites) = counter_rewrites(insts, &live, &labels, first, back, at) {
+                for (i, replacement) in rewrites.into_iter().rev() {
+                    match replacement {
+                        Some(inst) => insts[i] = inst,
+                        None => {
+                            insts.remove(i);
+                        }
+                    }
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The rewrites keeping the byte used at `at` in X over `first..=back`, or
+/// `None` when that is not safe.
+fn counter_rewrites(
+    insts: &[Inst],
+    live: &[Locs],
+    labels: &HashMap<String, usize>,
+    first: usize,
+    back: usize,
+    at: &[usize],
+) -> Option<Vec<(usize, Option<Inst>)>> {
+    // Nothing jumps into the stretch from outside it.
+    for (i, inst) in insts.iter().enumerate() {
+        if (first..=back).contains(&i) {
+            continue;
+        }
+        if let Some(target) = branch_target(inst) {
+            if labels.get(target).is_some_and(|&to| to > first && to <= back) {
+                return None;
+            }
+        }
+    }
+    let mut rewrites = Vec::new();
+    for i in first..=back {
+        let Inst::Op(op, operand) = &insts[i] else { continue };
+        let flags_dead = live[i] & NZ == 0;
+        if at.contains(&i) {
+            rewrites.push((
+                i,
+                match op {
+                    Op::Lda => Some(Inst::implied(Op::Txa)),
+                    Op::Sta if flags_dead => Some(Inst::implied(Op::Tax)),
+                    Op::Stz if flags_dead => Some(Inst::op(Op::Ldx, Operand::imm_byte(0))),
+                    Op::Inc => Some(Inst::implied(Op::Inx)),
+                    Op::Dec => Some(Inst::implied(Op::Dex)),
+                    Op::Ldx if flags_dead => None,
+                    _ => return None,
+                },
+            ));
+            continue;
+        }
+        if matches!(op, Op::Jsr) {
+            return None;
+        }
+        // Only indexing may read X, and nothing else may change it.
+        let effect = effect(&insts[i]);
+        if effect.defs & X != 0 || (effect.uses & X != 0 && !matches!(operand, Operand::AbsoluteX(_))) {
+            return None;
+        }
+    }
+    // `txa / cmp #n` with A dead after: `cpx #n`.
+    let mut compares = Vec::new();
+    for (k, (i, replacement)) in rewrites.iter().enumerate() {
+        if *replacement != Some(Inst::implied(Op::Txa)) {
+            continue;
+        }
+        if let Some(Inst::Op(Op::Cmp, immediate @ Operand::Immediate(_))) = insts.get(i + 1) {
+            if live[i + 1] & A == 0 {
+                compares.push((k, i + 1, immediate.clone()));
+            }
+        }
+    }
+    for (k, compare_at, immediate) in compares.into_iter().rev() {
+        rewrites[k].1 = Some(Inst::op(Op::Cpx, immediate));
+        rewrites.push((compare_at, None));
+    }
+    rewrites.sort_by_key(|(i, _)| *i);
+    Some(rewrites)
 }
 
 // ---- 32-bit runs -----------------------------------------------------------
@@ -1671,6 +1810,34 @@ mod tests {
 
     fn label(name: &str) -> Operand {
         Operand::Label(name.to_owned())
+    }
+
+    #[test]
+    fn loop_counters_live_in_x() {
+        let counter = Operand::Absolute("__static_f_i".to_owned());
+        let looped = |body: Vec<Inst>| {
+            let mut insts = vec![
+                op(Op::Stz, counter.clone()),
+                Inst::Label("top".to_owned()),
+                op(Op::Lda, counter.clone()),
+                op(Op::Cmp, imm("$0a")),
+                op(Op::Lbeq, label("done")),
+            ];
+            insts.extend(body);
+            insts.push(op(Op::Inc, counter.clone()));
+            insts.push(op(Op::Lbra, label("top")));
+            insts.push(Inst::Label("done".to_owned()));
+            insts.push(Inst::implied(Op::Rts));
+            optimize_routine_with(insts, true, &HashSet::new(), false, Some(0), &HashSet::new())
+        };
+        let store = op(Op::Sta, Operand::Absolute("out".to_owned()));
+        let out = looped(vec![op(Op::Lda, imm("$01")), store.clone()]);
+        assert!(!out.iter().any(|inst| matches!(inst, Inst::Op(_, operand) if *operand == counter)), "{out:?}");
+        assert!(out.contains(&Inst::implied(Op::Inx)), "{out:?}");
+        assert!(out.contains(&op(Op::Cpx, imm("$0a"))), "{out:?}");
+        // A call in the loop may change X: the counter stays in memory.
+        let out = looped(vec![op(Op::Jsr, label("f"))]);
+        assert!(out.contains(&op(Op::Inc, counter.clone())), "{out:?}");
     }
 
     #[test]
